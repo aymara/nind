@@ -113,11 +113,10 @@ bool NindLocalAmose::getDocTerms(const unsigned int docId,
         string lemma;
         AmoseTypes type;
         string namedEntity;
-        cerr<<"NindLocalAmose::getDocTerms itterm='"<<*itterm<<"'"<<endl;
         const bool trouvej = m_nindLexicon.getWord((*itterm), lemma, type, namedEntity);
         if (!trouvej)
         {
-          cerr<<"NindLocalAmose::getDocTerms Unknown term in lexicon: NE='"<<namedEntity<<"' lemma='"<<lemma<<"'"<<endl;
+          //cerr<<"NindLocalAmose::getDocTerms Unknown term in lexicon: NE='"<<namedEntity<<"' lemma='"<<lemma<<"'"<<endl;
           //throw IncompatibleFileException("Unknown term in lexicon: NE='"<<namedEntity<<"' lemma='"+lemma+"'");
           continue;
         }

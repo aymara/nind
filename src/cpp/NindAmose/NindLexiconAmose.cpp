@@ -99,11 +99,6 @@ bool NindLexiconAmose::getWord(const unsigned int wordId,
     if (components.size() == 0) throw NindLexiconException("empty word");
     if (components.size() == 1) type = SIMPLE_TERM;
     else type = MULTI_TERM;
-    cerr << "NindLexiconAmose::getWord("<<wordId<< ") components: ";
-    for(auto c : components){
-        cerr << c << " ";
-    }
-    cerr << endl;
     list<string>::const_iterator itcomp = components.begin();
     string component = (*itcomp++);
     namedEntity = "";
