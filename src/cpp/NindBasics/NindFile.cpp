@@ -2,26 +2,26 @@
 // C++ Implementation: NindFile
 //
 // Description: Les acces basiques a un fichier binaire sequentiel avec possibilites de bufferisation
-// Le fichier est ecrit en little-endian 
+// Le fichier est ecrit en little-endian
 //
 // Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 //
 // Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 // This file is part of NIND (as "nouvelle indexation").
-// NIND is free software: you can redistribute it and/or modify it under the terms of the 
-// GNU Less General Public License (LGPL) as published by the Free Software Foundation, 
+// NIND is free software: you can redistribute it and/or modify it under the terms of the
+// GNU Less General Public License (LGPL) as published by the Free Software Foundation,
 // (see <http://www.gnu.org/licenses/>), either version 3 of the License, or any later version.
-// NIND is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without 
+// NIND is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
 // even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Less General Public License for more details.
 ////////////////////////////////////////////////////////////
 #include "NindFile.h"
 #include <string.h>
-//#include <iostream>
+#include <iostream>
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
-// <fichier>               ::= { <Entier1> | <Entier2> | <Entier3> | <Entier4> | <Entier5> | 
+// <fichier>               ::= { <Entier1> | <Entier2> | <Entier3> | <Entier4> | <Entier5> |
 //                              <EntierULat> | <EntierULat> |
 //                              <MotUtf8> | <Utf8> | <Octet> }
 // <MotUtf8>               ::= <longueur> <Utf8>
@@ -49,12 +49,13 @@ NindFile::NindFile(const string &fileName):
     m_rbufferEnd(0),
     m_rPtr(0),
     m_fileSize(0),
-    m_isLittleEndian(false)  
+    m_isLittleEndian(false)
 {
     //teste si la plateforme est little endian ou big endian
     const unsigned int testLittleEndian = 13;
     m_isLittleEndian = (testLittleEndian == (*(unsigned char*)&testLittleEndian)) ; // vrai si little endian (inutile)
-    //cout<<"m_isLittleEndian="<<m_isLittleEndian<<endl;
+    if(!m_isLittleEndian)
+      cerr<<"Warning : System is not Little-Endian."<<endl;
 }
 ////////////////////////////////////////////////////////////
 NindFile::~NindFile()
@@ -155,8 +156,8 @@ signed int NindFile::readSIntLat()
     readBytes(bytes+4, 1);
     if (bytes[0]&0x08) throw FormatFileException(m_fileName);
     //de -2^31 a -2^27-1 et de 2^27 a 2^31-1 : de -2147483648 a -134217729 et de 134217728 a 2147483647
-    return ((bytes[1]*256 + bytes[2])*256 + bytes[3])*256 + bytes[4];   
-}       
+    return ((bytes[1]*256 + bytes[2])*256 + bytes[3])*256 + bytes[4];
+}
 ////////////////////////////////////////////////////////////
 //brief Read a string from the file
 //return read string */
@@ -169,7 +170,7 @@ string NindFile::readString()
     unsigned char bytes[256];
     readBytes(bytes, (unsigned int)len);
     return string((char*)bytes, len);
-}   
+}
 ////////////////////////////////////////////////////////////
 //brief Read bytes from the file into an internal buffer
 //param bytesNb size of internal buffer to receive read datas */
@@ -339,7 +340,7 @@ string NindFile::getString()
     m_rPtr += length;
     if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (T) " + m_fileName);
     return string((char*)(m_rPtr-length), length);
-}   
+}
 ////////////////////////////////////////////////////////////
 //brief Get a string from internal buffer
 //param length number of bytes to read (bytes, not chars)
@@ -350,7 +351,7 @@ string NindFile::getStringAsBytes(const unsigned char length)
     m_rPtr += length;
     if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (U) " + m_fileName);
     return string((char*)(m_rPtr-length), length);
-}   
+}
 ////////////////////////////////////////////////////////////
 //brief Create an internal buffer for writing
 //param bytesNb size of buffer */
@@ -457,9 +458,9 @@ void NindFile::putUIntLat(const unsigned int int4)
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (H) " + m_fileName);
     //0-2^7-1 : 0-127
-    if (int4 < 0x80) { 
-        m_wPtr[-1] = int4; 
-        return; 
+    if (int4 < 0x80) {
+        m_wPtr[-1] = int4;
+        return;
     }
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (I) " + m_fileName);
@@ -467,7 +468,7 @@ void NindFile::putUIntLat(const unsigned int int4)
     if (int4 < 0x4000) {
         m_wPtr[-1] = (int4)&0xFF;
         m_wPtr[-2] = (int4>>8)|0x80;
-        return; 
+        return;
     }
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (J) " + m_fileName);
@@ -476,7 +477,7 @@ void NindFile::putUIntLat(const unsigned int int4)
         m_wPtr[-1] = (int4)&0xFF;
         m_wPtr[-2] = (int4>>8)&0xFF;
         m_wPtr[-3] = (int4>>16)|0xC0;
-        return; 
+        return;
     }
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (K) " + m_fileName);
@@ -486,7 +487,7 @@ void NindFile::putUIntLat(const unsigned int int4)
         m_wPtr[-2] = (int4>>8)&0xFF;
         m_wPtr[-3] = (int4>>16)&0xFF;
         m_wPtr[-4] = (int4>>24)|0xE0;
-        return; 
+        return;
     }
      m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (L) " + m_fileName);
@@ -506,9 +507,9 @@ void NindFile::putSIntLat(const signed int int4)
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (M) " + m_fileName);
     //de -2^6 a 2^6-1 : de -64 a 63
-    if (int4 >= -0x40 && int4 < 0x40) { 
-        m_wPtr[-1] = int4&0x7F; 
-        return; 
+    if (int4 >= -0x40 && int4 < 0x40) {
+        m_wPtr[-1] = int4&0x7F;
+        return;
     }
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (N) " + m_fileName);
@@ -516,7 +517,7 @@ void NindFile::putSIntLat(const signed int int4)
     if (int4 >= -0x2000 && int4 < 0x2000) {
         m_wPtr[-1] = (int4)&0xFF;
         m_wPtr[-2] = ((int4>>8)&0x3F)|0x80;
-        return; 
+        return;
     }
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (O) " + m_fileName);
@@ -525,7 +526,7 @@ void NindFile::putSIntLat(const signed int int4)
         m_wPtr[-1] = (int4)&0xFF;
         m_wPtr[-2] = (int4>>8)&0xFF;
         m_wPtr[-3] = ((int4>>16)&0x1F)|0xC0;
-        return; 
+        return;
     }
     m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (P) " + m_fileName);
@@ -535,7 +536,7 @@ void NindFile::putSIntLat(const signed int int4)
         m_wPtr[-2] = (int4>>8)&0xFF;
         m_wPtr[-3] = (int4>>16)&0xFF;
         m_wPtr[-4] = ((int4>>24)&0x0F)|0xE0;
-        return; 
+        return;
     }
      m_wPtr += 1;
     if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (Q) " + m_fileName);
@@ -584,7 +585,7 @@ void NindFile::writeBuffer(const unsigned int position,
     fflush(m_file);
     if (writeSize != size) throw WriteFileException(m_fileName);
     //remet le pointeur d'ejcriture en teste du buffer pour une hypothejtique rejutilisation
-    m_wPtr = m_wbuffer;         
+    m_wPtr = m_wbuffer;
     //memorise la taille du fichier
     const long int current = ftell(m_file);
     if (current > m_fileSize) m_fileSize = current;
