@@ -11,10 +11,10 @@
 //
 // Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 // This file is part of NIND (as "nouvelle indexation").
-// NIND is free software: you can redistribute it and/or modify it under the terms of the 
-// GNU Less General Public License (LGPL) as published by the Free Software Foundation, 
+// NIND is free software: you can redistribute it and/or modify it under the terms of the
+// GNU Less General Public License (LGPL) as published by the Free Software Foundation,
 // (see <http://www.gnu.org/licenses/>), either version 3 of the License, or any later version.
-// NIND is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without 
+// NIND is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
 // even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU Less General Public License for more details.
 ////////////////////////////////////////////////////////////
@@ -36,9 +36,9 @@ public:
 
     /**\brief Creates NindTermIndex with a specified name associated with.
     *\param fileNameExtensionLess absolute path file name without extension
-    *\param isTermIndexWriter true if termIndex writer, false if termIndex reader  
+    *\param isTermIndexWriter true if termIndex writer, false if termIndex reader
     *\param specificsNumber number of specific unsigned int
-    *\param lexiconIdentification unique identification of lexicon 
+    *\param lexiconIdentification unique identification of lexicon
     *\param indirectionBlocSize number of entries in a single indirection block */
     NindTermIndex(const std::string &fileNameExtensionLess,
                   const bool isTermIndexWriter,
@@ -47,7 +47,7 @@ public:
                   const unsigned int indirectionBlocSize = 0);
 
     virtual ~NindTermIndex();
-    
+
     /**\brief Structures to hold datas of a term */
     struct Document {
         unsigned int ident;
@@ -58,14 +58,14 @@ public:
         bool operator< (const Document &doc2) { return (this->ident < doc2.ident); }
     };
     struct TermCG {
-        unsigned char cg;
+        unsigned char cg;                       // categorie gramaticale
         unsigned int frequency;
         std::list<Document> documents;          //identifiants ordonnes par ordre ascendant
         TermCG(): cg(0), frequency(0), documents() {}
         TermCG(const unsigned char cat, const unsigned int freq): cg(cat), frequency(freq), documents() {}
         ~TermCG() {}
     };
-    
+
     /**\brief Read a full term definition as a list of structures
     *\param ident ident of term
     *\param termDef structure to receive all datas of the specified term
@@ -79,17 +79,17 @@ public:
 
     /**\brief Write a full term definition as a list of structures
     *\param ident ident of term
-    *\param termDef structure containing all datas of the specified term 
+    *\param termDef structure containing all datas of the specified term
     *\param specifics list of specific unsigned int
     *\param fileIdentification unique identification of lexicon */
     void setTermDef(const unsigned int ident,
                     const std::list<struct TermCG> &termDef,
                     const Identification &fileIdentification,
                     const std::list<unsigned int> &specifics);
-        
+
 private:
     unsigned int m_specificsNumber;
-    
+
     //brief write specifics footer and identification into write buffer
     //param specifics list of specific unsigned int
     //param fileIdentification unique identification of file */

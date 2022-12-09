@@ -169,6 +169,19 @@ bool NindTermAmose::getDocList(const unsigned int termId,
     return true;
 }
 ////////////////////////////////////////////////////////////
+//brief Number of occurrences in index of a given term
+//param termId: identifier of the term
+//return number of occurrences in index for the given term
+unsigned int NindTermAmose::getTermFreq(const unsigned int termId)
+{
+    list<struct TermCG> termDef;
+    const bool trouvej = getTermDef(termId, termDef);
+    //si terme inconnu, retourne 0
+    if (!trouvej) return 0;
+    const TermCG &termCG = termDef.front();
+    return termCG.frequency;
+}
+////////////////////////////////////////////////////////////
 //brief Number of documents in index that contain the given term
 //param termId: identifier of the term
 //return number of documents in index that contain the given term
