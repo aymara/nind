@@ -45,8 +45,7 @@ public:
     *\param fileName absolute path file name
     *\param isLexiconWriter true if lexicon writer, false if lexicon reader  */
     NindLexicon(const std::string &fileName,
-                const bool isLexiconWriter)
-        throw(NindLexiconException);
+                const bool isLexiconWriter);
 
     virtual ~NindLexicon();
 
@@ -55,16 +54,14 @@ public:
      * in both cases, word ident is returned.
      * \param components list of components of a word (1 component = simple word, more components = compound word)
      * \return ident of word */
-    unsigned int addWord(const std::list<std::string> &components)
-        throw(NindLexiconException);
+    unsigned int addWord(const std::list<std::string> &components);
 
     /**\brief get ident of the specified word
      * if word exists in lexicon, its ident is returned
      * else, return 0 (0 is not a valid ident !)
      * \param components list of components of a word (1 component = simple word, more components = compound word)
      * \return ident of word */
-    unsigned int getId(const std::list<std::string> &components)
-        throw(NindLexiconException);
+    unsigned int getId(const std::list<std::string> &components);
 
     /**\brief get identification of lexicon
      * \param wordsNb where number of words contained in lexicon is returned
@@ -93,8 +90,7 @@ public:
 
 private:
     //met a jour le lexique lecteur avec le fichier lexique
-    void updateFromFile()
-        throw(EofException, ReadFileException, InvalidFileException, OutReadBufferException);
+    void updateFromFile();
     
 #ifdef _MSC_VER
     struct HashString : public stdext::hash_compare<std::string> {

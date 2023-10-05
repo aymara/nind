@@ -34,8 +34,7 @@ using namespace std;
 //param fileName absolute path file name
 //param isLexiconWriter true if lexicon writer, false if lexicon reader  */
 NindLexicon::NindLexicon(const std::string &fileName,
-                         const bool isLexiconWriter)
-    throw(NindLexiconException) :
+                         const bool isLexiconWriter) :
     m_isLexiconWriter(isLexiconWriter),
     m_fileName(fileName),
     m_currentId(0),
@@ -70,7 +69,6 @@ NindLexicon::~NindLexicon()
 //param components list of components of a word (1 component = simple word, more components = compound word)
 //return ident of word */
 unsigned int NindLexicon::addWord(const list<string> &components)
-    throw(NindLexiconException)
 {
     try {
         if (!m_isLexiconWriter) throw BadUseException("lexicon is not writable");
@@ -137,8 +135,7 @@ unsigned int NindLexicon::addWord(const list<string> &components)
 //else, return 0 (0 is not a valid ident !)
 //param components list of components of a word (1 component = simple word, more components = compound word)
 //return ident of word */
-unsigned int NindLexicon::getId(const list<string> &components) 
-    throw(NindLexiconException)
+unsigned int NindLexicon::getId(const list<string> &components)
 {
     try {
         //si lecteur, verifie s'il y a eu maj
@@ -260,7 +257,6 @@ void NindLexicon::dump(std::ostream &out)
 ////////////////////////////////////////////////////////////
 //met a jour le lexique lecteur avec le fichier lexique
 void NindLexicon::updateFromFile()
-    throw(EofException, ReadFileException, InvalidFileException, OutReadBufferException)
 {
     //fait un clear du buffer du fichier, sinon, ca ne bougera jamais
     m_lexiconFile.clearBuffer();
