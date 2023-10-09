@@ -32,28 +32,15 @@ jobs:
           haskell: true
           large-packages: false
           swap-storage: true
-
       - name: Build image
         run: docker build -f ./Dockerfile-debian11 -t aymara/nind-debian11:build .
-        
       - name: Extract package and version number from docker iamge
         id: extract
         shell: bash
         run: |
-             dockerImage="aymara/nind-debian11:build" 
-             id=$(docker run -d "$dockerImage" sleep infinity)
-             echo -n "export fullname=/usr/share/apps/nind/packages/" > ./envFile
-             docker exec $id ls /usr/share/apps/nind/packages/ >> ./envFile
-             echo "export filename=\$(basename -- \$fullname)" >> ./envFile
-             echo "export trimmed=\$(basename \$filename .deb)" >> ./envFile
-             echo "tmp=\${trimmed#*-}" >> ./envFile
-             echo "export version=\${tmp%-*}" >> ./envFile
-             echo "filename=$(. envFile && echo $filename)" >> $GITHUB_OUTPUT
-             echo "version=$(. envFile && echo $version)"  >> $GITHUB_OUTPUT
-             . envFile && docker cp $id:$fullname - > ./$filename
-             docker stop $id
-             docker rm -v $id
-        
+             dockerImage="aymara/nind-debian11:build"
+             packageDir=/usr/share/apps/nind/packages/
+             cicd/extract_package.sh $dockerImage $packageDir        
       - name: Create release
         uses: ncipollo/release-action@v1.13.0
         id: create_release
@@ -79,7 +66,6 @@ jobs:
   ubuntu22_04_qhttpserver:
     name: "Build the package for Ubuntu 22.04"
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -96,28 +82,15 @@ jobs:
           haskell: true
           large-packages: false
           swap-storage: true
-
       - name: Build image
         run: docker build -f ./Dockerfile-ubuntu22.04 -t aymara/nind-ubuntu22.04:build .
-        
       - name: Extract package and version number from docker iamge
         id: extract
         shell: bash
         run: |
              dockerImage="aymara/nind-ubuntu22.04:build" 
-             id=$(docker run -d "$dockerImage" sleep infinity)
-             echo -n "export fullname=/usr/share/apps/nind/packages/" > ./envFile
-             docker exec $id ls /usr/share/apps/nind/packages/ >> ./envFile
-             echo "export filename=\$(basename -- \$fullname)" >> ./envFile
-             echo "export trimmed=\$(basename \$filename .deb)" >> ./envFile
-             echo "tmp=\${trimmed#*-}" >> ./envFile
-             echo "export version=\${tmp%-*}" >> ./envFile
-             echo "filename=$(. envFile && echo $filename)" >> $GITHUB_OUTPUT
-             echo "version=$(. envFile && echo $version)"  >> $GITHUB_OUTPUT
-             . envFile && docker cp $id:$fullname - > ./$filename
-             docker stop $id
-             docker rm -v $id
-        
+             packageDir=/usr/share/apps/nind/packages/
+             cicd/extract_package.sh $dockerImage $packageDir
       - name: Create release
         uses: ncipollo/release-action@v1.13.0
         id: create_release
