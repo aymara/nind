@@ -53,7 +53,7 @@ jobs:
              docker rm -v $id
         
       - name: Create release
-        uses: actions/create-release@v1
+        uses: ncipollo/release-action@v1.13.0
         id: create_release
         with:
           draft: false
@@ -117,7 +117,7 @@ jobs:
              docker rm -v $id
         
       - name: Create release
-        uses: actions/create-release@v1
+        uses: ncipollo/release-action@v1.13.0
         id: create_release
         with:
           draft: false
