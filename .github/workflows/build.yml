@@ -40,7 +40,8 @@ jobs:
         run: |
              dockerImage="aymara/nind-debian11:build"
              packageDir=/usr/share/apps/nind/packages/
-             cicd/extract_package.sh $dockerImage $packageDir        
+             cicd/extract_package.sh $dockerImage $packageDir $GITHUB_OUTPUT
+             ls ./*.deb
       - name: Create release
         uses: ncipollo/release-action@v1.13.0
         id: create_release
@@ -90,7 +91,7 @@ jobs:
         run: |
              dockerImage="aymara/nind-ubuntu22.04:build" 
              packageDir=/usr/share/apps/nind/packages/
-             cicd/extract_package.sh $dockerImage $packageDir
+             cicd/extract_package.sh $dockerImage $packageDir $GITHUB_OUTPUT
       - name: Create release
         uses: ncipollo/release-action@v1.13.0
         id: create_release
