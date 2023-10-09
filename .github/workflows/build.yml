@@ -1,0 +1,138 @@
+on:
+  push:
+    branches:
+    - master
+
+env:
+  # Use docker.io for Docker Hub if empty
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+
+  debian11_qhttpserver:
+    name: "Build the package for Debian 11"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.2.0
+        with:
+          # this might remove tools that are actually needed,
+          # if set to "true" but frees about 6 GB
+          tool-cache: false
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: true
+
+      - name: Build image
+        run: docker build -f ./Dockerfile-debian11 -t aymara/nind-debian11:build .
+        
+      - name: Extract package and version number from docker iamge
+        id: extract
+        shell: bash
+        run: |
+             dockerImage="aymara/nind-debian11:build" 
+             id=$(docker run -d "$dockerImage" sleep infinity)
+             echo -n "export fullname=/usr/share/apps/nind/packages/" > ./envFile
+             docker exec $id ls /usr/share/apps/nind/packages/ >> ./envFile
+             echo "export filename=\$(basename -- \$fullname)" >> ./envFile
+             echo "export trimmed=\$(basename \$filename .deb)" >> ./envFile
+             echo "tmp=\${trimmed#*-}" >> ./envFile
+             echo "export version=\${tmp%-*}" >> ./envFile
+             echo "filename=$(. envFile && echo $filename)" >> $GITHUB_OUTPUT
+             echo "version=$(. envFile && echo $version)"  >> $GITHUB_OUTPUT
+             . envFile && docker cp $id:$fullname - > ./$filename
+             docker stop $id
+             docker rm -v $id
+        
+      - name: Create release
+        uses: actions/create-release@v1
+        id: create_release
+        with:
+          draft: false
+          prerelease: false
+          release_name: ${{ steps.extract.outputs.verion }}
+          tag_name: ${{ steps.extract.outputs.version }}
+          allowUpdates: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Upload package
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./${{ steps.extract.outputs.filename }}
+          asset_name: ${{ steps.extract.outputs.filename }}
+          asset_content_type: application/vnd.debian.binary-package
+
+
+  ubuntu22_04_qhttpserver:
+    name: "Build the package for Ubuntu 22.04"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.2.0
+        with:
+          # this might remove tools that are actually needed,
+          # if set to "true" but frees about 6 GB
+          tool-cache: false
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: true
+
+      - name: Build image
+        run: docker build -f ./Dockerfile-ubuntu22.04 -t aymara/nind-ubuntu22.04:build .
+        
+      - name: Extract package and version number from docker iamge
+        id: extract
+        shell: bash
+        run: |
+             dockerImage="aymara/nind-ubuntu22.04:build" 
+             id=$(docker run -d "$dockerImage" sleep infinity)
+             echo -n "export fullname=/usr/share/apps/nind/packages/" > ./envFile
+             docker exec $id ls /usr/share/apps/nind/packages/ >> ./envFile
+             echo "export filename=\$(basename -- \$fullname)" >> ./envFile
+             echo "export trimmed=\$(basename \$filename .deb)" >> ./envFile
+             echo "tmp=\${trimmed#*-}" >> ./envFile
+             echo "export version=\${tmp%-*}" >> ./envFile
+             echo "filename=$(. envFile && echo $filename)" >> $GITHUB_OUTPUT
+             echo "version=$(. envFile && echo $version)"  >> $GITHUB_OUTPUT
+             . envFile && docker cp $id:$fullname - > ./$filename
+             docker stop $id
+             docker rm -v $id
+        
+      - name: Create release
+        uses: actions/create-release@v1
+        id: create_release
+        with:
+          draft: false
+          prerelease: false
+          release_name: ${{ steps.extract.outputs.verion }}
+          tag_name: ${{ steps.extract.outputs.version }}
+          allowUpdates: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Upload package
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./${{ steps.extract.outputs.filename }}
+          asset_name: ${{ steps.extract.outputs.filename }}
+          asset_content_type: application/vnd.debian.binary-package
