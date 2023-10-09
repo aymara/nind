@@ -60,8 +60,8 @@ jobs:
         with:
           draft: false
           prerelease: false
-          release_name: ${{ steps.extract.outputs.verion }}
-          tag_name: ${{ steps.extract.outputs.version }}
+          name: ${{ steps.extract.outputs.verion }}
+          tag: ${{ steps.extract.outputs.version }}
           allowUpdates: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -124,8 +124,8 @@ jobs:
         with:
           draft: false
           prerelease: false
-          release_name: ${{ steps.extract.outputs.verion }}
-          tag_name: ${{ steps.extract.outputs.version }}
+          name: ${{ steps.extract.outputs.verion }}
+          tag: ${{ steps.extract.outputs.version }}
           allowUpdates: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
