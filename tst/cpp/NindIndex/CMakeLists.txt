@@ -11,7 +11,7 @@ add_library(NindIndex_litDumpS2 SHARED ${NindIndex_litDumpS2_LIB_SRCS})
 
 target_link_libraries(NindIndex_litDumpS2)
 
-set_target_properties(NindIndex_litDumpS2 PROPERTIES VERSION 1.1.0 SOVERSION 1)
+set_target_properties(NindIndex_litDumpS2 PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSION ${NIND_LIB_SOVERSION})
 install(TARGETS NindIndex_litDumpS2 DESTINATION lib)
 
 ########### next target ###############
@@ -26,7 +26,7 @@ add_library(NindIndexTest SHARED ${NindIndexTest_LIB_SRCS})
 
 target_link_libraries(NindIndexTest)
 
-set_target_properties(NindIndexTest PROPERTIES VERSION 1.1.0 SOVERSION 1)
+set_target_properties(NindIndexTest PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSION ${NIND_LIB_SOVERSION})
 install(TARGETS NindIndexTest DESTINATION lib)
 
 ########### next target ###############
@@ -39,7 +39,7 @@ add_library(NindIndex_indexe SHARED ${NindIndex_indexe_LIB_SRCS})
 
 target_link_libraries(NindIndex_indexe NindBasics NindRetrolexicon NindLexicon NindIndex)
 
-set_target_properties(NindIndex_indexe PROPERTIES VERSION 1.1.0 SOVERSION 1)
+set_target_properties(NindIndex_indexe PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSION ${NIND_LIB_SOVERSION})
 install(TARGETS NindIndex_indexe DESTINATION lib)
 
 ########### next target ###############
