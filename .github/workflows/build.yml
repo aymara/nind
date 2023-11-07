@@ -32,6 +32,13 @@ jobs:
           haskell: true
           large-packages: false
           swap-storage: true
+      # Install the cosign tool except on PR
+      # https://github.com/sigstore/cosign-installer
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@main
+        with:
+          cosign-release: 'v1.4.0'
       - name: Build image
         run: docker build -f ./Dockerfile-debian11 -t aymara/nind-debian11:build .
       - name: Extract package and version number from docker iamge
@@ -83,6 +90,13 @@ jobs:
           haskell: true
           large-packages: false
           swap-storage: true
+      # Install the cosign tool except on PR
+      # https://github.com/sigstore/cosign-installer
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@main
+        with:
+          cosign-release: 'v1.4.0'
       - name: Build image
         run: docker build -f ./Dockerfile-ubuntu22.04 -t aymara/nind-ubuntu22.04:build .
       - name: Extract package and version number from docker iamge
