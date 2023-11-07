@@ -12,7 +12,7 @@ env:
 
 jobs:
 
-  debian11_qhttpserver:
+  debian11_nind:
     name: "Build the package for Debian 11"
     runs-on: ubuntu-latest
 
@@ -64,7 +64,7 @@ jobs:
           asset_content_type: application/vnd.debian.binary-package
 
 
-  ubuntu22_04_qhttpserver:
+  ubuntu22_04_nind:
     name: "Build the package for Ubuntu 22.04"
     runs-on: ubuntu-latest
     steps:
