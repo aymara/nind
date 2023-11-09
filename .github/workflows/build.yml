@@ -11,7 +11,8 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-
+  
+  #========================================================================
   debian11_nind:
     name: "Build the package for Debian 11"
     runs-on: ubuntu-latest
@@ -61,16 +62,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Upload package
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        uses: softprops/action-gh-release@v1
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./${{ steps.extract.outputs.filename }}
-          asset_name: ${{ steps.extract.outputs.filename }}
-          asset_content_type: application/vnd.debian.binary-package
+          files: |
+            ./${{ steps.extract.outputs.filename }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-
+  #========================================================================
   ubuntu22_04_nind:
     name: "Build the package for Ubuntu 22.04"
     runs-on: ubuntu-latest
