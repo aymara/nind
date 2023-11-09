@@ -113,7 +113,7 @@ endif ()
 
 ########### setting project verion number ###############
 
-set(NIND_VERSION "1.2.1")
+set(NIND_VERSION "1.2.2")
 
 string(REGEX REPLACE "^([0-9]+)\\.[0-9]+\\.[0-9]+$" "\\1" NIND_VERSION_MAJOR "${NIND_VERSION}")
 string(REGEX REPLACE "^[0-9]+\\.([0-9]+)\\.[0-9]+$" "\\1" NIND_VERSION_MINOR "${NIND_VERSION}")
@@ -121,7 +121,7 @@ string(REGEX REPLACE "^[0-9]+\\.[0-9]+\\.([0-9]+)$" "\\1" NIND_VERSION_PATCH "${
 
 set(NIND_LIB_VERSION "${NIND_VERSION}")
 set(NIND_LIB_SOVERSION "${NIND_VERSION_MAJOR}.${NIND_VERSION_MINOR}")
-message(STATUS "Compile Nind version  ${NIND_VERSION}")
+message(STATUS "Compile Nind version ${NIND_VERSION}")
 
 configure_file(NindConfig-version-src.cmake NindConfig-version.cmake @ONLY)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/NindConfig-version.cmake DESTINATION share/apps/nind/cmake/Modules)
