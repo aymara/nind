@@ -48,11 +48,8 @@ jobs:
         shell: bash
         run: |
           tagName=${{ steps.extract.outputs.version }}-nightly
-          tagExists=$( gh release list | grep -c "${tagName}" )
-          if [ "${tagExists}" != "1" ]; then
-            gh release create --prerelease --generate-notes ${tagName}
-          fi
-          gh release upload --clobber ./${{ steps.extract.outputs.filename }}
+          gh release create --prerelease ${tagName} || /bin/true
+          gh release upload ${tagName} --clobber ./${{ steps.extract.outputs.filename }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload release package
@@ -99,11 +96,8 @@ jobs:
         shell: bash
         run: |
           tagName=${{ steps.extract.outputs.version }}-nightly
-          tagExists=$( gh release list | grep -c "${tagName}" )
-          if [ "${tagExists}" != "1" ]; then
-            gh release create --prerelease --generate-notes ${tagName}
-          fi
-          gh release upload --clobber ./${{ steps.extract.outputs.filename }}
+          gh release create --prerelease ${tagName} || /bin/true
+          gh release upload ${tagName} --clobber ./${{ steps.extract.outputs.filename }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload release package
