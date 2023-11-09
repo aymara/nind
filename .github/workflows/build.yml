@@ -33,13 +33,6 @@ jobs:
           haskell: true
           large-packages: false
           swap-storage: true
-      # Install the cosign tool except on PR
-      # https://github.com/sigstore/cosign-installer
-      - name: Install cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@main
-        with:
-          cosign-release: 'v1.4.0'
       - name: Build image
         run: docker build -f ./Dockerfile-debian11 -t aymara/nind-debian11:build .
       - name: Extract package and version number from docker image
@@ -50,17 +43,6 @@ jobs:
              packageDir=/usr/share/apps/nind/packages/
              cicd/extract_package.sh $dockerImage $packageDir $GITHUB_OUTPUT
              ls ./*.deb
-      - name: Create release
-        uses: ncipollo/release-action@v1.13.0
-        id: create_release
-        with:
-          draft: false
-          prerelease: false
-          name: ${{ steps.extract.outputs.verion }}
-          tag: ${{ steps.extract.outputs.version }}
-          allowUpdates: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
       - name: Upload nightly build package
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         shell: bash
@@ -98,13 +80,6 @@ jobs:
           haskell: true
           large-packages: false
           swap-storage: true
-      # Install the cosign tool except on PR
-      # https://github.com/sigstore/cosign-installer
-      - name: Install cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@main
-        with:
-          cosign-release: 'v1.4.0'
       - name: Build image
         run: docker build -f ./Dockerfile-ubuntu22.04 -t aymara/nind-ubuntu22.04:build .
       - name: Extract package and version number from docker iamge
@@ -114,23 +89,19 @@ jobs:
              dockerImage="aymara/nind-ubuntu22.04:build" 
              packageDir=/usr/share/apps/nind/packages/
              cicd/extract_package.sh $dockerImage $packageDir $GITHUB_OUTPUT
-      - name: Create release
-        uses: ncipollo/release-action@v1.13.0
-        id: create_release
-        with:
-          draft: false
-          prerelease: false
-          name: ${{ steps.extract.outputs.verion }}
-          tag: ${{ steps.extract.outputs.version }}
-          allowUpdates: true
+      - name: Upload nightly build package
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        run: |
+          gh release create --prerelease --generate-notes nightly ./${{ steps.extract.outputs.filename }}
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Upload package
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload release package
+        uses: softprops/action-gh-release@v1
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./${{ steps.extract.outputs.filename }}
-          asset_name: ${{ steps.extract.outputs.filename }}
-          asset_content_type: application/vnd.debian.binary-package
+          name: ${{ steps.extract.outputs.version }}
+          files: |
+            ./${{ steps.extract.outputs.filename }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
