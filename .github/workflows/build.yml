@@ -42,7 +42,7 @@ jobs:
           cosign-release: 'v1.4.0'
       - name: Build image
         run: docker build -f ./Dockerfile-debian11 -t aymara/nind-debian11:build .
-      - name: Extract package and version number from docker iamge
+      - name: Extract package and version number from docker image
         id: extract
         shell: bash
         run: |
@@ -62,12 +62,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Upload nightly build package
-        uses: softprops/action-gh-release@v1
-        with:
-          prerelease: true
-          name: nightly
-          files: |
-            ./${{ steps.extract.outputs.filename }}
+        if: ! startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          gh release create --prerelease --generate-notes nightly ./${{ steps.extract.outputs.filename }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload release package
