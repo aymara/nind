@@ -53,8 +53,7 @@ using namespace std;
 //param fileName absolute path file name
 //param fromLexiconWriter true if from lexicon writer, false if from lexicon reader  */
 NindLexiconFile::NindLexiconFile(const std::string &fileName,
-                                 const bool fromLexiconWriter)
-    throw(NindLexiconException):
+                                 const bool fromLexiconWriter):
     m_fromLexiconWriter(fromLexiconWriter),
     m_fileName(fileName),
     m_file(fileName)
@@ -106,7 +105,6 @@ bool NindLexiconFile::readNextRecordAsWordDefinition(unsigned int &ident,
                                                      bool &isSimpleWord,
                                                      string &simpleWord,
                                                      pair<unsigned int, unsigned int> &compoundWord)
-    throw(EofException, ReadFileException, InvalidFileException)
 {
     //on peut lire au fil de l'eau car l'ecrivain ne peut modifier qu'a partir de l'identification
     //lit le premier byte qui est le flag
@@ -139,7 +137,6 @@ bool NindLexiconFile::readNextRecordAsWordDefinition(unsigned int &ident,
 //return true if next record is lexicon identification, false otherwise */
 bool NindLexiconFile::readNextRecordAsLexiconIdentification(unsigned int &maxIdent,
                                                             unsigned int &identification)
-    throw(EofException, ReadFileException, InvalidFileException, OutReadBufferException)
 {
     //lit le paquet d'identification en une seule fois pour garder la section critique
     m_file.readBuffer(IDENT_SIZE);
@@ -168,7 +165,6 @@ void NindLexiconFile::writeSimpleWordDefinition(const unsigned int ident,
                                                 const string &simpleWord,
                                                 const unsigned int maxIdent,
                                                 const unsigned int identification)
-    throw(WriteFileException, BadUseException, OutWriteBufferException)
 {
     if (!m_fromLexiconWriter) throw BadUseException("lexicon file is not writable");
     m_file.putInt1(SIMPLE_WORD_FLAG);
@@ -190,7 +186,6 @@ void NindLexiconFile::writeCompoundWordDefinition(const unsigned int ident,
                                                   const pair<unsigned int, unsigned int> compoundWord,
                                                   const unsigned int maxIdent,
                                                   const unsigned int identification)
-    throw(WriteFileException, BadUseException, OutWriteBufferException)
 {
     if (!m_fromLexiconWriter) throw BadUseException("lexicon file is not writable");
     m_file.putInt1(COMPOUND_WORD_FLAG);

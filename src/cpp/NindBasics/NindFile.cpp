@@ -268,7 +268,8 @@ unsigned long int NindFile::getInt5()
     //gros boutiste
     m_rPtr += 5;
     if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (F) " + m_fileName);
-    return (((m_rPtr[-5]*256 + m_rPtr[-4])*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1];
+    //la valeur peut depasser 32 bits : force le calcul en 64 bits des le premier terme
+    return ((((static_cast<unsigned long int>(m_rPtr[-5])*256 + m_rPtr[-4])*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1]);
 }
 ////////////////////////////////////////////////////////////
 //brief Get an unsigned latecon integer from internal buffer

@@ -1,0 +1,5 @@
+add_executable(NindRetrolexiconUnitTests
+  NindRetrolexiconTest.cpp
+)
+target_link_libraries(NindRetrolexiconUnitTests NindRetrolexicon NindBasics GTest::gtest GTest::gtest_main)
+gtest_discover_tests(NindRetrolexiconUnitTests)

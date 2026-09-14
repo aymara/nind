@@ -37,8 +37,7 @@ public:
     *\param fileName absolute path file name
     *\param fromLexiconWriter true if from lexicon writer, false if from lexicon reader  */
     NindLexiconFile(const std::string &fileName,
-                    const bool fromLexiconWriter)
-        throw(NindLexiconException);
+                    const bool fromLexiconWriter);
 
     virtual ~NindLexiconFile();
 
@@ -53,8 +52,7 @@ public:
     bool readNextRecordAsWordDefinition(unsigned int &ident,
                                         bool &isSimpleWord,
                                         std::string &simpleWord,
-                                        std::pair<unsigned int, unsigned int> &compoundWord)
-        throw(EofException, ReadFileException, InvalidFileException);
+                                        std::pair<unsigned int, unsigned int> &compoundWord);
     
     /**\brief Read next record of lexicon file as lexicon identification.
     * file pointer is left unchanged
@@ -62,8 +60,7 @@ public:
     *\param identification where unique identification will be returned  
     *\return true if next record is lexicon identification, false otherwise */
     bool readNextRecordAsLexiconIdentification(unsigned int &maxIdent,
-                                               unsigned int &identification)
-        throw(EofException, ReadFileException, InvalidFileException, OutReadBufferException);
+                                               unsigned int &identification);
 
     /**\brief Write simple word definition on lexicon file.
     *\param ident word ident
@@ -73,8 +70,7 @@ public:
     void writeSimpleWordDefinition(const unsigned int ident,
                                    const std::string &simpleWord,
                                    const unsigned int maxIdent,
-                                   const unsigned int identification)
-        throw(WriteFileException, BadUseException, OutWriteBufferException);
+                                   const unsigned int identification);
 
     /**\brief Write compound word definition on lexicon file.
     *\param ident word ident
@@ -84,8 +80,7 @@ public:
     void writeCompoundWordDefinition(const unsigned int ident,
                                      const std::pair<unsigned int, unsigned int> compoundWord,
                                      const unsigned int maxIdent,
-                                     const unsigned int identification)
-        throw(WriteFileException, BadUseException, OutWriteBufferException);
+                                     const unsigned int identification);
 
     /**\brief Perform a clear buffer for reading the true file and not its buffer */
     inline void clearBuffer();
