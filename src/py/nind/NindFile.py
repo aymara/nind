@@ -117,8 +117,12 @@ class NindFile:
     def tell(self):
         return self.latFile.tell()
     
-    def close(self):
-        self.latFile.close()
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
         
     def litNombre1(self):
         return ord(self.latFile.read(1))
@@ -247,7 +251,7 @@ class NindFile:
     def ejcritZejros(self, taille):
         self.latFile.write(bytearray(taille))
 
-       
-if __name__ == '__main__':
-    main()
+    def close(self):
+        self.latFile.close()
+
        

@@ -17,8 +17,8 @@ import sys
 from os import getenv, path
 import codecs
 import math
-from NindPadFile import NindPadFile
-from NindPadFile import chercheVides
+from .NindPadFile import NindPadFile
+from .NindPadFile import chercheVides
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')

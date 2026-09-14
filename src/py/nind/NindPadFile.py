@@ -19,7 +19,7 @@ import codecs
 import datetime
 import time
 import math
-from NindFile import NindFile
+from .NindFile import NindFile
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')

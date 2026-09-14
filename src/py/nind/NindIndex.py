@@ -16,9 +16,9 @@ __version__ = "2.0.1"
 import sys
 from os import getenv, path
 from time import ctime
-from NindPadFile import NindPadFile
-from NindPadFile import chercheVides
-from NindPadFile import calculeRejpartition
+from .NindPadFile import NindPadFile
+from .NindPadFile import chercheVides
+from .NindPadFile import calculeRejpartition
 
 def usage():
     #print(sys.version)

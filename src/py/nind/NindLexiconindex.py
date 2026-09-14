@@ -16,9 +16,9 @@ __version__ = "2.0.1"
 import sys
 from os import getenv, path
 import codecs
-import NindFile
-from NindPadFile import calculeRejpartition
-from NindIndex import NindIndex
+from . import NindFile
+from .NindIndex import NindIndex
+from .NindPadFile import calculeRejpartition
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')

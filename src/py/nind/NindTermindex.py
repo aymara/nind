@@ -17,8 +17,8 @@ import sys
 from os import getenv, path
 from io import StringIO
 import codecs
-from NindPadFile import calculeRejpartition
-from NindIndex import NindIndex
+from .NindPadFile import calculeRejpartition
+from .NindIndex import NindIndex
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')
