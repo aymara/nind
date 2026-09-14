@@ -75,13 +75,13 @@ NindIndex::~NindIndex()
 bool NindIndex::getDefinition(const unsigned int ident,
                               const unsigned int bytesNb)
 {
-    unsigned long int indirection = getEntryPos(ident);
+    uint64_t indirection = getEntryPos(ident);
     if (indirection == 0) return false;
     m_file.flush();
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     m_file.readBuffer(TAILLE_INDIRECTION);
     //<offsetDejfinition> <longueurDejfinition>
-    const unsigned long int offsetDejfinition = m_file.getInt5();
+    const uint64_t offsetDejfinition = m_file.getInt5();
     const unsigned int longueurDejfinition = (bytesNb == 0) ? m_file.getInt3() : bytesNb;
     //si la dejfinition n'a pas encore ete indexe, retourne false
     if (offsetDejfinition == 0) return false;
@@ -99,12 +99,12 @@ void NindIndex::setDefinition(const unsigned int ident)
     //taille des spejcifiques et de l'identification qui sont en queue de buffer
     const int tailleQueue = getSpecificsAndIdentificationSize();
     //1) trouve l'ancienne indirection si elle existe
-    unsigned long int indirection = getEntryPos(ident);
+    uint64_t indirection = getEntryPos(ident);
     if (indirection == 0) throw NindIndexException("NindIndex::setDefinition : " + m_fileName);
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     //<offsetDejfinition> <longueurDejfinition> 
     m_file.readBuffer(TAILLE_INDIRECTION);
-    const unsigned long int oldOffsetEntry = m_file.getInt5();
+    const uint64_t oldOffsetEntry = m_file.getInt5();
     const unsigned int oldLengthEntry = m_file.getInt3();
     //taille de la dejfinition
     const unsigned int dataSize = m_file.getOutBufferSize() - tailleQueue;
@@ -137,7 +137,7 @@ void NindIndex::setDefinition(const unsigned int ident)
     }
     //INSERTION ou REMPLACEMENT NOUVEL ENDROIT
     //Sinon ecrit sur un endroit libre et efface virtuellement
-    unsigned long int offsetDejfinition = 0;
+    uint64_t offsetDejfinition = 0;
     unsigned int longueurDejfinition = 0;
     //2) trouve une place libre
     //cherche d'abord une place compatible (>= dataSize et < dataSize + m_definitionMinimumSize)
@@ -167,7 +167,7 @@ void NindIndex::checkExtendIndirection(const unsigned int ident,
                                        const Identification &fileIdentification)
 {
     //si la dejfinition n'a pas d'indirection, ajoute un bloc d'indirection
-    unsigned long int indirection = getEntryPos(ident);
+    uint64_t indirection = getEntryPos(ident);
     if (indirection == 0) {
         //la dejfinition est hors des blocs d'indexation actuels, cree un nouveau bloc d'indirection
         addEntriesBlock(fileIdentification);
@@ -178,8 +178,8 @@ void NindIndex::checkExtendIndirection(const unsigned int ident,
 }
 ////////////////////////////////////////////////////////////
 //ejcrit une nouvelle indirection dans l'index
-void NindIndex::setIndirection(const unsigned long int indirection,
-                               const unsigned long int offsetDejfinition,
+void NindIndex::setIndirection(const uint64_t indirection,
+                               const uint64_t offsetDejfinition,
                                const unsigned int longueurDejfinition)
 {
     //se positionne sur l'indirection de la dejfinition
@@ -195,25 +195,25 @@ void NindIndex::setIndirection(const unsigned long int indirection,
 void NindIndex::mapEmptySpaces()
 {
     //trouve la carte des non vides
-    list<pair<unsigned long int, unsigned int> > nonVidesList;
+    list<pair<uint64_t, unsigned int> > nonVidesList;
     //les blocs d'indirection sont mis dans les non-vides
-    for (list<pair<unsigned long int, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin(); 
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin(); 
         it != m_entriesBlocksMap.end(); it++) {
-        const pair<unsigned long int, unsigned int> nonVide((*it).first - TAILLE_TETE_INDEX, (*it).second * TAILLE_INDIRECTION + TAILLE_TETE_INDEX);
+        const pair<uint64_t, unsigned int> nonVide((*it).first - TAILLE_TETE_INDEX, (*it).second * TAILLE_INDIRECTION + TAILLE_TETE_INDEX);
         nonVidesList.push_back(nonVide);
     }
     //prend toutes les entrees d'indirection
     unsigned int ident = 0;
-    unsigned long int indirection = getEntryPos(ident);
+    uint64_t indirection = getEntryPos(ident);
     while (indirection != 0) {
         m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
         m_file.readBuffer(TAILLE_INDIRECTION);
         //<offsetDejfinition> <longueurDejfinition> 
-        const unsigned long int offsetDejfinition = m_file.getInt5();
+        const uint64_t offsetDejfinition = m_file.getInt5();
         const unsigned int longueurDejfinition = m_file.getInt3();
         //si la dejfinition n'a pas encore ete indexe, n'en tient pas compte
         if (offsetDejfinition != 0) {
-            const pair<unsigned long int, unsigned int> nonVide(offsetDejfinition, longueurDejfinition);
+            const pair<uint64_t, unsigned int> nonVide(offsetDejfinition, longueurDejfinition);
             nonVidesList.push_back(nonVide);
         }
         ident++;
@@ -223,19 +223,19 @@ void NindIndex::mapEmptySpaces()
     //taille des spejcifiques et de l'identification qui sont en queue de buffer
     const int tailleQueue = getSpecificsAndIdentificationSize();
     m_file.setPos(-tailleQueue, SEEK_END);       //se positionne sur les spejcifiques
-    const pair<unsigned long int, unsigned int> nonVide(m_file.getPos(), tailleQueue);
+    const pair<uint64_t, unsigned int> nonVide(m_file.getPos(), tailleQueue);
     nonVidesList.push_back(nonVide);
     //ordonne les non vides
     nonVidesList.sort();
     //remplit la carte des vides
-    unsigned long int addressePrec = 0;
+    uint64_t addressePrec = 0;
     unsigned int longueurPrec = 0;
-    for (list<pair<unsigned long int, unsigned int> >::const_iterator it = nonVidesList.begin();
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = nonVidesList.begin();
         it != nonVidesList.end(); it++) {
         const int longueurVide = (*it).first - addressePrec - longueurPrec;
         if (longueurVide < 0) throw NindIndexException("NindIndex::mapEmptySpaces " + m_fileName);
         if (longueurVide > 0) {
-            const pair<unsigned long int, unsigned int> emptyArea(addressePrec + longueurPrec, longueurVide);
+            const pair<uint64_t, unsigned int> emptyArea(addressePrec + longueurPrec, longueurVide);
             m_emptyAreas.push_back(emptyArea); 
         }
         addressePrec = (*it).first;
@@ -246,11 +246,11 @@ void NindIndex::mapEmptySpaces()
 ////////////////////////////////////////////////////////////
 //trouve une nouvelle zone pour les nouvelles donnejs
 bool NindIndex::findNewArea(const unsigned int dataSize,
-                            unsigned long int &offsetDejfinition,
+                            uint64_t &offsetDejfinition,
                             unsigned int &longueurDejfinition)
 {
-    list<pair<unsigned long int, unsigned int> >::iterator memit = m_emptyAreas.end();
-    list<pair<unsigned long int, unsigned int> >::iterator it = m_emptyAreas.begin(); 
+    list<pair<uint64_t, unsigned int> >::iterator memit = m_emptyAreas.end();
+    list<pair<uint64_t, unsigned int> >::iterator it = m_emptyAreas.begin(); 
     while (it != m_emptyAreas.end()) {
         if ((*it).second >= dataSize) {
             //taille suffisante
@@ -285,15 +285,15 @@ bool NindIndex::findNewArea(const unsigned int dataSize,
 }
 ////////////////////////////////////////////////////////////
 //brief Place l'ancienne zone de donnejes dans la gestion du vide
-void NindIndex::vacateOldArea(const unsigned long int oldOffsetEntry,
+void NindIndex::vacateOldArea(const uint64_t oldOffsetEntry,
                               const unsigned int oldLengthEntry)
 {
-    list<pair<unsigned long int, unsigned int> >::iterator it = m_emptyAreas.begin(); 
+    list<pair<uint64_t, unsigned int> >::iterator it = m_emptyAreas.begin(); 
     while (it != m_emptyAreas.end()) {
         if ((*it).first + (*it).second == oldOffsetEntry) {
             (*it).second += oldLengthEntry;             //globalisation avec l'entree precedente
             //ca peut arriver que la globalisation avec la suivante soit aussi possible
-            list<pair<unsigned long int, unsigned int> >::iterator nextit = it; 
+            list<pair<uint64_t, unsigned int> >::iterator nextit = it; 
             nextit++;
             if (nextit != m_emptyAreas.end()) {
                 if ((*it).first + (*it).second == (*nextit).first) {
@@ -309,14 +309,14 @@ void NindIndex::vacateOldArea(const unsigned long int oldOffsetEntry,
             break;
         }
         if ((*it).first > oldOffsetEntry) {
-            const pair<unsigned long int, unsigned int> emptyArea(oldOffsetEntry, oldLengthEntry);
+            const pair<uint64_t, unsigned int> emptyArea(oldOffsetEntry, oldLengthEntry);
             m_emptyAreas.insert(it, emptyArea);                 //nouvelle entree au bon endroit
             break;
         }
         it++;                    
     }
     if (it == m_emptyAreas.end()) {
-        const pair<unsigned long int, unsigned int> emptyArea(oldOffsetEntry, oldLengthEntry);
+        const pair<uint64_t, unsigned int> emptyArea(oldOffsetEntry, oldLengthEntry);
         m_emptyAreas.push_back(emptyArea);                 //nouvelle entree a la fin
     }
 }
@@ -324,7 +324,7 @@ void NindIndex::vacateOldArea(const unsigned long int oldOffsetEntry,
 // void NindIndex::dumpEmptyAreas()
 // {
 //     cout<<"VIDES: "<<m_emptyAreas.size()<<" (";
-// //      for (list<pair<unsigned int, unsigned long int> >::iterator it = m_emptyAreas.begin(); it != m_emptyAreas.end(); it++) 
+// //      for (list<pair<unsigned int, uint64_t> >::iterator it = m_emptyAreas.begin(); it != m_emptyAreas.end(); it++) 
 // //          cout<<(*it).first<<" - "<<(*it).second<<", ";
 //     cout<<")"<<endl;
 // }

@@ -263,13 +263,13 @@ signed int NindFile::getSInt4()
 ////////////////////////////////////////////////////////////
 //brief Get a 5-bytes integer from internal buffer
 //return 8-bytes integer */
-unsigned long int NindFile::getInt5()
+uint64_t NindFile::getInt5()
 {
     //gros boutiste
     m_rPtr += 5;
     if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (F) " + m_fileName);
     //la valeur peut depasser 32 bits : force le calcul en 64 bits des le premier terme
-    return ((((static_cast<unsigned long int>(m_rPtr[-5])*256 + m_rPtr[-4])*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1]);
+    return ((((static_cast<uint64_t>(m_rPtr[-5])*256 + m_rPtr[-4])*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1]);
 }
 ////////////////////////////////////////////////////////////
 //brief Get an unsigned latecon integer from internal buffer
@@ -437,7 +437,7 @@ void NindFile::putInt4(const unsigned int int4)
 ////////////////////////////////////////////////////////////
 //brief Put a 5-bytes integer into the internal buffer
 //param int8 long integer to write as 5-bytes*/
-void NindFile::putInt5(const unsigned long int int8)
+void NindFile::putInt5(const uint64_t int8)
 {
     //gros boutiste
     m_wPtr += 5;

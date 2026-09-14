@@ -90,7 +90,7 @@ void NindRetrolexicon::addRetroWords(const list<struct RetroWord> &retroWords,
     for (list<struct RetroWord>::const_iterator it1 = retroWords.begin(); it1 != retroWords.end(); it1++) {
         const struct RetroWord &retroWord = (*it1);
         //1) rejcupehre l'adresse de la dejfinition
-        unsigned long int dejfinition = getEntryPos(retroWord.identifiant);
+        uint64_t dejfinition = getEntryPos(retroWord.identifiant);
         //2) si hors limite, ajoute un bloc de dejfinitions
         if (dejfinition == 0) addEntriesBlock(lexiconIdentification);
         //et rejcupehre l'adresse de la dejfinition
@@ -101,7 +101,7 @@ void NindRetrolexicon::addRetroWords(const list<struct RetroWord> &retroWords,
             identOk = true;
             //se positionne ah la fin (sur les spejcifiques)
             m_file.setPos(-tailleQueue, SEEK_END);       
-            const unsigned long int utf8Pos = m_file.getPos();
+            const uint64_t utf8Pos = m_file.getPos();
             m_file.createBuffer(TAILLE_DEJFINITION_MAXIMUM + tailleQueue);
             m_file.putStringAsBytes(retroWord.motSimple);
             //ajoute les spejcifiques et l'identification
@@ -192,7 +192,7 @@ bool NindRetrolexicon::getRetroWord(const unsigned int ident,
     //<flagSimple=37> <longueurMotUtf8> <adresseMotUtf8>
     else if (flag == FLAG_SIMPLE) {
         const unsigned char longueurMotUtf8 = m_file.getInt1();
-        const unsigned long adresseMotUtf8 = m_file.getInt5();
+        const uint64_t adresseMotUtf8 = m_file.getInt5();
         //se positionne sur la definition
         m_file.setPos(adresseMotUtf8, SEEK_SET);    
         m_file.readBuffer(longueurMotUtf8);
@@ -216,7 +216,7 @@ bool NindRetrolexicon::getRetroWord(const unsigned int ident,
 //return true if ident was found, false otherwise */
 bool NindRetrolexicon::getDejfinition(const unsigned int ident)
 {
-    unsigned long int dejfinitionPos = getEntryPos(ident);
+    uint64_t dejfinitionPos = getEntryPos(ident);
     if (dejfinitionPos == 0) return false;
     m_file.flush();
     //se positionne sur la definition

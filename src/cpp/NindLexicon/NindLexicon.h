@@ -98,7 +98,7 @@ private:
         bool operator()(const std::string &s1, const std::string &s2) const;
     };
     typedef stdext::hash_map<
-        const std::string,
+        std::string,
         unsigned int,
         HashString > StringHashMap;
 #else
@@ -109,7 +109,7 @@ private:
         bool operator()(const std::string &s1, const std::string &s2) const;
     };
     typedef std::unordered_map<
-        const std::string,
+        std::string,
         unsigned int,
         HashString,
         EqualString > StringHashMap;

@@ -136,7 +136,7 @@ unsigned int NindLexiconIndex::addWord(const list<string> &components)
         m_identification.lexiconTime = (time_t)time(NULL);
         setDefinitionWords(dejfinition, m_identification);
         //met eventuellement a jour le lexique inverse
-        if (m_withRetrolexicon and retroWords.size() != 0) 
+        if (m_withRetrolexicon && retroWords.size() != 0)
             m_nindRetrolexicon->addRetroWords(retroWords, m_identification);
     }
     //retourne l'id du mot specifie
