@@ -34,7 +34,7 @@ using namespace std;
 //param fileName absolute path file name
 //param isLexiconWriter true if lexicon writer, false if lexicon reader  */
 NindLexicon::NindLexicon(const std::string &fileName,
-                         const bool isLexiconWriter) :
+                         const bool isLexiconWriter):
     m_isLexiconWriter(isLexiconWriter),
     m_fileName(fileName),
     m_currentId(0),
@@ -294,7 +294,7 @@ size_t NindLexicon::HashString::operator()(const string &s) const
     }
     return key;
 };
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1600
 bool NindLexicon::HashString::operator()(const std::string &s1, const std::string &s2) const
 {
     return (s1 < s2);
@@ -314,7 +314,7 @@ size_t NindLexicon::HashPair::operator()(const pair<unsigned int, unsigned int> 
     return key;
 };
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1600
 bool NindLexicon::HashPair::operator()(const pair<unsigned int, unsigned int> &p1, const pair<unsigned int, unsigned int> &p2) const
 {
     return (p1 < p2);

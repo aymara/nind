@@ -19,6 +19,7 @@
 ////////////////////////////////////////////////////////////
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
+#include <cstdint>
 #include "NindSignalCatcher.h"
 #include <stdio.h>
 #include <string>
@@ -145,7 +146,7 @@ public:
 
     /**\brief Get a 5-bytes integer from internal buffer
     *\return 8-bytes integer */
-    unsigned long int getInt5();
+    uint64_t getInt5();
         
     /**\brief Get an unsigned latecon integer from internal buffer
     *\return 4-bytes unsigned integer */
@@ -205,7 +206,7 @@ public:
 
     /**\brief Put a 5-bytes integer into the internal buffer
     *\param int8 long integer to write as 5-bytes*/
-    void putInt5(const unsigned long int int8);
+    void putInt5(const uint64_t int8);
 
     /**\brief Put an unsigned latecon integer into the internal buffer
     *\param int4 unsigned integer to write as latecon integer*/

@@ -1,0 +1,51 @@
+[project]
+name = "nind"
+version = "2.0.3"
+description = "Python frontend for the Nind Indexing Module, with its native C++ index stack built in"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12", "cmake>=3.15", "ninja"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+build-dir = "build/py-native/{wheel_tag}"
+wheel.packages = ["src/py/nind"]
+wheel.exclude = ["**/__pycache__", "**/*.pyc", "**/CMakeLists.txt"]
+cmake.source-dir = "src/cpp/NindPy"
+cmake.build-type = "Release"
+
+[tool.pytest.ini_options]
+testpaths = ["tst/py"]
+pythonpath = ["src/py"]
+
+[tool.bumpver]
+current_version = "v2.0.3"
+version_pattern = "vMAJOR.MINOR.PATCH"
+commit_message = "Bump version {old_version} -> {new_version}"
+commit = true
+tag = true
+push = true
+
+[tool.bumpver.file_patterns]
+"pyproject.toml" = [
+    '^current_version = "{version}"$',
+    '^version = "{pep440_version}"$',
+]
+"src/py/nind/NindFile.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/NindIndex.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/NindLexiconindex.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/NindLocalindex.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/NindPadFile.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/NindRetrolexicon.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/NindTermindex.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/Nind_dumpDocument.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/Nind_search.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/Nind_trouveMotsSansOccurrence.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/Nind_trouveNombresPremiers.py" = ['^__version__ = "{pep440_version}"$']
+"src/py/nind/amose/NindIdentifiantsClef.py" = ['^__version__ = "{pep440_version}"$']

@@ -148,10 +148,10 @@ NindPadFile::~NindPadFile()
 //brief get position of specified entry
 //param ident ident of specified entry
 //return offset into file of specified entry (0 if out of bounds)*/
-unsigned long int NindPadFile::getEntryPos(const unsigned int ident)
+uint64_t NindPadFile::getEntryPos(const unsigned int ident)
 {
     //trouve l'entreje
-    unsigned long int position = getJustEntryPos(ident);
+    uint64_t position = getJustEntryPos(ident);
     //return position;  //SANS SYNCHRONISATION !!!! ESSAI
     if (m_isWriter) return position; //le processus ejcrivain n'a pas besoin de synchronisation
     //synchronisation des lecteurs
@@ -171,7 +171,7 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
     //se positionne sur les spejcifiques
     const int offset = TAILLE_ENTETE_SPEJCIFIQUE + TAILLE_IDENTIFICATION + m_specificsSize;
     m_file.setPos(-offset, SEEK_END);
-    const unsigned long int entriesBlock = m_file.getPos();
+    const uint64_t entriesBlock = m_file.getPos();
     m_file.createBuffer(TAILLE_TETE_INDEX);
     //<flagIndexej=47> <addrBlocSuivant> <nombreIndex>
     m_file.putInt1(FLAG_INDEXEJ);
@@ -188,7 +188,7 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
     m_file.writeBuffer();                               //ecriture effective sur le fichier
     //si ce n'est pas le premier bloc, il faut chaisner dans le fichier
     if (m_entriesBlocksMap.size() != 0) {
-        pair<unsigned long int, unsigned int> &indirectionBlocPrec = m_entriesBlocksMap.back();
+        pair<uint64_t, unsigned int> &indirectionBlocPrec = m_entriesBlocksMap.back();
         //se positionne sur le <addrBlocSuivant> du dernier bloc
         //<flagIndexej=47> <addrBlocSuivant> <nombreIndex> { <donnejesIndexejes> }
         m_file.setPos(indirectionBlocPrec.first -8, SEEK_SET);   //pour pointer <addrBlocSuivant>
@@ -197,7 +197,7 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
         m_file.writeBuffer();
     }
     //met ah jour la carte des entrejes
-    const pair<unsigned long int, unsigned int> entrejes(entriesBlock + TAILLE_TETE_INDEX, m_dataEntriesBlocSize);
+    const pair<uint64_t, unsigned int> entrejes(entriesBlock + TAILLE_TETE_INDEX, m_dataEntriesBlocSize);
     m_entriesBlocksMap.push_back(entrejes);
 }
 ////////////////////////////////////////////////////////////
@@ -218,7 +218,7 @@ unsigned int NindPadFile::getFirstEntriesBlockSize()
 unsigned int NindPadFile::getMaxIdent() const
 {
     unsigned int maxIdent = 0;
-    for (list<pair<unsigned long int, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
         it != m_entriesBlocksMap.end(); it++)
         maxIdent += (*it).second;
     return maxIdent;
@@ -283,11 +283,11 @@ void NindPadFile::writeIdentification(const Identification &fileIdentification)
 }
 ////////////////////////////////////////////////////////////
 //retourne la position d'une entreje
-unsigned long int NindPadFile::getJustEntryPos(const unsigned int ident)
+uint64_t NindPadFile::getJustEntryPos(const unsigned int ident)
 {
     //trouve l'entreje
     unsigned int firstIdent = 0;
-    list<pair<unsigned long int, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
+    list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
     while (it != m_entriesBlocksMap.end()) {
         if (ident < firstIdent + (*it).second) return (ident - firstIdent) * m_dataEntrySize + (*it).first;
         firstIdent += (*it).second;
@@ -307,10 +307,10 @@ void NindPadFile::mapEntriesBlocks()
         m_file.readBuffer(TAILLE_TETE_INDEX);
         if (m_file.getInt1() != FLAG_INDEXEJ)
             throw NindPadFileException("NindPadFile::mapEntriesBlocks : " + m_fileName);
-        const unsigned long int addrBlocSuivant = m_file.getInt5();
+        const uint64_t addrBlocSuivant = m_file.getInt5();
         const unsigned int nombreIndex = m_file.getInt3();
-        const unsigned long pos = m_file.getPos();
-        const pair<unsigned int, unsigned long int> entrejes(pos, nombreIndex);
+        const uint64_t pos = m_file.getPos();
+        const pair<uint64_t, unsigned int> entrejes(pos, nombreIndex);
         m_entriesBlocksMap.push_back(entrejes);
         if (addrBlocSuivant == 0) break;        //si pas d'extension, termine
         //saute au bloc d'indirection suivant

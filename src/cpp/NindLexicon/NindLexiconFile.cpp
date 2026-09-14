@@ -53,7 +53,7 @@ using namespace std;
 //param fileName absolute path file name
 //param fromLexiconWriter true if from lexicon writer, false if from lexicon reader  */
 NindLexiconFile::NindLexiconFile(const std::string &fileName,
-                                 const bool fromLexiconWriter) :
+                                 const bool fromLexiconWriter):
     m_fromLexiconWriter(fromLexiconWriter),
     m_fileName(fileName),
     m_file(fileName)

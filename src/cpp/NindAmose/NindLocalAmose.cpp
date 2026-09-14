@@ -97,10 +97,12 @@ void NindLocalAmose::getTermPositionIndocs(const vector<unsigned int>& termIds,
 //param termsSet set de termes uniques dans le document */
 bool NindLocalAmose::getDocTerms(const unsigned int docId,
                                  const AmoseTypes termType,
-                                 set<string> &termsSet)
+                                 set<string> &termsSet,
+                                 unsigned int *unknownTermCount)
 {
     //raz rejsultat
     termsSet.clear();
+    if (unknownTermCount != nullptr) *unknownTermCount = 0;
     //les identifiants des termes uniques du document
     set<unsigned int> termIdents;
     const bool trouvej = NindLocalIndex::getTermIdents(docId, termIdents);
@@ -116,9 +118,12 @@ bool NindLocalAmose::getDocTerms(const unsigned int docId,
         const bool trouvej = m_nindLexicon.getWord((*itterm), lemma, type, namedEntity);
         if (!trouvej)
         {
-          cerr<<"NindLocalAmose::getDocTerms(docId="<<docId<<") Unknown term in lexicon: NE='"<<namedEntity<<"' lemma='"<<lemma<<"'"<<endl;
-          //throw IncompatibleFileException("Unknown term in lexicon: NE='"<<namedEntity<<"' lemma='"+lemma+"'");
-          continue;
+            //terme prejsent dans l'index local mais absent du lexique (par exemple ahprehs
+            //changement de configuration du corpus/MediaData) : ignorej au lieu de lever une
+            //exception, afin de ne pas interrompre prejmaturejment le remplissage de termsSet
+            cerr<<"NindLocalAmose::getDocTerms(docId="<<docId<<") Unknown term in lexicon: NE='"<<namedEntity<<"' lemma='"<<lemma<<"'"<<endl;
+            if (unknownTermCount != nullptr) ++(*unknownTermCount);
+            continue;
         }
         if (type == termType)
         {

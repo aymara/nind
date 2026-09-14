@@ -92,13 +92,13 @@ private:
     //met a jour le lexique lecteur avec le fichier lexique
     void updateFromFile();
     
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1600
     struct HashString : public stdext::hash_compare<std::string> {
         size_t operator()(const  std::string &s) const;
         bool operator()(const std::string &s1, const std::string &s2) const;
     };
     typedef stdext::hash_map<
-        const std::string,
+        std::string,
         unsigned int,
         HashString > StringHashMap;
 #else
@@ -109,12 +109,12 @@ private:
         bool operator()(const std::string &s1, const std::string &s2) const;
     };
     typedef std::unordered_map<
-        const std::string,
+        std::string,
         unsigned int,
         HashString,
         EqualString > StringHashMap;
 #endif
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1600
     struct HashPair : public stdext::hash_compare<std::pair<unsigned int, unsigned int> > {
         size_t operator()(const std::pair<unsigned int, unsigned int> &p) const;
         bool operator()(const std::pair<unsigned int, unsigned int> &p1, const std::pair<unsigned int, unsigned int> &p2) const;

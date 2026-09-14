@@ -1,0 +1,116 @@
+name: Publish Python package
+
+# Builds the `nind` wheel (with its compiled nind._native extension) for
+# Linux/macOS/Windows plus an sdist, then publishes them to PyPI.
+#
+# Triggered by pushing a version tag, which `bumpver update` creates and
+# pushes automatically (see [tool.bumpver] in pyproject.toml) - so a release
+# is just:
+#   uvx bumpver update --patch   # or --minor / --major
+#
+# PyPI auth is via Trusted Publishing (OIDC): no stored secret, but the repo
+# must first be registered as a trusted publisher for the `nind` project at
+# https://pypi.org/manage/project/nind/settings/publishing/ pointing at this
+# workflow file and the `pypi` environment used below.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run Python test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run tests
+        run: uv run pytest tst/py -v
+
+  build_wheels:
+    name: Build wheels (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # cibuildwheel's own uv auto-provisioning isn't reliable on every
+      # platform (seen failing with "uv not found" on macOS/Windows); putting
+      # a real uv on PATH first avoids depending on that.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.2.1
+        env:
+          CIBW_BUILD: "cp3*"
+          CIBW_SKIP: "*-musllinux*"
+          CIBW_BUILD_FRONTEND: "uv"
+          CIBW_ARCHS_MACOS: "auto"
+          # cibuildwheel's default also builds 32-bit (win32) wheels; nobody
+          # targets 32-bit Windows Python for this, and it's a strictly worse
+          # environment for the LLP64-vs-LP64 "long is 32-bit" class of bugs.
+          CIBW_ARCHS_WINDOWS: "AMD64"
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  build_sdist:
+    name: Build source distribution
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build sdist
+        run: uv build --sdist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: Publish to PyPI
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/nind
+    permissions:
+      id-token: write
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          path: dist
+          merge-multiple: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always

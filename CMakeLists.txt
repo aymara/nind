@@ -1,5 +1,5 @@
 project(nind)
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.5)
 
 option(WITH_ASAN "Enable address sanitizer" OFF)
 message("WITH_ASAN=${WITH_ASAN}")
@@ -128,6 +128,8 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/NindConfig-version.cmake DESTINATION s
 install(FILES NindConfig.cmake DESTINATION share/apps/nind/cmake/Modules)
 
 ########### source sub directories ###############
+
+enable_testing()
 
 add_subdirectory(src)
 add_subdirectory(tst)

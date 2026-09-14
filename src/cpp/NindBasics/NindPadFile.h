@@ -25,6 +25,7 @@
 #include "NindFile.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
+#include <cstdint>
 #include <stdio.h>
 #include <string>
 #include <list>
@@ -70,7 +71,7 @@ protected:
     /**\brief get position of specified entry (with reader synchronization)
     *\param ident ident of specified entry
     *\return offset into file of specified entry (0 if out of bounds)*/
-    unsigned long int getEntryPos(const unsigned int ident);
+    uint64_t getEntryPos(const unsigned int ident);
 
     /**\brief add empty entries block
     *\param fileIdentification unique identification of file */
@@ -111,11 +112,11 @@ protected:
     bool m_isWriter;                    //vrai si ejcrivain
     bool m_isExistingWriter;            //vrai si ejcrivain dejjah existant
 
-    std::list<std::pair<unsigned long int, unsigned int> > m_entriesBlocksMap;  //gestion des blocs d'entrejes
+    std::list<std::pair<uint64_t, unsigned int> > m_entriesBlocksMap;  //gestion des blocs d'entrejes
 
 private:
     //retourne la position d'une entreje sans synchronisation
-    unsigned long int getJustEntryPos(const unsigned int ident);
+    uint64_t getJustEntryPos(const unsigned int ident);
 
     //ejtablit la carte des blocs d'entrejes
     void mapEntriesBlocks();

@@ -1,7 +1,3 @@
-add_subdirectory(amose)
-# ########### install files ###############
-file(GLOB pys *.py)
-install(PROGRAMS
-  ${pys}
-  DESTINATION bin)
+# Python project is now managed by uv/pyproject.toml
+# This file is kept for build system compatibility if needed, but installation should use uv.
 

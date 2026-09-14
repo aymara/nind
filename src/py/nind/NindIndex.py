@@ -3,7 +3,7 @@
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.0.1"
+__version__ = "2.0.3"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -16,9 +16,9 @@ __version__ = "2.0.1"
 import sys
 from os import getenv, path
 from time import ctime
-from NindPadFile import NindPadFile
-from NindPadFile import chercheVides
-from NindPadFile import calculeRejpartition
+from .NindPadFile import NindPadFile
+from .NindPadFile import chercheVides
+from .NindPadFile import calculeRejpartition
 
 def usage():
     #print(sys.version)

@@ -26,6 +26,7 @@
 #include "NindBasics/NindFile.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
+#include <cstdint>
 #include <stdio.h>
 #include <string>
 #include <list>
@@ -71,28 +72,28 @@ protected:
     
 private:
     //ejcrit une nouvelle indirection dans l'index
-    void setIndirection(const unsigned long int indirection,
-                        const unsigned long int offsetDejfinition,
+    void setIndirection(const uint64_t indirection,
+                        const uint64_t offsetDejfinition,
                         const unsigned int longueurDejfinition);
-    
+
     //ejtablit la carte des vides
     void mapEmptySpaces();
-    
+
     //trouve une nouvelle zone pour les nouvelles donnejs
     //retourne true si l'identification est dejjah ejcrite
     bool findNewArea(const unsigned int dataSize,
-                     unsigned long int &offsetDejfinition,
+                     uint64_t &offsetDejfinition,
                      unsigned int &longueurDejfinition);
-    
+
     //brief Place l'ancienne zone de donnejes dans la gestion du vide
-    void vacateOldArea(const unsigned long int oldOffsetEntry,
+    void vacateOldArea(const uint64_t oldOffsetEntry,
                        const unsigned int oldLengthEntry);
-    
+
     //dumpe la map des indirections (uniquement pour debogue)
     void dumpIndirection();
 
     unsigned int m_definitionMinimumSize;       //taille minimum admissible pour une definition
-    std::list<std::pair<unsigned long int, unsigned int> > m_emptyAreas;         //gestion des zones libres
+    std::list<std::pair<uint64_t, unsigned int> > m_emptyAreas;         //gestion des zones libres
 };
 ////////////////////////////////////////////////////////////
     } // end namespace
