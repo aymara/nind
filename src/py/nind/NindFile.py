@@ -245,6 +245,48 @@ class NindFile:
         ba[4] = entier&0xFF
         self.latFile.write(ba)
 
+    def ejcritNombreULat(self, entier):
+        if entier <= 0x7F:
+            self.latFile.write(bytes([entier]))
+        elif entier <= 0x3FFF:
+            self.latFile.write(bytes([0x80 | ((entier>>8)&0x3F), entier&0xFF]))
+        elif entier <= 0x1FFFFF:
+            self.latFile.write(bytes([0xC0 | ((entier>>16)&0x1F), (entier>>8)&0xFF, entier&0xFF]))
+        elif entier <= 0xFFFFFFF:
+            self.latFile.write(bytes([0xE0 | ((entier>>24)&0x0F), (entier>>16)&0xFF, (entier>>8)&0xFF, entier&0xFF]))
+        elif entier <= 0xFFFFFFFF:
+            self.latFile.write(bytes([0xF0, (entier>>24)&0xFF, (entier>>16)&0xFF, (entier>>8)&0xFF, entier&0xFF]))
+        else:
+            raise ValueError('entier trop grand pour un codage ULat: %d'%(entier))
+
+    def ejcritNombreSLat(self, entier):
+        if -64 <= entier <= 63:
+            octet = entier if entier >= 0 else entier + 0x80
+            self.latFile.write(bytes([octet]))
+        elif -8192 <= entier <= 8191:
+            if entier >= 0:
+                top, b2 = (entier>>8)&0x1F, entier&0xFF
+            else:
+                combined = entier + 0x4000
+                top, b2 = (combined>>8)&0x3F, combined&0xFF
+            self.latFile.write(bytes([0x80|top, b2]))
+        elif -1048576 <= entier <= 1048575:
+            if entier >= 0:
+                top, b2, b3 = (entier>>16)&0x0F, (entier>>8)&0xFF, entier&0xFF
+            else:
+                combined = entier + 0x200000
+                top, b2, b3 = (combined>>16)&0x1F, (combined>>8)&0xFF, combined&0xFF
+            self.latFile.write(bytes([0xC0|top, b2, b3]))
+        elif -134217728 <= entier <= 134217727:
+            if entier >= 0:
+                top, b2, b3, b4 = (entier>>24)&0x07, (entier>>16)&0xFF, (entier>>8)&0xFF, entier&0xFF
+            else:
+                combined = entier + 0x10000000
+                top, b2, b3, b4 = (combined>>24)&0x0F, (combined>>16)&0xFF, (combined>>8)&0xFF, combined&0xFF
+            self.latFile.write(bytes([0xE0|top, b2, b3, b4]))
+        else:
+            raise ValueError('entier trop grand pour un codage SLat: %d'%(entier))
+
     def ejcritChaine(self, chaine):
         self.latFile.write(chaine.encode('utf-8'))
         
