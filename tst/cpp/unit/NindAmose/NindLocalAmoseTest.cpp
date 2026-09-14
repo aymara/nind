@@ -67,6 +67,38 @@ TEST(NindLocalAmoseTest, GetDocTermsFiltersByType) {
     EXPECT_EQ((set<string>{"LOC:Paris"}), namedEntities);
 }
 ////////////////////////////////////////////////////////////
+TEST(NindLocalAmoseTest, GetDocTermsSkipsTermsUnknownToLexicon) {
+    // Reproduces https://github.com/aymara/nind/issues/3 : a term id present in the
+    // document's local index but absent from the lexicon (e.g. after a corpus/MediaData
+    // configuration change) must be skipped rather than raising an exception, and the
+    // caller must be able to learn how many terms were skipped.
+    TestTempDir tmp;
+    const string path = tmp.file("local5");
+    NindLexiconAmose lexicon(path, true, 16, 16);
+    const unsigned int catId = lexicon.addWord("cat", SIMPLE_TERM);
+    const NindIndex::Identification identification = lexicon.getIdentification();
+    const unsigned int unknownId = catId + 1000; // never added to the lexicon
+
+    NindLocalAmose localIndex(path, true, identification, 8);
+    list<Term> doc;
+    doc.push_back(Term(catId, SIMPLE_TERM));
+    doc.back().localisation.push_back(Localisation(0, 3));
+    doc.push_back(Term(unknownId, SIMPLE_TERM));
+    doc.back().localisation.push_back(Localisation(4, 3));
+    localIndex.setLocalDef(1, doc, identification);
+
+    set<string> terms;
+    unsigned int unknownTermCount = 0;
+    ASSERT_TRUE(localIndex.getDocTerms(1, SIMPLE_TERM, terms, &unknownTermCount));
+    EXPECT_EQ((set<string>{"cat"}), terms);
+    EXPECT_EQ(1u, unknownTermCount);
+
+    // unknownTermCount is optional: omitting it must not throw or crash.
+    set<string> termsAgain;
+    ASSERT_TRUE(localIndex.getDocTerms(1, SIMPLE_TERM, termsAgain));
+    EXPECT_EQ((set<string>{"cat"}), termsAgain);
+}
+////////////////////////////////////////////////////////////
 TEST(NindLocalAmoseTest, UnknownDocumentReturnsFalseOrZero) {
     TestTempDir tmp;
     const string path = tmp.file("local3");

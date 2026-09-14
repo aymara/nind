@@ -60,13 +60,18 @@ public:
                                const std::vector<unsigned int> &documents, 
                                Positions &positions ); 
     
-    /** \brief get the set of unique term in a document 
+    /** \brief get the set of unique term in a document
     * \param docId identifier of the document
-    * \param termType type of terms (0: simple term, 1: multi-term, 2: named entity) 
-    * \param termsSet set de termes uniques dans le document */
+    * \param termType type of terms (0: simple term, 1: multi-term, 2: named entity)
+    * \param termsSet set de termes uniques dans le document
+    * \param unknownTermCount if non-null, filled with the number of term ids present in the
+    * document's local index but absent from the lexicon (e.g. after a corpus/MediaData
+    * configuration change). Such terms are skipped rather than raising an exception, so
+    * termsSet is still fully populated with the terms that were found. */
     bool getDocTerms(const unsigned int docId,
                      const AmoseTypes termType,
-                     std::set<std::string> &termsSet);
+                     std::set<std::string> &termsSet,
+                     unsigned int *unknownTermCount = nullptr);
  
     /** \brief get length of a document
     *\return  an integer, the number of occurrences of terms    */
