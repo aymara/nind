@@ -323,13 +323,13 @@ class NindIndexer:
                 nf.ejcritNombre3(0)                        # <longueurDonnejes> (placeholder)
                 data_start = nf.tell()
                 noTermePrec = 0
+                localisationPrec = 0   # accumule sur tout le document, pas par terme (voir donneListeTermes)
                 for tid in sorted(positions_par_terme):
                     nf.ejcritNombreSLat(tid - noTermePrec)   # <identTermeRelatif>
                     noTermePrec = tid
                     nf.ejcritNombre1(0)                      # <catejgorie> : non utilisée
                     positions = positions_par_terme[tid]
                     nf.ejcritNombre1(len(positions))         # <nbreLocalisations>
-                    localisationPrec = 0
                     for position in positions:
                         nf.ejcritNombreSLat(position - localisationPrec)   # <localisationRelatif>
                         localisationPrec = position

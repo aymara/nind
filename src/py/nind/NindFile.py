@@ -66,8 +66,8 @@ def clefA(mot):
     mBytes = mot.encode('utf-8')
     clef = 0x55555555
     shifts = 0
-    for octet in mBytes: 
-        clef ^= (ord(octet) << shifts%24)
+    for octet in mBytes:
+        clef ^= (octet << shifts%24)
         shifts += 7
     return clef
 
@@ -284,6 +284,9 @@ class NindFile:
                 combined = entier + 0x10000000
                 top, b2, b3, b4 = (combined>>24)&0x0F, (combined>>16)&0xFF, (combined>>8)&0xFF, combined&0xFF
             self.latFile.write(bytes([0xE0|top, b2, b3, b4]))
+        elif -2147483648 <= entier <= 2147483647:
+            combined = entier & 0xFFFFFFFF
+            self.latFile.write(bytes([0xF0, (combined>>24)&0xFF, (combined>>16)&0xFF, (combined>>8)&0xFF, combined&0xFF]))
         else:
             raise ValueError('entier trop grand pour un codage SLat: %d'%(entier))
 

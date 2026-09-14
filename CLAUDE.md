@@ -32,7 +32,16 @@ To run tests manually instead of via the full `gbuild.sh` cycle: `ctest` from in
 
 ## Build & test — Python
 
-The Python package (`nind`, in `src/py/nind`) is managed with `pyproject.toml`/hatchling; install/manage it with `uv` (the old `src/py/CMakeLists.txt` build path is kept only for compatibility). There is no committed Python test suite yet — verification of the Python readers/writers against the C++-produced binary files is the intended purpose of this package per the project's EBNF-grammar design (see README), but no automated harness currently exists in this repo for that.
+The Python package (`nind`, in `src/py/nind`) is managed with `pyproject.toml`/hatchling; install/manage it with `uv` (the old `src/py/CMakeLists.txt` build path is kept only for compatibility). `uv sync` installs the package (editable) plus dev dependencies (pytest) into `.venv`.
+
+Tests live in `tst/py/` (one file per module, mirroring `tst/cpp/unit/`), configured via `[tool.pytest.ini_options]` in `pyproject.toml`:
+
+```
+uv sync                 # first time / after touching pyproject.toml
+uv run pytest tst/py -v
+```
+
+Verification of the Python readers/writers against the C++-produced binary files (the project's original EBNF-grammar cross-check design, see README) isn't automated yet — the current suite validates the Python implementation against itself (round-trips through `nind_engine.NindIndexer`'s writers, plus hand-built fixtures for formats it doesn't write, like `.nindretrolexicon`).
 
 ## Architecture
 
@@ -68,9 +77,10 @@ Linker flags (`-Wl,-z,defs,--no-as-needed`) are set project-wide because these l
 
 Parallels the C++ layering with lowercase-suffixed module names for the index classes:
 
-- `NindFile.py` / `NindPadFile.py` — low-level file I/O (mirrors `NindBasics`)
-- `NindRetrolexicon.py`, `NindLexiconindex.py`, `NindTermindex.py`, `NindLocalindex.py` — mirror the corresponding `NindIndex` C++ classes
-- `nind_engine.py` — new higher-level `NindEngine` class built on top of the above; opens a directory of `.nindlexiconindex`/`.nindtermindex`/`.nindlocalindex` files by prefix and exposes tokenization + BM25-style search
+- `NindFile.py` — low-level binary codec. Historically read-only-oriented (the `litXxx` getters have long existed for every format), but now has a full writer counterpart too: `ejcritNombre1/3/4/5`, `ejcritNombreULat`/`ejcritNombreSLat` (both varint encodings, full tier range matching the readers and the C++ implementation), `ejcritChaine`, `ejcritZejros`.
+- `NindPadFile.py` — the shared "pad file" envelope (header, indirection block(s), specifics, identification trailer); read-only, no writer (mirrors `NindBasics::NindPadFile`, but nothing in Python subclasses it as a writer the way `NindIndex`/`NindRetrolexicon` do in C++).
+- `NindRetrolexicon.py`, `NindLexiconindex.py`, `NindTermindex.py`, `NindLocalindex.py` — read-only mirrors of the corresponding `NindIndex`-family C++ classes; `NindLexiconindex` is hash-bucketed (`clefB(word) % nombreIndirection`), the other two are directly indexed by id.
+- `nind_engine.py` — `NindIndexer` (writer) and `NindEngine` (BM25-style search) built on top of the above. `NindIndexer` is the *only* Python writer for the index-family formats (`.nindlexiconindex`/`.nindtermindex`/`.nindlocalindex`) — it hand-rolls the binary layout directly via `NindFile`, replicating what `NindPadFile`/`NindIndex` do in C++, since there's no Python writer class to build on. It does not write `.nindretrolexicon` (not needed by `NindEngine`, which only supports simple, non-compound words).
 - `Nind_*.py` at the package root — standalone CLI scripts (dump a document, convert corpora, search, diagnostics)
 - `amose/` — Amose-specific conversion/parsing scripts (Lucene dump, XML-CLEF, sample corpora)
 
