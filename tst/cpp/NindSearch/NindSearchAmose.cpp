@@ -104,8 +104,8 @@ int main(int argc, char *argv[]) {
             }
             cout<<"identifiant pour le terme '" <<word<<"' : "<<ident<<endl;
             //recupere le nombre d'occurences pour ce terme
-            //const unsigned int nbOcc = nindTermAmose.getTermFreq(ident);
-            //cout<<nbOcc<<" occurences trouvées"<<endl;
+            const unsigned int nbOcc = nindTermAmose.getTermFreq(ident);
+            cout<<nbOcc<<" occurences trouvées"<<endl;
             //recupere le nombre de documents pour ce terme
             const unsigned int nbDocs = nindTermAmose.getDocFreq(ident);                        //3.5 getDocFreq()
             cout<<nbDocs<<" documents trouvés"<<endl;
@@ -113,7 +113,18 @@ int main(int argc, char *argv[]) {
             list<unsigned int> documents;
             nindTermAmose.getDocList(ident, documents);                                         //3.1 getDocList()
             for (list<unsigned int>::const_iterator it2 = documents.begin(); it2 != documents.end(); it2++) {
-                cout<<(*it2)<<" ";
+                unsigned int noDoc = (*it2);
+                list<NindLocalIndex::Term> localDef;
+                nindLocalAmose.getLocalDef(noDoc, localDef);
+                unsigned int count=0;
+                for (list<NindLocalIndex::Term>::const_iterator it3 = localDef.begin();
+                                    it3 != localDef.end(); it3++) {
+                  const NindLocalIndex::Term &term = (*it3);
+                  if (term.term == ident) {
+                      count++;
+                  }
+                }
+                cout<<noDoc<<"("<<count<<") ";
             }
             cout<<endl;
             cout<<BLUE<<"Entrez le n° de doc à afficher : "<<OFF;

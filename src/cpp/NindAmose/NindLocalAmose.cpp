@@ -48,7 +48,7 @@ NindLocalAmose::~NindLocalAmose()
 //of terms (from @ref termIds) in documents (from @ref documents)
 //param termIds vector of identifier of terms
 //param documents vector of documents where to search for position of terms.
-//param positions position of occurrences of terms in documents. One element foreach content id in @ref documents.
+//param positions position of occurrences of terms in documents. One element foreach content  id in @ref documents.
 //Each element is a vector containing one element for each term in termIds.
 //And each of these elements is the list of positions and lengths of the occurrences of this term in this document.  */
 void NindLocalAmose::getTermPositionIndocs(const vector<unsigned int>& termIds,
@@ -121,6 +121,7 @@ bool NindLocalAmose::getDocTerms(const unsigned int docId,
             //terme prejsent dans l'index local mais absent du lexique (par exemple ahprehs
             //changement de configuration du corpus/MediaData) : ignorej au lieu de lever une
             //exception, afin de ne pas interrompre prejmaturejment le remplissage de termsSet
+            cerr<<"NindLocalAmose::getDocTerms(docId="<<docId<<") Unknown term in lexicon: NE='"<<namedEntity<<"' lemma='"<<lemma<<"'"<<endl;
             if (unknownTermCount != nullptr) ++(*unknownTermCount);
             continue;
         }

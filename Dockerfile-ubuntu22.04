@@ -1,11 +1,17 @@
-FROM debian:11
-
-ARG TRAVIS_JOB_NUMBER
+FROM ubuntu:22.04
 
 # Setup
 RUN apt-get update -y -qq
-RUN apt-get install -y apt-utils build-essential file wget bzip2 git gcc g++ cmake cmake-data ninja-build qtbase5-dev-tools qtdeclarative5-dev -qq
+RUN apt-get install -y locales bash coreutils apt-utils file wget bzip2 git cmake cmake-data ninja-build lsb-release llvm build-essential clang clang-tidy clang-tools -qq
 
+RUN update-alternatives --set cc /usr/bin/clang
+RUN update-alternatives --set c++ /usr/bin/clang++
+
+RUN locale-gen en_US.UTF-8
+ENV LANG en_US.UTF-8
+ENV LANGUAGE en_US:en
+ENV LC_ALL en_US.UTF-8
+RUN locale
 
 RUN mkdir -p /src/
 RUN git clone https://github.com/aymara/nind /src/nind
@@ -20,8 +26,8 @@ RUN echo "export packagefile=`find /src/nind/build/ -maxdepth 1 -name *.deb`" > 
 RUN echo "export fullname=\$(basename -- \$packagefile)" >> /envfile
 RUN echo "export extension=\${fullname##*.}" >> /envfile
 RUN echo "export filename=\${fullname%.*}" >> /envfile
-RUN . /envfile && install -D ${packagefile} "/usr/share/apps/nind/packages/${filename}-debian11.deb"
-
+RUN . /envfile && install -D ${packagefile} "/usr/share/apps/nind/packages/${filename}-ubuntu22.04.deb"
 
 # install github-release to be able to deploy packages
 RUN /usr/bin/wget https://github.com/aktau/github-release/releases/download/v0.7.2/linux-amd64-github-release.tar.bz2 && /bin/tar xjf linux-amd64-github-release.tar.bz2 && /bin/cp bin/linux/amd64/github-release /usr/bin
+

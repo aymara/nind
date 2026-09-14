@@ -135,7 +135,7 @@ unsigned int NindLexicon::addWord(const list<string> &components)
 //else, return 0 (0 is not a valid ident !)
 //param components list of components of a word (1 component = simple word, more components = compound word)
 //return ident of word */
-unsigned int NindLexicon::getId(const list<string> &components) 
+unsigned int NindLexicon::getId(const list<string> &components)
 {
     try {
         //si lecteur, verifie s'il y a eu maj

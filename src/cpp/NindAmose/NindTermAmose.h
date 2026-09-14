@@ -74,6 +74,11 @@ public:
     bool getDocList(const unsigned int termId,
                     std::list<unsigned int> &documentIds);
 
+    /** \brief Number of occurrences in index of a given term
+    *\param termId: identifier of the term
+    *\return number of occurrences in index for the given term */
+    unsigned int getTermFreq(const unsigned int termId);
+
     /** \brief Number of documents in index that contain the given term
     *\param termId: identifier of the term
     *\return number of documents in index that contain the given term */

@@ -11,7 +11,7 @@ add_library(NindAmose_litTexteAnalysej SHARED ${NindAmose_litTexteAnalysej_LIB_S
 
 target_link_libraries(NindAmose_litTexteAnalysej)
 
-set_target_properties(NindAmose_litTexteAnalysej PROPERTIES VERSION 1.1.0 SOVERSION 1)
+set_target_properties(NindAmose_litTexteAnalysej PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSION ${NIND_LIB_SOVERSION})
 install(TARGETS NindAmose_litTexteAnalysej DESTINATION lib)
 
 ########### next target ###############
