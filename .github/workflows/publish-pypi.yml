@@ -52,6 +52,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # cibuildwheel's own uv auto-provisioning isn't reliable on every
+      # platform (seen failing with "uv not found" on macOS/Windows); putting
+      # a real uv on PATH first avoids depending on that.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.1
         env:
