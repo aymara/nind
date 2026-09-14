@@ -40,13 +40,19 @@ if (NOT (${CMAKE_SYSTEM_NAME} STREQUAL "Windows"))
     CHECK_CXX_COMPILER_FLAG(-std=c++0x HAVE_STDCPP0X)
     CHECK_CXX_COMPILER_FLAG(-std=c++11 HAVE_STDCPP11)
     CHECK_CXX_COMPILER_FLAG(-std=c++14 HAVE_STDCPP14)
+    CHECK_CXX_COMPILER_FLAG(-std=c++17 HAVE_STDCPP17)
     CHECK_CXX_COMPILER_FLAG(-fsanitize=undefined HAVE_SANITIZE_UNDEFINED)
     CHECK_CXX_COMPILER_FLAG(-fno-omit-frame-pointer HAVE_NO_OMIT_FRAME_POINTER)
     if (HAVE_NO_OMIT_FRAME_POINTER)
       set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fno-omit-frame-pointer")
     endif()
 
-    if (HAVE_STDCPP14)
+    if (HAVE_STDCPP17)
+      message("C++17 supported ")
+      set(CMAKE_CXX_STANDARD 17)
+      set(CMAKE_CXX_STANDARD_REQUIRED ON)
+      set(CMAKE_CXX_EXTENSIONS OFF)
+    elseif (HAVE_STDCPP14)
       message("C++14 supported ")
       set(CMAKE_CXX_STANDARD 14)
       set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -105,29 +111,45 @@ else ()
   set(LIB_INSTALL_DIR "bin")
 endif ()
 
+########### setting project verion number ###############
+
+set(NIND_VERSION "1.2.3")
+
+string(REGEX REPLACE "^([0-9]+)\\.[0-9]+\\.[0-9]+$" "\\1" NIND_VERSION_MAJOR "${NIND_VERSION}")
+string(REGEX REPLACE "^[0-9]+\\.([0-9]+)\\.[0-9]+$" "\\1" NIND_VERSION_MINOR "${NIND_VERSION}")
+string(REGEX REPLACE "^[0-9]+\\.[0-9]+\\.([0-9]+)$" "\\1" NIND_VERSION_PATCH "${NIND_VERSION}")
+
+set(NIND_LIB_VERSION "${NIND_VERSION}")
+set(NIND_LIB_SOVERSION "${NIND_VERSION_MAJOR}.${NIND_VERSION_MINOR}")
+message(STATUS "Compile Nind version ${NIND_VERSION}")
+
+configure_file(NindConfig-version-src.cmake NindConfig-version.cmake @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/NindConfig-version.cmake DESTINATION share/apps/nind/cmake/Modules)
+install(FILES NindConfig.cmake DESTINATION share/apps/nind/cmake/Modules)
+
+########### source sub directories ###############
 
 enable_testing()
 
 add_subdirectory(src)
 add_subdirectory(tst)
 
-install(FILES NindConfig.cmake DESTINATION share/apps/nind/cmake/Modules)
 
 ########### packaging ###############
+set(CMAKE_INSTALL_DEBUG_LIBRARIES TRUE)
 INCLUDE(InstallRequiredSystemLibraries)
 
-set(CPACK_MONOLITHIC_INSTALL 1)
 set(CPACK_PACKAGE_NAME "nind")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Nind Inverted file index")
 set(CPACK_PACKAGE_VENDOR "Latejcon")
 set(CPACK_PACKAGE_CONTACT "Jean-Yves Sage <jean-yves.sage@orange.fr>")
 set(CPACK_PACKAGE_DESCRIPTION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENCE.md")
-set(CPACK_PACKAGE_VERSION_MAJOR "0")
-set(CPACK_PACKAGE_VERSION_MINOR "1")
-set(CPACK_PACKAGE_VERSION_PATCH "0")
-SET(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
-set(CPACK_PACKAGE_INSTALL_DIRECTORY "nind-${AMOSE_VERSION_MAJOR}.${AMOSE_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_MAJOR "${NIND_VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${NIND_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_PATCH "${NIND_VERSION_PATCH}")
+set(CPACK_PACKAGE_VERSION "${NIND_VERSION}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "nind-${NIND_VERSION_MAJOR}.${NIND_VERSION_MINOR}")
 set(CPACK_STRIP_FILES "")
 set(CPACK_SOURCE_STRIP_FILES "")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
@@ -139,8 +161,8 @@ set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}")
 # set of commands to define component based packaging
 # notify cpack of component all names
 set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "runtime")
-SET(CPACK_COMPONENTS_ALL lib devel runtime)
-set(CPACK_RPM_COMPONENT_INSTALL ON)
-set(CPACK_DEB_COMPONENT_INSTALL ON)
+set(CPACK_COMPONENTS_ALL lib devel runtime)
+#set(CPACK_RPM_COMPONENT_INSTALL ON)
+#set(CPACK_DEB_COMPONENT_INSTALL ON)
 
 INCLUDE(CPack)

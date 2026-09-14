@@ -126,8 +126,10 @@ TEST(NindPadFileTest, NewWriterRequiresNonZeroBlocSize) {
 ////////////////////////////////////////////////////////////
 TEST(NindPadFileTest, ReaderOnMissingFileThrows) {
     TestTempDir tmp;
+    // NindPadFile throws the more specific OpenFileException (rather than the
+    // generic NindPadFileException) when the underlying file can't be opened at all.
     EXPECT_THROW(TestPadFile(tmp.file("missing.pad"), false, NindPadFile::Identification(0, 0), 0, 8, 4),
-                 NindPadFileException);
+                 OpenFileException);
 }
 ////////////////////////////////////////////////////////////
 TEST(NindPadFileTest, ReopenWriterWithDifferentDataEntrySizeThrows) {

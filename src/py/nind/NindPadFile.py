@@ -84,11 +84,11 @@ TAILLE_FIXES = 4
 #############################################################
 class NindPadFile(NindFile):
     
-    def __init__(self, padFileName, enEjcriture = False, tailleEntreje = 0, tailleSpejcifiques = 0):
+    def __init__(self, padFileName, enEjcriture = False, enModification = False, tailleEntreje = 0, tailleSpejcifiques = 0):
         #en lecture uniquement
-        NindFile.__init__(self, padFileName, enEjcriture)
+        NindFile.__init__(self, padFileName, enEjcriture, enModification)
         self.entriesBlocksMap = []
-        if enEjcriture:
+        if enEjcriture and not enModification:
             self.tailleEntreje = tailleEntreje
             self.tailleSpejcifiques = tailleSpejcifiques
             #ejcrit la partie fixe
@@ -103,6 +103,14 @@ class NindPadFile(NindFile):
             self.seek(0, 0)
             self.tailleEntreje = self.litNombre1()
             self.tailleSpejcifiques = self.litNombre3()
+        
+    #############################################################   
+    # vejrifie l'intejgritej du fichier (pour pouvoir analyser un fichier dejconnant)
+    def vejrifieFichier(self):
+        #ejtablit la carte des index sur les diffejrents blocs
+        self.__ejtablitCarteIndex()
+        # vejrifie les spejcifiques
+        self.donneSpejcifiques()
         
     #############################################################   
     #retourne l'identification du fichier
@@ -214,8 +222,15 @@ class NindPadFile(NindFile):
         return maxIdent, nonVidesList
     
     #############################################################   
-    #ejcrit un bloc d'index vide
-
+    #############################################################   
+    # change l'identification ah la fin du fichier
+    def changeIdentificationFichier(self, maxIdentifiant, identifieurUnique):
+        # <flagIdentification=53> <maxIdentifiant> <identifieurUnique>
+        self.seek(-TAILLE_IDENTIFICATION, 2)
+        if self.litNombre1() != FLAG_IDENTIFICATION: 
+            raise Exception('%s : pas FLAG_IDENTIFICATION à %08X'%(self.latFileName, self.tell() -1))
+        self.ejcritNombre4(maxIdentifiant)
+        self.ejcritNombre4(identifieurUnique)
     
     #############################################################""    
     #analyse complehtement le fichier et retourne True si ok

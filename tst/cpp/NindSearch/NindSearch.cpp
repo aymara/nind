@@ -94,9 +94,10 @@ int main(int argc, char *argv[]) {
             for (list<NindTermIndex::TermCG>::const_iterator it1 = termDef.begin();
                  it1 != termDef.end(); it1++) {
                 const NindTermIndex::TermCG &termCG = (*it1);
-                cout<<BOLD<<"["<<ident<<"] "<<nindIndex_litDumpS2.getCgStr(termCG.cg)<<OFF,
-                cout<<" "<<termCG.frequency<<" fois dans ";
+                cout<<BOLD<<" termId ["<<ident<<"] " << nindIndex_litDumpS2.getCgStr(termCG.cg)<<OFF,
+                cout<<" présent "<<termCG.frequency<<" fois dans";
                 const list<NindTermIndex::Document> &documents = termCG.documents;
+                cout<<" "<< documents.size() <<" documents:"<<endl;
                 for (list<NindTermIndex::Document>::const_iterator it2 = documents.begin();
                      it2 != documents.end(); it2++) {
                     const NindTermIndex::Document &doc = (*it2);
