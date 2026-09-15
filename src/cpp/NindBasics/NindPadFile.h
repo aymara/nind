@@ -29,6 +29,8 @@
 #include <stdio.h>
 #include <string>
 #include <list>
+#include <map>
+#include <utility>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
@@ -48,6 +50,68 @@ public:
         bool operator!=(const Identification &id2) const {
             return (this->lexiconWordsNb != id2.lexiconWordsNb || this->lexiconTime != id2.lexiconTime); }
     };
+
+    /**\brief Basic descriptive statistics (count/min/max/sum/mean/stddev) over a list of numbers */
+    struct Repartition {
+        unsigned int count;
+        int64_t minValue;
+        int64_t maxValue;
+        int64_t sum;
+        double mean;
+        double stddev;
+        Repartition(): count(0), minValue(0), maxValue(0), sum(0), mean(0.0), stddev(0.0) {}
+    };
+
+    /**\brief Statistics about the "holes" (unused gaps) between a file's occupied byte ranges */
+    struct HoleStats {
+        unsigned int holesCount;
+        uint64_t holesSize;
+        std::map<uint64_t, unsigned int> holeSizeHistogram;        //{length: count}
+        std::map<uint64_t, unsigned int> occupiedSizeHistogram;    //{length: count}
+        HoleStats(): holesCount(0), holesSize(0), holeSizeHistogram(), occupiedSizeHistogram() {}
+    };
+
+    /**\brief Statistics about one indexed block of the pad-file envelope */
+    struct BlockStats {
+        uint64_t blockAddr;
+        unsigned int blockNum;
+        unsigned int entriesUsed;
+        unsigned int entriesTotal;
+        uint64_t enVracAddr;
+        uint64_t enVracSize;
+        BlockStats(): blockAddr(0), blockNum(0), entriesUsed(0), entriesTotal(0), enVracAddr(0), enVracSize(0) {}
+    };
+
+    /**\brief Full structural analysis of a pad file's envelope */
+    struct PadFileStats {
+        unsigned int dataEntrySize;
+        unsigned int specificsSize;
+        std::list<BlockStats> blocks;
+        uint64_t indexTotalSize;      //tailleIndex
+        uint64_t enVracTotalSize;     //tailleEnVrac
+        Identification identification;
+        uint64_t fileSize;
+        PadFileStats(): dataEntrySize(0), specificsSize(0), blocks(), indexTotalSize(0),
+            enVracTotalSize(0), identification(), fileSize(0) {}
+    };
+
+    /**\brief Walk and validate the whole pad-file envelope, computing size statistics
+    *\return the file's structural statistics
+    *\throws NindPadFileException if the file's structure is invalid */
+    PadFileStats analysePadFile();
+
+protected:
+    /**\brief Compute basic descriptive statistics over a list of numbers
+    *\param nombres the numbers to summarize
+    *\return the computed statistics (all zero if nombres is empty) */
+    static Repartition calculeRejpartition(const std::list<int64_t> &nombres);
+
+    /**\brief Derive the "holes" (unused gaps) between a file's occupied byte ranges
+    *\param nonVidesList occupied (address, length) ranges (a local sorted copy is used)
+    *\return the computed hole statistics
+    *\throws NindPadFileException if two occupied ranges overlap */
+    static HoleStats chercheVides(std::list<std::pair<uint64_t, unsigned int> > nonVidesList);
+
 protected:
 //<flagIndexej=47>(1) <addrBlocSuivant>(5) <nombreIndex>(3) = 9
 #define TAILLE_TETE_INDEX 9

@@ -33,13 +33,9 @@ from os import getenv, path
 from time import ctime
 try:
     from .NindPadFile import NindPadFile
-    from .NindPadFile import chercheVides
-    from .NindPadFile import calculeRejpartition
 except ImportError:
     # run directly (not as part of the installed package): see docs/cli.md
     from NindPadFile import NindPadFile
-    from NindPadFile import chercheVides
-    from NindPadFile import calculeRejpartition
 
 def usage():
     #print(sys.version)
@@ -140,70 +136,52 @@ class NindIndex(NindPadFile):
     def analyseFichierIndex(self, trace):
         """Validate the file (via :meth:`~nind.NindPadFile.NindPadFile.analyseFichierPadFile`) and report indirection-usage statistics.
 
-        French *analyseFichierIndex* = "analyzes index file". Checks that
-        every identifier up to :meth:`~nind.NindPadFile.NindPadFile.donneMaxIdentifiant`
-        resolves to a valid indirection entry, and reports the size
-        distribution of definitions plus the holes between them (see
-        :func:`~nind.NindPadFile.chercheVides`).
+        French *analyseFichierIndex* = "analyzes index file". Delegates the
+        indirection walk to ``nind._native``'s ``analyse_index()`` (see
+        ``NindIndex::analyseIndex`` in the C++), which checks that every
+        identifier resolves to a valid indirection entry and reports the
+        size distribution of definitions plus the holes between them.
 
         :param trace: if ``True``, print a human-readable report to stdout.
         :return: ``True`` if the file is structurally valid, ``False``
             otherwise.
+        :note: unlike the previous hand-rolled implementation, a structural
+            error stops the report at that point rather than continuing to
+            print whatever the remaining sections can still compute.
         """
         cestbon = self.analyseFichierPadFile(trace)
         if not cestbon: return False
         if trace: print ("======INDEX=======")
         try:
-            #met en place la carte des non-vides
-            maxIdent, nonVidesList = self.donneCarteNonVides()
-            #chaque indirection utiliséeje est mise dans la carte
-            dejfinitions = []
-            for identifiant in range(maxIdent):
-                try:
-                    position = self.donnePositionEntreje(identifiant)
-                    if position == 0: 
-                        raise Exception('%s : identifiant %d sans indirection '%(self.latFileName, identifiant))
-                    self.seek(position, 0)
-                    #<offsetDejfinition> <longueurDejfinition>
-                    offsetDejfinition = self.litNombre5()
-                    longueurDejfinition = self.litNombre3()
-                    if offsetDejfinition != 0:
-                        nonVidesList.append((offsetDejfinition, longueurDejfinition))
-                        dejfinitions.append(longueurDejfinition)
-                except:
-                    if trace: print ('*******ERREUR SUR IDENTIFIANT :', identifiant)
-                    raise
-        except Exception as exc: 
-            cestbon = False
+            stats = self._native.analyse_index()
+        except Exception as exc:
             if trace: print ('*******ERREUR :', exc.args[0])
+            return False
+
         if trace:
-            indirectionsUtilisejes, tailleMin, tailleMax, tailleDejfinitions, moyenne, ejcartType = calculeRejpartition(dejfinitions)
-            print ("%d / %d indirections utilisées"%(indirectionsUtilisejes, maxIdent))
+            print ("%d / %d indirections utilisées"%(stats.used_count, stats.max_ident))
             print ("=============")
-        try:
-            nbreVides, tailleVides, typesVides, typesNonVides = chercheVides(nonVidesList)
-            if trace:
-                total = tailleVides + tailleDejfinitions
-                print ("DÉFINITIONS    % 10d (%6.2f %%) % 9d occurrences"%(tailleDejfinitions, float(100)*tailleDejfinitions/total, indirectionsUtilisejes))
-                print ("VIDES          % 10d (%6.2f %%) % 9d occurrences"%(tailleVides, float(100)*tailleVides/total,nbreVides))
-                print ("TOTAL          % 10d %08X"%(total, total))
-                print ("=============")
-                typesVidesList = list(typesVides.items())
-                typesNonVidesList = list(typesNonVides.items())
-                typesVidesList.sort()
-                typesNonVidesList.sort()
-                print ("VIDES     de ", typesVidesList[:3], " à ", typesVidesList[-1:])
-                print ("NON VIDES de ", typesNonVidesList[:3], " à ", typesNonVidesList[-1:])
-        except Exception as exc: 
-            cestbon = False
-            if trace: print ('ERREUR :', exc.args[0])
+
+        holes = stats.holes
+        defs = stats.definition_sizes
         if trace:
+            total = holes.holes_size + defs.sum
+            print ("DÉFINITIONS    % 10d (%6.2f %%) % 9d occurrences"%(defs.sum, float(100)*defs.sum/total, stats.used_count))
+            print ("VIDES          % 10d (%6.2f %%) % 9d occurrences"%(holes.holes_size, float(100)*holes.holes_size/total, holes.holes_count))
+            print ("TOTAL          % 10d %08X"%(total, total))
             print ("=============")
-            print ("DÉFINITIONS MAX% 10d octets"%(tailleMax))
-            print ("DÉFINITIONS MIN% 10d octets"%(tailleMin))
-            print ("MOYENNE        % 10d octets"%(moyenne))
-            print ("ÉCART-TYPE     % 10d octets"%(ejcartType))
-        return cestbon
+            typesVidesList = list(holes.hole_size_histogram.items())
+            typesNonVidesList = list(holes.occupied_size_histogram.items())
+            typesVidesList.sort()
+            typesNonVidesList.sort()
+            print ("VIDES     de ", typesVidesList[:3], " à ", typesVidesList[-1:])
+            print ("NON VIDES de ", typesNonVidesList[:3], " à ", typesNonVidesList[-1:])
+            print ("=============")
+            print ("DÉFINITIONS MAX% 10d octets"%(defs.max_value))
+            print ("DÉFINITIONS MIN% 10d octets"%(defs.min_value))
+            print ("MOYENNE        % 10d octets"%(defs.mean))
+            print ("ÉCART-TYPE     % 10d octets"%(defs.stddev))
+        return True
         
 if __name__ == '__main__':
     main()

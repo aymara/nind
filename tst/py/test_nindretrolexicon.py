@@ -121,3 +121,12 @@ def test_empty_slot_within_range_returns_empty_word(tmp_path):
     assert retro.donneMot(1) == []
     assert retro.donneMot(0) == ["alpha"]
     assert retro.donneMot(2) == ["gamma"]
+
+
+def test_structural_analysis_works_without_lexicon_identification(tmp_path):
+    # analyseFichierPadFile (inherited, now nind._native-backed) is a
+    # diagnostic that must keep working even without a lexicon on hand.
+    path = str(tmp_path / "analyse.nindretrolexicon")
+    write_retrolexicon(path, {1: ("simple", "alpha"), 2: ("simple", "beta")})
+    retro = NindRetrolexicon(path)
+    assert retro.analyseFichierPadFile(False) is True

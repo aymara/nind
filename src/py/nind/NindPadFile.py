@@ -363,111 +363,58 @@ class NindPadFile(NindFile):
     def analyseFichierPadFile(self, trace):
         """Walk and validate the whole pad-file envelope, optionally printing a report.
 
-        French *analyseFichierPadFile* = "analyzes pad file". Walks every
-        indexed block and the specifics+identification trailer, checking
-        markers and computing size breakdowns (fixed header / indexed
-        blocks / "en vrac" data / specifics / identification). Used both as
-        a diagnostic (``Nind_dumpDocument.py`` and friends) and as the
-        first step of every subclass's own ``analyseFichierXxx`` method.
+        French *analyseFichierPadFile* = "analyzes pad file". Delegates the
+        binary traversal to ``nind._native``'s ``analyse_pad_file()`` (see
+        ``NindPadFile::analysePadFile`` in the C++), then reports the same
+        size breakdowns as before (fixed header / indexed blocks / "en
+        vrac" data / specifics / identification). Used both as a diagnostic
+        (``Nind_dumpDocument.py`` and friends) and as the first step of
+        every subclass's own ``analyseFichierXxx`` method.
 
         :param trace: if ``True``, print a human-readable report to stdout.
         :return: ``True`` if the envelope is structurally valid, ``False``
             otherwise (errors are reported via ``trace`` rather than
             raised).
+        :note: unlike the previous hand-rolled implementation, a structural
+            error stops the report at that point rather than continuing to
+            print whatever the remaining sections can still compute.
         """
-        cestBon = True
         if trace: print ("======PADFILE=======")
-        blocIndex = 0
-        tailleIndex = 0 
-        tailleEnVrac = 0
         try:
-            self.seek(0, 0)
-            tailleEntreje = self.litNombre1()
-            tailleSpejcifique = self.litNombre3()
-            if trace: 
-                print('TAILLE ENTRÉES             : ', tailleEntreje)
-                print('TAILLE DONNÉES SPÉCIFIQUES : ', tailleSpejcifique)
-                print ("=============")
-            addrIndex = TAILLE_FIXES
-            while True:
-                self.seek(addrIndex, 0)
-                #<flagIndexej=47> <addrBlocSuivant> <nombreIndex>
-                flagIndexej = self.litNombre1()
-                if flagIndexej != FLAG_INDEXEJ: 
-                    raise Exception('%s : pas FLAG_INDEXEJ à %08X'%(self.latFileName, addrIndex))
-                addrBlocSuivant = self.litNombre5()
-                nombreIndex = self.litNombre3()
-                blocIndex +=1
-                tailleBloc = TAILLE_TETE_INDEXEJ + nombreIndex * tailleEntreje
-                tailleIndex += tailleBloc
-                entrejesUtilisejes = 0
-                for i in range(nombreIndex):
-                    #<donnejesIndexejes>     ::= { <Octet> }
-                    #une entreje vide a tous ses octets ah 0
-                    somme = 0
-                    for j in range(tailleEntreje): somme += self.litNombre1()
-                    if somme != 0: entrejesUtilisejes +=1
-                if trace: 
-                    print ("%08X: Bloc indexé  n° % 2d :    % 10d / %d entrées utilisées"%(addrIndex, blocIndex, entrejesUtilisejes, nombreIndex))
-                
-                addrEnVrac = self.tell()
-                if addrBlocSuivant != 0: tailleBloc = addrBlocSuivant - addrEnVrac
-                else:
-                    self.seek(-TAILLE_IDENTIFICATION -TAILLE_ENTETE_SPEJCIFIQUE -tailleSpejcifique, 2)
-                    tailleBloc = self.tell() - addrEnVrac
-                tailleEnVrac += tailleBloc
-                if trace: 
-                    print ("%08X: Bloc en vrac n° % 2d :    % 10d octets"%(addrEnVrac, blocIndex, tailleBloc))
+            stats = self._native.analyse_pad_file()
+        except Exception as exc:
+            if trace: print ('ERREUR :', exc.args[0])
+            return False
 
-                if addrBlocSuivant == 0: break
-                addrIndex = addrBlocSuivant
-        except Exception as exc: 
-            cestBon = False
-            if trace: print ('ERREUR :', exc.args[0])
-            #raise
-        if trace: 
-            print ("%d blocs indexés  de taille totale % 10d octets"%(blocIndex, tailleIndex))
-            print ("%d blocs en vrac  de taille totale % 10d octets"%(blocIndex, tailleEnVrac))
+        if trace:
+            print('TAILLE ENTRÉES             : ', stats.data_entry_size)
+            print('TAILLE DONNÉES SPÉCIFIQUES : ', stats.specifics_size)
             print ("=============")
-        try:
-            self.seek(-TAILLE_IDENTIFICATION -TAILLE_ENTETE_SPEJCIFIQUE -tailleSpejcifique, 2)
-            addrSpejcifiques = self.tell()
-            #<flagSpecifique=57> <spejcifiques> 
-            if self.litNombre1() != FLAG_SPEJCIFIQUE: 
-                raise Exception('%s : pas FLAG_SPEJCIFIQUE à %08X'%(self.latFileName, addrSpejcifiques))
-            for i in range(tailleSpejcifique): self.litNombre1()
-            if self.litNombre1() != FLAG_IDENTIFICATION: 
-                raise Exception('%s : taille des spécifiques incorrecte'%(self.latFileName))
-        except Exception as exc: 
-            cestBon = False
-            if trace: print ('ERREUR :', exc.args[0])
-        tailleSpejcifique += TAILLE_ENTETE_SPEJCIFIQUE
-        try:
-            #<flagIdentification_1> <maxIdentifiant_3> <identifieurUnique_4> <identifieurSpecifique_4>
-            self.seek(-TAILLE_IDENTIFICATION, 2)
-            addrIdentification = self.tell()
-            if self.litNombre1() != FLAG_IDENTIFICATION: 
-                raise Exception('%s : pas FLAG_IDENTIFICATION à %08X'%(self.latFileName, addrIdentification))
-            maxIdentifiant = self.litNombre4()
-            dateHeure = self.litNombre4()
-            print ("max=%d dateheure=%d (%s)"%(maxIdentifiant, dateHeure, time.ctime(int(dateHeure))))
-        except Exception as exc: 
-            cestBon = False
-            if trace: print ('ERREUR :', exc.args[0])
-            
-        self.seek(0, 2)
-        offsetFin = self.tell()
-        total = tailleIndex + tailleEnVrac + tailleSpejcifique + TAILLE_IDENTIFICATION + TAILLE_FIXES
-        if trace: 
+            for block in stats.blocks:
+                print ("%08X: Bloc indexé  n° % 2d :    % 10d / %d entrées utilisées"%(
+                    block.block_addr, block.block_num, block.entries_used, block.entries_total))
+                print ("%08X: Bloc en vrac n° % 2d :    % 10d octets"%(
+                    block.en_vrac_addr, block.block_num, block.en_vrac_size))
+            print ("%d blocs indexés  de taille totale % 10d octets"%(len(stats.blocks), stats.index_total_size))
+            print ("%d blocs en vrac  de taille totale % 10d octets"%(len(stats.blocks), stats.en_vrac_total_size))
+            print ("=============")
+
+        maxIdentifiant = stats.identification.lexicon_words_nb
+        dateHeure = stats.identification.lexicon_time
+        print ("max=%d dateheure=%d (%s)"%(maxIdentifiant, dateHeure, time.ctime(int(dateHeure))))
+
+        tailleSpejcifique = stats.specifics_size + TAILLE_ENTETE_SPEJCIFIQUE
+        total = stats.index_total_size + stats.en_vrac_total_size + tailleSpejcifique + TAILLE_IDENTIFICATION + TAILLE_FIXES
+        if trace:
             print ("=============")
             print ("FIXES          % 10d (%6.2f %%)"%(TAILLE_FIXES, float(100)*TAILLE_FIXES/total))
-            print ("INDEXÉS        % 10d (%6.2f %%)"%(tailleIndex, float(100)*tailleIndex/total))
-            print ("EN VRAC        % 10d (%6.2f %%)"%(tailleEnVrac, float(100)*tailleEnVrac/total))
+            print ("INDEXÉS        % 10d (%6.2f %%)"%(stats.index_total_size, float(100)*stats.index_total_size/total))
+            print ("EN VRAC        % 10d (%6.2f %%)"%(stats.en_vrac_total_size, float(100)*stats.en_vrac_total_size/total))
             print ("SPÉCIFIQUES    % 10d (%6.2f %%)"%(tailleSpejcifique, float(100)*tailleSpejcifique/total))
             print ("IDENTIFICATION % 10d (%6.2f %%)"%(TAILLE_IDENTIFICATION, float(100)*TAILLE_IDENTIFICATION/total))
             print ("TOTAL          % 10d %08X"%(total, total))
-            print ("taille fichier % 10d %08X"%(offsetFin, offsetFin))
-        return cestBon
+            print ("taille fichier % 10d %08X"%(stats.file_size, stats.file_size))
+        return True
     
 #############################################################""
 #ah partir de la carte des non-vides, trouve le nombre et la taille des vides

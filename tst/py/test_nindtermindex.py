@@ -66,3 +66,12 @@ def test_structural_indirection_is_consistent(tmp_path):
     path = write_term_index(tmp_path, {1: [(0, 1)], 5: [(2, 3)]})
     index = NindTermindex(path, IDENTIFICATION)
     assert index.analyseFichierIndex(False) is True
+
+
+def test_structural_analysis_works_without_lexicon_identification(tmp_path):
+    # analyseFichierPadFile/analyseFichierIndex are diagnostics that must
+    # keep working even when the caller has no lexicon on hand (unlike
+    # donneListeTermesCG, which requires lexicon_identification).
+    path = write_term_index(tmp_path, {1: [(0, 1)], 5: [(2, 3)]})
+    index = NindTermindex(path)
+    assert index.analyseFichierIndex(False) is True

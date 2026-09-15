@@ -144,15 +144,16 @@ class NindTermindex(NindIndex):
         :raises Exception: if the file's pad-file envelope is invalid.
         """
         NindIndex.__init__(self, termindexFileName)
-        self._native = None
-        if lexicon_identification is not None:
-            if native is None:
-                raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
-            base = termindexFileName
-            if base.endswith(NINDTERMINDEX_EXT): base = base[:-len(NINDTERMINDEX_EXT)]
-            self._native = native.NindTermIndex(base, is_writer=False,
-                                                 lexicon_identification=lexicon_identification,
-                                                 specifics_number=0)
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
+        self._has_lexicon_identification = lexicon_identification is not None
+        #sans identification rejelle, ouvre quand mesme (sans vejrification croisejes) pour les diagnostics
+        effective_identification = lexicon_identification if lexicon_identification is not None else native.Identification(0, 0)
+        base = termindexFileName
+        if base.endswith(NINDTERMINDEX_EXT): base = base[:-len(NINDTERMINDEX_EXT)]
+        self._native = native.NindTermIndex(base, is_writer=False,
+                                             lexicon_identification=effective_identification,
+                                             specifics_number=0)
 
     #trouve les donnejes
     def __donneDonnejes(self, identifiant):
@@ -189,7 +190,7 @@ class NindTermindex(NindIndex):
             in. Empty list if ``ident`` is unknown.
         :raises Exception: if opened without ``lexicon_identification``.
         """
-        if self._native is None:
+        if not self._has_lexicon_identification:
             raise Exception('%s : donneListeTermesCG nécessite lexicon_identification à l\'ouverture'%(self.latFileName))
         term_def = self._native.get_term_def(ident)
         return term_def if term_def is not None else []

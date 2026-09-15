@@ -35,6 +35,21 @@ namespace latecon {
     namespace nindex {
 ////////////////////////////////////////////////////////////
 class DLLExportLexicon NindIndex : public NindPadFile {
+public:
+    /**\brief Full structural analysis of an index file (on top of the pad-file envelope) */
+    struct IndexStats {
+        unsigned int maxIdent;
+        unsigned int usedCount;
+        NindPadFile::HoleStats holes;
+        NindPadFile::Repartition definitionSizes;
+        IndexStats(): maxIdent(0), usedCount(0), holes(), definitionSizes() {}
+    };
+
+    /**\brief Validate the file and compute indirection-usage statistics
+    *\return the file's index-level structural statistics
+    *\throws NindPadFileException if the file is structurally invalid */
+    IndexStats analyseIndex();
+
 protected:
     /**\brief Creates NindIndex with a specified name associated with.
     *\param fileName absolute path file name

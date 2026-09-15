@@ -46,6 +46,49 @@ PYBIND11_MODULE(_native, m) {
                    ", lexicon_time=" + std::to_string(id.lexiconTime) + ")";
         });
 
+    // ---- Shared diagnostics structures (NindPadFile / NindIndex) --------
+    py::class_<NindPadFile::Repartition>(m, "Repartition")
+        .def(py::init<>())
+        .def_readwrite("count", &NindPadFile::Repartition::count)
+        .def_readwrite("min_value", &NindPadFile::Repartition::minValue)
+        .def_readwrite("max_value", &NindPadFile::Repartition::maxValue)
+        .def_readwrite("sum", &NindPadFile::Repartition::sum)
+        .def_readwrite("mean", &NindPadFile::Repartition::mean)
+        .def_readwrite("stddev", &NindPadFile::Repartition::stddev);
+
+    py::class_<NindPadFile::HoleStats>(m, "HoleStats")
+        .def(py::init<>())
+        .def_readwrite("holes_count", &NindPadFile::HoleStats::holesCount)
+        .def_readwrite("holes_size", &NindPadFile::HoleStats::holesSize)
+        .def_readwrite("hole_size_histogram", &NindPadFile::HoleStats::holeSizeHistogram)
+        .def_readwrite("occupied_size_histogram", &NindPadFile::HoleStats::occupiedSizeHistogram);
+
+    py::class_<NindPadFile::BlockStats>(m, "BlockStats")
+        .def(py::init<>())
+        .def_readwrite("block_addr", &NindPadFile::BlockStats::blockAddr)
+        .def_readwrite("block_num", &NindPadFile::BlockStats::blockNum)
+        .def_readwrite("entries_used", &NindPadFile::BlockStats::entriesUsed)
+        .def_readwrite("entries_total", &NindPadFile::BlockStats::entriesTotal)
+        .def_readwrite("en_vrac_addr", &NindPadFile::BlockStats::enVracAddr)
+        .def_readwrite("en_vrac_size", &NindPadFile::BlockStats::enVracSize);
+
+    py::class_<NindPadFile::PadFileStats>(m, "PadFileStats")
+        .def(py::init<>())
+        .def_readwrite("data_entry_size", &NindPadFile::PadFileStats::dataEntrySize)
+        .def_readwrite("specifics_size", &NindPadFile::PadFileStats::specificsSize)
+        .def_readwrite("blocks", &NindPadFile::PadFileStats::blocks)
+        .def_readwrite("index_total_size", &NindPadFile::PadFileStats::indexTotalSize)
+        .def_readwrite("en_vrac_total_size", &NindPadFile::PadFileStats::enVracTotalSize)
+        .def_readwrite("identification", &NindPadFile::PadFileStats::identification)
+        .def_readwrite("file_size", &NindPadFile::PadFileStats::fileSize);
+
+    py::class_<NindIndex::IndexStats>(m, "IndexStats")
+        .def(py::init<>())
+        .def_readwrite("max_ident", &NindIndex::IndexStats::maxIdent)
+        .def_readwrite("used_count", &NindIndex::IndexStats::usedCount)
+        .def_readwrite("holes", &NindIndex::IndexStats::holes)
+        .def_readwrite("definition_sizes", &NindIndex::IndexStats::definitionSizes);
+
     // ---- NindLexiconIndex -------------------------------------------------
     py::class_<NindLexiconIndex>(m, "NindLexiconIndex")
         .def(py::init<const std::string &, bool, bool, unsigned int, unsigned int>(),
@@ -62,7 +105,9 @@ PYBIND11_MODULE(_native, m) {
             return py::cast(components);
         }, py::arg("ident"))
         .def("get_retrolexicon_file_name", &NindLexiconIndex::getRetrolexiconFileName)
-        .def("get_file_name", &NindPadFile::getFileName);
+        .def("get_file_name", &NindPadFile::getFileName)
+        .def("analyse_pad_file", &NindPadFile::analysePadFile)
+        .def("analyse_index", &NindIndex::analyseIndex);
 
     // ---- NindTermIndex ------------------------------------------------
     py::class_<NindTermIndex::Document>(m, "Document")
@@ -99,7 +144,9 @@ PYBIND11_MODULE(_native, m) {
         })
         .def("set_term_def", &NindTermIndex::setTermDef,
              py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"))
-        .def("get_file_name", &NindPadFile::getFileName);
+        .def("get_file_name", &NindPadFile::getFileName)
+        .def("analyse_pad_file", &NindPadFile::analysePadFile)
+        .def("analyse_index", &NindIndex::analyseIndex);
 
     // ---- NindLocalIndex -----------------------------------------------
     py::class_<NindLocalIndex::Localisation>(m, "Localisation")
@@ -137,7 +184,9 @@ PYBIND11_MODULE(_native, m) {
         .def("set_local_def", &NindLocalIndex::setLocalDef,
              py::arg("ident"), py::arg("local_def"), py::arg("file_identification"))
         .def("get_doc_count", &NindLocalIndex::getDocCount)
-        .def("get_file_name", &NindPadFile::getFileName);
+        .def("get_file_name", &NindPadFile::getFileName)
+        .def("analyse_pad_file", &NindPadFile::analysePadFile)
+        .def("analyse_index", &NindIndex::analyseIndex);
 
     // ---- NindRetrolexicon -----------------------------------------------
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")
@@ -161,7 +210,8 @@ PYBIND11_MODULE(_native, m) {
             if (!self.getComponents(ident, components)) return py::none();
             return py::cast(components);
         }, py::arg("ident"))
-        .def("get_file_name", &NindRetrolexicon::getFileName);
+        .def("get_file_name", &NindRetrolexicon::getFileName)
+        .def("analyse_pad_file", &NindPadFile::analysePadFile);
 
     // ---- NindLexicon (in-memory) ------------------------------------------
     py::class_<NindLexicon::LexiconChar>(m, "LexiconChar")
