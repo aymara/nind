@@ -17,7 +17,7 @@ exists to read files produced by the C++ side or by legacy nind tooling.
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
