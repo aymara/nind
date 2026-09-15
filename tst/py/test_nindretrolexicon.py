@@ -74,7 +74,7 @@ def test_simple_word_round_trips(tmp_path):
     write_retrolexicon(path, {1: ("simple", "alpha")})
 
     retro = NindRetrolexicon(path)
-    assert retro.donneMot(1) == ("alpha", 1)
+    assert retro.donneMot(1) == ["alpha"]
 
 
 def test_two_component_compound_round_trips(tmp_path):
@@ -88,7 +88,7 @@ def test_two_component_compound_round_trips(tmp_path):
     })
 
     retro = NindRetrolexicon(path)
-    assert retro.donneMot(3) == ("alpha_beta", 2)
+    assert retro.donneMot(3) == ["alpha", "beta"]
 
 
 def test_three_component_compound_round_trips(tmp_path):
@@ -102,14 +102,14 @@ def test_three_component_compound_round_trips(tmp_path):
     })
 
     retro = NindRetrolexicon(path)
-    assert retro.donneMot(5) == ("alpha_beta_gamma", 3)
+    assert retro.donneMot(5) == ["alpha", "beta", "gamma"]
 
 
 def test_unknown_ident_returns_empty_word(tmp_path):
     path = str(tmp_path / "unknown.nindretrolexicon")
     write_retrolexicon(path, {1: ("simple", "alpha")})
     retro = NindRetrolexicon(path)
-    assert retro.donneMot(999) == ("", 0)
+    assert retro.donneMot(999) == []
 
 
 def test_empty_slot_within_range_returns_empty_word(tmp_path):
@@ -118,6 +118,6 @@ def test_empty_slot_within_range_returns_empty_word(tmp_path):
     path = str(tmp_path / "gap.nindretrolexicon")
     write_retrolexicon(path, {0: ("simple", "alpha"), 2: ("simple", "gamma")})
     retro = NindRetrolexicon(path)
-    assert retro.donneMot(1) == ("", 0)
-    assert retro.donneMot(0) == ("alpha", 1)
-    assert retro.donneMot(2) == ("gamma", 1)
+    assert retro.donneMot(1) == []
+    assert retro.donneMot(0) == ["alpha"]
+    assert retro.donneMot(2) == ["gamma"]
