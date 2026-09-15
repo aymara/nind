@@ -39,7 +39,11 @@ import codecs
 import datetime
 import time
 import math
-from .NindFile import NindFile
+try:
+    from .NindFile import NindFile
+except ImportError:
+    # run directly (not as part of the installed package): see docs/cli.md
+    from NindFile import NindFile
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')

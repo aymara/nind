@@ -18,6 +18,7 @@ from os import getenv, path
 from codecs import open
 from NindRetrolexicon import NindRetrolexicon
 from NindLocalindex import NindLocalindex
+from NindLexiconindex import NindLexiconindex
 import NindFile
 
 def usage():
@@ -59,11 +60,14 @@ def main():
 def dumpeDocument(nindFileName, noDoc):
     #calcul des noms de fichiers (remplace l'extension)
     nn = nindFileName.split('.')
+    nindlexiconindexName = '.'.join(nn[:-1]) + '.nindlexiconindex'
     nindlocalindexName = '.'.join(nn[:-1]) + '.nindlocalindex'
     nindretrolexiconName = '.'.join(nn[:-1]) + '.nindretrolexicon'
     #les classes
-    nindLocalindex = NindLocalindex(nindlocalindexName)
-    nindRetrolexicon = NindRetrolexicon(nindretrolexiconName)
+    nindLexiconindex = NindLexiconindex(nindlexiconindexName)
+    lexiconIdentification = nindLexiconindex.donneIdentification()
+    nindLocalindex = NindLocalindex(nindlocalindexName, lexiconIdentification)
+    nindRetrolexicon = NindRetrolexicon(nindretrolexiconName, lexiconIdentification)
     #trouve l'identifiant interne
     if noDoc.startswith('las'):
         (noInterne, noExterne) = nindLocalindex.donneMaxIdentifiants()
@@ -83,12 +87,12 @@ def dumpeDocument(nindFileName, noDoc):
     # ouvre le fichier de dump
     fichierDumpName = '.'.join(nn[:-1]) + f'-dump-{last}{noExterne}.txt'
     with open(fichierDumpName, 'w', 'utf8') as dump:
-        for (noTerme, categorie, localisationsList) in termList:
-            terme = '#'.join(nindRetrolexicon.donneMot(noTerme))
-            if categorie == 0:
+        for termeLocal in termList:
+            terme = '#'.join(nindRetrolexicon.donneMot(termeLocal.term))
+            if termeLocal.cg == 0:
                 resultat.append(terme)
             else:
-                resultat.append(f'{terme} [{NindFile.catNb2Str(categorie)}]')
+                resultat.append(f'{terme} [{NindFile.catNb2Str(termeLocal.cg)}]')
             cmptTermes +=1
             if cmptTermes %4 == 0: 
                 dump.write(', '.join(resultat) + ',\n')

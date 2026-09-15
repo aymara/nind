@@ -28,8 +28,16 @@ import sys
 from os import getenv, path
 from io import StringIO
 import codecs
-from .NindPadFile import calculeRejpartition
-from .NindIndex import NindIndex
+try:
+    from .NindPadFile import calculeRejpartition
+    from .NindIndex import NindIndex
+except ImportError:
+    # run directly (not as part of the installed package): see docs/cli.md
+    from NindPadFile import calculeRejpartition
+    from NindIndex import NindIndex
+from nind import _native as native
+
+NINDLOCALINDEX_EXT = '.nindlocalindex'
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')
@@ -122,17 +130,33 @@ class NindLocalindex(NindIndex):
     Documents are addressed by their *external* id everywhere in the
     public API (:meth:`donneListeTermes`, :meth:`afficheDocument`); the
     class transparently translates to/from the internal id used inside the
-    file, via a table built once at open time.
+    file, via a table built once at open time. :meth:`donneListeTermes`
+    delegates to the ``nind._native`` bindings and requires
+    ``lexicon_identification``; the diagnostic methods
+    (``analyseFichierLocalindex``, ``dumpeFichier``, ``afficheDocument``)
+    work without it, remaining hand-rolled pure-Python parsing since
+    ``nind._native`` doesn't expose that introspection.
     """
 
-    def __init__(self, localindexFileName):
+    def __init__(self, localindexFileName, lexicon_identification=None):
         """Open ``localindexFileName`` read-only and build the external<->internal id table.
 
         :param localindexFileName: path to the ``.nindlocalindex`` file.
+        :param lexicon_identification: the ``nind._native.Identification``
+            of the :class:`~nind.NindLexiconindex.NindLexiconindex` this
+            local index was built against (see its ``donneIdentification``).
+            Required only for :meth:`donneListeTermes`; the diagnostic
+            methods work without it.
         :raises Exception: if the file's pad-file envelope is invalid, or
             its specifics block has the wrong size.
         """
         NindIndex.__init__(self, localindexFileName)
+        self._native = None
+        if lexicon_identification is not None:
+            base = localindexFileName
+            if base.endswith(NINDLOCALINDEX_EXT): base = base[:-len(NINDLOCALINDEX_EXT)]
+            self._native = native.NindLocalIndex(base, is_writer=False,
+                                                  lexicon_identification=lexicon_identification)
         #rejcupehre l'adresse et la longueur des spejcifiques
         (offsetSpejcifiques, tailleSpejcifiques) = self.donneSpejcifiques()
         if tailleSpejcifiques != TAILLE_SPEJCIFIQUES: 
@@ -182,40 +206,18 @@ class NindLocalindex(NindIndex):
         French *donneListeTermes* = "gives term list".
 
         :param noDocExterne: the document's external identifier.
-        :return: a list of ``(noTerme, catejgorie, localisationsList)``
-            tuples, one per term occurring in the document; ``localisationsList``
-            is a list of ``(localisationAbsolue, longueur)`` pairs (token
-            position in the document, token length - the latter currently
-            unused, always written as 1). Empty list if ``noDocExterne`` is
-            unknown.
-        :raises Exception: if the file is internally inconsistent.
+        :return: a list of ``nind._native.Term`` (``.term``, ``.cg``,
+            ``.localisation``: list of ``Localisation`` with
+            ``.position``/``.length``), one per term occurring in the
+            document. Empty list if ``noDocExterne`` is unknown.
+        :raises Exception: if opened without ``lexicon_identification``.
         """
-        #trouve le numejro interne
-        if noDocExterne not in self.docIdTradExtInt: return []          #doc inconnu
-        noDocInterne = self.docIdTradExtInt[noDocExterne]
-        #trouve les donnejes 
-        trouvej, longueurDonnejes, tailleExtension, identifiantExterne = self.__donneDonnejes(noDocInterne)
-        if not trouvej: return []          #doc inconnu
-        if identifiantExterne != noDocExterne: 
-            raise Exception('%s : %d incohérent à %08X'%(self.latFileName, identifiant, self.tell()))
-        finDonnejes = self.tell() + longueurDonnejes
-        #lit les donnejes
-        rejsultat = []
-        noTerme = 0
-        localisationAbsolue = 0
-        while self.tell() < finDonnejes:
-            #<identTermeRelatif> <catejgorie> <nbreLocalisations> <localisations>
-            noTerme += self.litNombreSLat()
-            catejgorie = self.litNombre1()
-            nbreLocalisations = self.litNombre1()
-            localisationsList = []
-            for i in range (nbreLocalisations):
-                #<localisationRelatif> <longueur>
-                localisationAbsolue += self.litNombreSLat()
-                longueur = self.litNombre1()
-                localisationsList.append((localisationAbsolue, longueur))
-            rejsultat.append((noTerme, catejgorie, localisationsList))
-        return rejsultat
+        if self._native is None:
+            raise Exception('%s : donneListeTermes nécessite lexicon_identification à l\'ouverture'%(self.latFileName))
+        #nind._native.NindLocalIndex.get_local_def prend directement l'identifiant externe
+        #(la traduction externe -> interne est faite en interne par le C++)
+        local_def = self._native.get_local_def(noDocExterne)
+        return local_def if local_def is not None else []
               
     #######################################################################
     #retourne les identifiants interne et externe du dernier document indexej

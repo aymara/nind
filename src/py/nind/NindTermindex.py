@@ -29,8 +29,16 @@ import sys
 from os import getenv, path
 from io import StringIO
 import codecs
-from .NindPadFile import calculeRejpartition
-from .NindIndex import NindIndex
+try:
+    from .NindPadFile import calculeRejpartition
+    from .NindIndex import NindIndex
+except ImportError:
+    # run directly (not as part of the installed package): see docs/cli.md
+    from NindPadFile import calculeRejpartition
+    from NindIndex import NindIndex
+from nind import _native as native
+
+NINDTERMINDEX_EXT = '.nindtermindex'
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')
@@ -109,18 +117,33 @@ TAILLE_TESTE_DEJFINITION = 8
 class NindTermindex(NindIndex):
     """Read-only inverted file: term identifier -> posting lists, grouped by grammatical category.
 
-    :meth:`donneListeTermesCG` is the main lookup method; the rest
+    :meth:`donneListeTermesCG` delegates to the ``nind._native`` bindings
+    and requires ``lexicon_identification``; the rest
     (``analyseFichierTermindex``, ``dumpeFichier``, ``afficheTerme``) are
-    diagnostics used by the ``Nind_*`` command-line tools.
+    diagnostics used by the ``Nind_*`` command-line tools, work without a
+    lexicon, and remain hand-rolled pure-Python parsing since
+    ``nind._native`` doesn't expose that introspection.
     """
 
-    def __init__(self, termindexFileName):
+    def __init__(self, termindexFileName, lexicon_identification=None):
         """Open ``termindexFileName`` read-only.
 
         :param termindexFileName: path to the ``.nindtermindex`` file.
+        :param lexicon_identification: the ``nind._native.Identification``
+            of the :class:`~nind.NindLexiconindex.NindLexiconindex` this
+            term index was built against (see its ``donneIdentification``).
+            Required only for :meth:`donneListeTermesCG`; the diagnostic
+            methods work without it.
         :raises Exception: if the file's pad-file envelope is invalid.
         """
         NindIndex.__init__(self, termindexFileName)
+        self._native = None
+        if lexicon_identification is not None:
+            base = termindexFileName
+            if base.endswith(NINDTERMINDEX_EXT): base = base[:-len(NINDTERMINDEX_EXT)]
+            self._native = native.NindTermIndex(base, is_writer=False,
+                                                 lexicon_identification=lexicon_identification,
+                                                 specifics_number=0)
 
     #trouve les donnejes
     def __donneDonnejes(self, identifiant):
@@ -151,36 +174,16 @@ class NindTermindex(NindIndex):
 
         :param ident: the term identifier (as produced by
             :class:`~nind.NindLexiconindex.NindLexiconindex`).
-        :return: a list of ``(catejgorie, frejquenceTerme, docs)`` tuples,
-            one per grammatical category the term was seen in; ``docs`` is
-            a list of ``(noDoc, frejquenceDoc)`` pairs (internal document
-            id, occurrence count in that document). Empty list if ``ident``
-            is unknown.
-        :raises Exception: if the file's ``FLAG_CG`` marker is missing.
+        :return: a list of ``nind._native.TermCG`` (``.cg``, ``.frequency``,
+            ``.documents``: list of ``Document`` with ``.ident``/
+            ``.frequency``), one per grammatical category the term was seen
+            in. Empty list if ``ident`` is unknown.
+        :raises Exception: if opened without ``lexicon_identification``.
         """
-        #trouve les donnejes
-        trouvej, longueurDonnejes, tailleExtension = self.__donneDonnejes(ident)
-        if not trouvej: return []          #terme inconnu
-        finDonnejes = self.tell() + longueurDonnejes
-        #lit les donnes
-        resultat = []
-        while self.tell() < finDonnejes:
-            #<flagCg=61> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
-            if self.litNombre1() != FLAG_CG: 
-                raise Exception('NindTermindex.donneListeTermesCG %s : pas FLAG_CG'%(self.latFileName))
-            catejgorie = self.litNombre1()
-            frejquenceTerme = self.litNombreULat()
-            nbreDocs = self.litNombreULat()
-            noDoc = 0
-            docs = []
-            for i in range(nbreDocs):
-                #<identDocRelatif> <frejquenceDoc>
-                identDocRelatif = self.litNombreULat()
-                frejquenceDoc = self.litNombreULat()
-                noDoc += identDocRelatif
-                docs.append((noDoc, frejquenceDoc))
-            resultat.append((catejgorie, frejquenceTerme, docs))
-        return resultat
+        if self._native is None:
+            raise Exception('%s : donneListeTermesCG nécessite lexicon_identification à l\'ouverture'%(self.latFileName))
+        term_def = self._native.get_term_def(ident)
+        return term_def if term_def is not None else []
  
     #######################################################################"
     #analyse du fichier

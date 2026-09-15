@@ -31,9 +31,15 @@ __version__ = "2.0.7"
 import sys
 from os import getenv, path
 from time import ctime
-from .NindPadFile import NindPadFile
-from .NindPadFile import chercheVides
-from .NindPadFile import calculeRejpartition
+try:
+    from .NindPadFile import NindPadFile
+    from .NindPadFile import chercheVides
+    from .NindPadFile import calculeRejpartition
+except ImportError:
+    # run directly (not as part of the installed package): see docs/cli.md
+    from NindPadFile import NindPadFile
+    from NindPadFile import chercheVides
+    from NindPadFile import calculeRejpartition
 
 def usage():
     #print(sys.version)
