@@ -7,8 +7,10 @@ DOCS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(DOCS_DIR)
 
 # Import the pure-Python package directly from source, without building the
-# nind._native extension: none of src/py/nind/*.py import it (see
-# nind/__init__.py), so this is enough for autodoc to introspect everything.
+# nind._native extension. Several src/py/nind/*.py modules do import it, but
+# only to delegate at call time (constructors, not module import) - each
+# guards that import with try/except ImportError (falling back to
+# native = None) precisely so autodoc can still introspect everything here.
 sys.path.insert(0, os.path.join(REPO_ROOT, "src", "py"))
 
 with open(os.path.join(REPO_ROOT, "pyproject.toml"), encoding="utf-8") as f:

@@ -38,7 +38,14 @@ except ImportError:
     # run directly (not as part of the installed package): see docs/cli.md
     from NindPadFile import NindPadFile
     from NindPadFile import chercheVides
-from nind import _native as native
+try:
+    from nind import _native as native
+except ImportError:
+    # nind._native is a compiled extension: not available when introspecting
+    # the pure-Python source without building it (e.g. Sphinx autodoc, see
+    # docs/conf.py). Constructing NindRetrolexicon with lexicon_identification
+    # still requires it - only module import is tolerant.
+    native = None
 
 NINDRETROLEXICON_EXT = '.nindretrolexicon'
 
@@ -164,6 +171,8 @@ class NindRetrolexicon(NindPadFile):
         self.vejrifieFichier()
         self._native = None
         if lexicon_identification is not None:
+            if native is None:
+                raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
             base = retrolexiconFileName
             if base.endswith(NINDRETROLEXICON_EXT): base = base[:-len(NINDRETROLEXICON_EXT)]
             self._native = native.NindRetrolexicon(base, is_writer=False,

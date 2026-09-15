@@ -36,7 +36,14 @@ except ImportError:
     import NindFile
     from NindIndex import NindIndex
     from NindPadFile import calculeRejpartition
-from nind import _native as native
+try:
+    from nind import _native as native
+except ImportError:
+    # nind._native is a compiled extension: not available when introspecting
+    # the pure-Python source without building it (e.g. Sphinx autodoc, see
+    # docs/conf.py). Constructing NindLexiconindex still requires it - only
+    # module import is tolerant.
+    native = None
 
 NINDLEXICONINDEX_EXT = '.nindlexiconindex'
 
@@ -155,6 +162,8 @@ class NindLexiconindex(NindIndex):
         NindIndex.__init__(self, lexiconindexFileName)
         #trouve le modulo = nombreIndirection
         self.nombreIndirection = self.donneMaxIdentifiant()
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         base = lexiconindexFileName
         if base.endswith(NINDLEXICONINDEX_EXT): base = base[:-len(NINDLEXICONINDEX_EXT)]
         self._native = native.NindLexiconIndex(base, is_writer=False)
