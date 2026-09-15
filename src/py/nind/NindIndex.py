@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Generic "definitions indexed by integer identifier" pad file.
+
+:class:`NindIndex` specializes :class:`~nind.NindPadFile.NindPadFile` for
+the common case where the indirection table maps a simple integer
+identifier directly to a variable-length "definition" record: each
+indirection entry is just an ``(offset, length)`` pair (see the
+``<indirection>`` grammar rule below). This is the shared shape behind all
+three concrete index formats:
+:class:`~nind.NindLexiconindex.NindLexiconindex` (``.nindlexiconindex``,
+keyed by hash bucket), :class:`~nind.NindTermindex.NindTermindex`
+(``.nindtermindex``, keyed by term id) and
+:class:`~nind.NindLocalindex.NindLocalindex` (``.nindlocalindex``, keyed by
+internal document id) - each of those only adds the meaning of the bytes
+inside a definition.
+"""
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
@@ -79,14 +94,34 @@ TAILLE_INDIRECTION = 8
 ############################################################
 
 class NindIndex(NindPadFile):
-    
+    """Read-only pad file whose indirection entries are plain ``(offset, length)`` pairs.
+
+    Adds :meth:`donneAdresseDejfinition` on top of
+    :class:`~nind.NindPadFile.NindPadFile`, resolving an identifier straight
+    to where its variable-length definition lives; format-specific
+    subclasses use it and then decode the definition's bytes themselves.
+    """
+
     def __init__(self, indexFileName):
+        """Open ``indexFileName`` read-only and verify its structure.
+
+        :param indexFileName: path to the ``.nind*index`` file.
+        :raises Exception: if the file's pad-file envelope is invalid.
+        """
         #en lecture uniquement
         NindPadFile.__init__(self, indexFileName)
         self.vejrifieFichier()
-        
+
     #donne l'adresse et la longueur de la dejfinition
     def donneAdresseDejfinition(self, identifiant):
+        """Return the offset and length of ``identifiant``'s definition.
+
+        French *donneAdresseDéfinition* = "gives definition address".
+
+        :param identifiant: the integer identifier to look up.
+        :return: an ``(offsetDejfinition, longueurDejfinition)`` tuple, or
+            ``(0, 0)`` if ``identifiant`` is out of range.
+        """
         position = self.donnePositionEntreje(identifiant)
         if position == 0: return (0, 0)          #identifiant hors limite
         self.seek(position, 0)
@@ -97,6 +132,18 @@ class NindIndex(NindPadFile):
 
     #analyse complehtement le fichier et retourne True si ok
     def analyseFichierIndex(self, trace):
+        """Validate the file (via :meth:`~nind.NindPadFile.NindPadFile.analyseFichierPadFile`) and report indirection-usage statistics.
+
+        French *analyseFichierIndex* = "analyzes index file". Checks that
+        every identifier up to :meth:`~nind.NindPadFile.NindPadFile.donneMaxIdentifiant`
+        resolves to a valid indirection entry, and reports the size
+        distribution of definitions plus the holes between them (see
+        :func:`~nind.NindPadFile.chercheVides`).
+
+        :param trace: if ``True``, print a human-readable report to stdout.
+        :return: ``True`` if the file is structurally valid, ``False``
+            otherwise.
+        """
         cestbon = self.analyseFichierPadFile(trace)
         if not cestbon: return False
         if trace: print ("======INDEX=======")

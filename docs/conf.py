@@ -1,0 +1,61 @@
+"""Sphinx configuration for the nind Python package documentation."""
+import os
+import re
+import sys
+
+DOCS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(DOCS_DIR)
+
+# Import the pure-Python package directly from source, without building the
+# nind._native extension: none of src/py/nind/*.py import it (see
+# nind/__init__.py), so this is enough for autodoc to introspect everything.
+sys.path.insert(0, os.path.join(REPO_ROOT, "src", "py"))
+
+with open(os.path.join(REPO_ROOT, "pyproject.toml"), encoding="utf-8") as f:
+    _pyproject_text = f.read()
+_version_match = re.search(r'^version = "([^"]+)"$', _pyproject_text, re.MULTILINE)
+
+project = "nind"
+copyright = "2014-2026 LATEJCON, CEA LIST/DIASI/LVIC"
+author = "Jean-Yves Sage, CEA LIST/DIASI/LVIC, and contributors"
+release = _version_match.group(1) if _version_match else "0.0.0"
+version = release
+
+extensions = [
+    "sphinx.ext.autodoc",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.viewcode",
+    "sphinx.ext.intersphinx",
+    "myst_parser",
+]
+
+myst_enable_extensions = ["fieldlist", "deflist"]
+source_suffix = {
+    ".rst": "restructuredtext",
+    ".md": "markdown",
+}
+
+autodoc_member_order = "bysource"
+autodoc_default_options = {
+    "members": True,
+    "undoc-members": False,
+    "show-inheritance": True,
+}
+autoclass_content = "both"
+add_module_names = False
+
+intersphinx_mapping = {
+    "python": ("https://docs.python.org/3", None),
+}
+
+templates_path = ["_templates"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+
+html_theme = "furo"
+html_title = f"nind {version}"
+html_static_path = []
+html_theme_options = {
+    "source_repository": "https://github.com/aymara/nind/",
+    "source_branch": "master",
+    "source_directory": "docs/",
+}

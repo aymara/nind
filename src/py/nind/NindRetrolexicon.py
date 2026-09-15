@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Reverse lexicon: word identifier -> clear-text word(s).
+
+A ``.nindretrolexicon`` file is the mirror image of
+:mod:`~nind.NindLexiconindex` (which maps a word to its identifier): given
+an identifier, :class:`NindRetrolexicon` returns the word it stands for,
+including reconstructing compound words from their component identifiers.
+It is a plain :class:`~nind.NindPadFile.NindPadFile` (not a
+:class:`~nind.NindIndex.NindIndex`): entries here are either a UTF-8 word
+directly, or a pointer pair to two other entries (see the grammar below).
+
+Not written by :class:`~nind.nind_engine.NindIndexer` (``NindEngine`` only
+supports simple, non-compound words and has no use for it) - this class
+exists to read files produced by the C++ side or by legacy nind tooling.
+"""
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
@@ -108,7 +122,21 @@ FLAG_SIMPLE = 37
 TAILLE_COMPOSEJ_MAXIMUM = 100
 
 class NindRetrolexicon(NindPadFile):
+    """Read-only reverse lexicon: resolves a word identifier back to text.
+
+    Each entry is either a "simple word" (a UTF-8 string stored directly in
+    the file's "en vrac" area) or a "compound word" (a pair of identifiers
+    ``identifiantA``/``identifiantS`` pointing at the word's two parts,
+    themselves resolved recursively by :meth:`donneMot`).
+    """
+
     def __init__(self, retrolexiconFileName):
+        """Open ``retrolexiconFileName`` read-only and verify its structure.
+
+        :param retrolexiconFileName: path to the ``.nindretrolexicon`` file.
+        :raises Exception: if the file does not exist, or its pad-file
+            envelope is invalid.
+        """
         #si le lexique inverse n'existe pas, on ne fait rien
         if not path.isfile(retrolexiconFileName): raise Exception("%s n'existe pas"%(retrolexiconFileName))
         #on initialise la classe mehre en lecture uniquement
@@ -116,9 +144,29 @@ class NindRetrolexicon(NindPadFile):
         self.vejrifieFichier()
 
     def createFile(self):
+        """No-op: this class is read-only and never creates a file.
+
+        Kept as a stub because sibling writer classes (in C++, and
+        conceptually here) expose a ``createFile``; there is no Python
+        writer for this format (see the module docstring).
+        """
         return
-               
+
     def donneMot (self, ident):
+        """Resolve a word identifier to its component simple word(s).
+
+        French *donneMot* = "gives word". Follows the ``identifiantA`` /
+        ``identifiantS`` chain for as long as the entry is a compound word,
+        collecting each simple word it bottoms out on, in order.
+
+        :param ident: the word identifier to resolve.
+        :return: a list of simple-word strings (one element for a simple
+            word, several for a compound word, in left-to-right order), or
+            ``[]`` if ``ident`` is unknown.
+        :raises Exception: if the file is inconsistent (a dangling
+            identifier, a non-terminal entry where a terminal one was
+            expected, or a self-referential loop).
+        """
         motsSimples = []
         (trouvej, motSimple, identifiantA, identifiantS) = self.__donneDefMot(ident)
         #si pas trouvej, retourne chaisne vide
@@ -173,6 +221,18 @@ class NindRetrolexicon(NindPadFile):
     ##################################################################
     #analyse complehtement le fichier et retourne True si ok
     def analyseFichierRetrolexicon(self, trace):
+        """Validate the file and report simple/compound word statistics.
+
+        French *analyseFichierRetrolexicon* = "analyzes retrolexicon file".
+        Validates the pad-file envelope, then walks every identifier and
+        tallies how many are simple vs. compound words, plus a byte-level
+        breakdown (UTF-8 word bytes vs. holes) via
+        :func:`~nind.NindPadFile.chercheVides`.
+
+        :param trace: if ``True``, print a human-readable report to stdout.
+        :raises Exception: if the file is structurally invalid (also
+            reported via ``trace`` before being re-raised).
+        """
         cestbon = self.analyseFichierPadFile(trace)
         try:
             totalUtf8 = 0
@@ -230,6 +290,19 @@ class NindRetrolexicon(NindPadFile):
     #######################################################################
     #dumpe le fichier lexique sur un fichier texte
     def dumpeFichier(self, outFile):
+        """Dump every resolvable word to a text file, one ``id  word`` line each.
+
+        French *dumpeFichier* = "dumps file". Compound words are written
+        with their components joined by ``_``. Used by the
+        ``Nind_checkRejtroAndLexicon.py``-style diagnostics to produce a
+        human-readable lexicon.
+
+        :param outFile: a writable text file object (UTF-8).
+        :return: a ``(nbLignes, nbErreurs, rejpartition)`` tuple: number of
+            lines written, number of those that hit an error, and a list of
+            ``(wordLengthInComponents, count)`` pairs describing the
+            distribution of compound-word lengths.
+        """
         nbLignes = nbErreurs = 0
         rejpartition = {}
         #trouve le max des identifiants

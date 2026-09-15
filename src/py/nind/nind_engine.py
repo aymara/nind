@@ -1,3 +1,23 @@
+"""High-level, pure-Python nind frontend: index text files and search them with BM25.
+
+This module is the modern entry point for the ``nind`` package: unlike
+:mod:`~nind.NindFile`/:mod:`~nind.NindPadFile` and the ``Nind*index``
+classes (which only *read* the nind binary formats, mirroring the C++
+implementation for cross-verification purposes - see the package's
+``CLAUDE.md``), :class:`NindIndexer` here is the only Python code that
+*writes* ``.nindlexiconindex``/``.nindtermindex``/``.nindlocalindex`` files,
+and :class:`NindEngine` provides a simple BM25 search API built on top of
+the read-only classes.
+
+Typical usage::
+
+    from nind.nind_engine import NindIndexer, NindEngine
+
+    NindIndexer("indices", prefix="corpus").index_files(["a.py", "b.py"])
+    engine = NindEngine("indices")
+    for doc_id, score in engine.search("def foo"):
+        print(doc_id, score)
+"""
 import math
 import os
 import re
@@ -23,14 +43,22 @@ FLAG_CG = 61
 FLAG_LOCAL_DEJFINITION = 19
 
 class NindEngine:
+    """BM25 search engine on top of a nind index produced by :class:`NindIndexer`.
+
+    Opens the three index files (lexicon, term, local) for a corpus and
+    exposes term/document-frequency lookups plus a ready-to-use
+    :meth:`search`. Read-only: to build the index files this reads, use
+    :class:`NindIndexer`.
     """
-    High-level Python frontend for the Nind Indexing Module.
-    Provides a simplified API for indexing and BM25-based search.
-    """
+
     def __init__(self, index_dir):
-        """
-        Initialize the engine by opening the required index files.
-        :param index_dir: Directory containing .nindlexiconindex, .nindtermindex, and .nindlocalindex files.
+        """Open the index files found in ``index_dir``.
+
+        :param index_dir: directory containing exactly one corpus's
+            ``.nindlexiconindex``, ``.nindtermindex`` and
+            ``.nindlocalindex`` files (same filename prefix).
+        :raises FileNotFoundError: if no ``.nindlexiconindex`` file is
+            found in ``index_dir``.
         """
         self.index_dir = index_dir
 
@@ -52,15 +80,20 @@ class NindEngine:
         self.avg_doc_len = self._calculate_avg_doc_len()
 
     def _calculate_avg_doc_len(self):
-        """Calculate average document length across the corpus."""
+        """Calculate average document length (in tokens) across the corpus."""
         if self.total_docs == 0: return 0
         total_len = sum(self.get_doc_len(ext_id) for ext_id, _ in self.local_index.donneidentifiantsExternes())
         return total_len / self.total_docs
 
     def tokenize(self, text):
-        """
-        Basic tokenizer for programming languages.
-        Splits by non-alphanumeric characters and handles camelCase/snake_case.
+        """Split source-code-like text into tokens, splitting camelCase/snake_case identifiers into subwords.
+
+        Used both here (query tokenization for :meth:`search`) and by
+        :class:`NindIndexer` (corpus tokenization at indexing time) - the
+        two must stay in sync for search results to be meaningful.
+
+        :param text: the text to tokenize.
+        :return: a list of lowercase-preserving token strings.
         """
         tokens = re.split(r'[^a-zA-Z0-9_]', text)
         refined_tokens = []
@@ -74,11 +107,22 @@ class NindEngine:
         return refined_tokens
 
     def get_term_id(self, term):
-        """Get the internal identifier for a term."""
+        """Look up a term's internal lexicon identifier.
+
+        :param term: the (single, non-compound) term.
+        :return: its identifier, or ``0`` if the term is not in the lexicon.
+        """
         return self.lexicon.donneIdentifiant([term])
 
     def get_tf(self, term, doc_id):
-        """Get the term frequency in a specific document."""
+        """Get the raw term frequency of ``term`` in a specific document.
+
+        :param term: the term to look up.
+        :param doc_id: the document's external identifier.
+        :return: the number of occurrences (summed across grammatical
+            categories), or ``0`` if the term is unknown or absent from
+            that document.
+        """
         term_id = self.get_term_id(term)
         if term_id == 0: return 0
 
@@ -90,7 +134,12 @@ class NindEngine:
         return 0
 
     def get_df(self, term):
-        """Get the document frequency of a term."""
+        """Get the document frequency of ``term`` (how many documents contain it).
+
+        :param term: the term to look up.
+        :return: the number of documents containing the term, or ``0`` if
+            it is unknown.
+        """
         term_id = self.get_term_id(term)
         if term_id == 0: return 0
 
@@ -101,11 +150,23 @@ class NindEngine:
         return df
 
     def get_doc_len(self, doc_id):
-        """Get the length (total token occurrences) of a specific document, given its external id."""
+        """Get the length (total token occurrences) of a document.
+
+        :param doc_id: the document's external identifier.
+        :return: the document's length in tokens.
+        """
         return sum(len(localisations) for _, _, localisations in self.local_index.donneListeTermes(doc_id))
 
     def bm25_score(self, query, doc_id, k1=1.5, b=0.75):
-        """Calculate the BM25 score for a document given a query."""
+        """Compute the Okapi BM25 relevance score of a document for a query.
+
+        :param query: the query text (tokenized with :meth:`tokenize`).
+        :param doc_id: the document's external identifier.
+        :param k1: BM25 term-frequency saturation parameter.
+        :param b: BM25 document-length normalization parameter.
+        :return: the BM25 score (higher is more relevant); ``0.0`` if no
+            query term occurs in the document.
+        """
         score = 0.0
         tokens = self.tokenize(query)
 
@@ -125,7 +186,14 @@ class NindEngine:
         return score
 
     def search(self, query, top_k=10):
-        """Search for the top_k most relevant documents for a query."""
+        """Search the corpus with BM25 and return the top-scoring documents.
+
+        :param query: the query text.
+        :param top_k: maximum number of results to return.
+        :return: a list of ``(doc_id, score)`` tuples, sorted by descending
+            score, of length at most ``top_k`` (only documents with a
+            positive score are included).
+        """
         scores = []
         for doc_id, _ in self.local_index.donneidentifiantsExternes():
             score = self.bm25_score(query, doc_id)
@@ -136,18 +204,39 @@ class NindEngine:
         return scores[:top_k]
 
 class NindIndexer:
+    """Builds a nind binary index (lexicon + term + local files) from a list of text files.
+
+    The only Python *writer* for the nind index-family formats (see the
+    module docstring): it hand-rolls the ``.nindlexiconindex``/
+    ``.nindtermindex``/``.nindlocalindex`` binary layout directly via
+    :mod:`~nind.NindFile`, since there is no Python writer base class to
+    build on (unlike the C++ side's ``NindIndex``).
     """
-    Indexer to create Nind binary indices from a list of files.
-    """
+
     def __init__(self, index_dir, prefix="corpus"):
+        """Prepare an indexer that will write into ``index_dir``.
+
+        Does not touch the filesystem until :meth:`index_files` is called.
+
+        :param index_dir: directory the index files will be written into
+            (must already exist).
+        :param prefix: filename prefix shared by the three index files
+            (e.g. ``"corpus"`` -> ``corpus.nindlexiconindex`` etc.).
+        """
         self.index_dir = index_dir
         self.prefix = prefix
         # Do not initialize engine here; files may not exist yet
         self.engine = None
 
     def index_files(self, file_paths):
-        """
-        Processes a list of files and writes them to the binary Nind format.
+        """Tokenize ``file_paths`` and write the resulting corpus as a nind index.
+
+        Each file becomes one document, identified externally by its
+        0-based position in ``file_paths``. Overwrites any existing index
+        files with the same prefix in ``index_dir``.
+
+        :param file_paths: list of paths to UTF-8 (or UTF-8-decodable, with
+            errors ignored) text files to index.
         """
         corpus_tokens = []
         global_lexicon = Counter()

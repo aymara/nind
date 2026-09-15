@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""The per-document local index: document identifier -> term occurrences and positions.
+
+A ``.nindlocalindex`` file is a :class:`~nind.NindIndex.NindIndex` keyed by
+*internal* document id (a dense ``1..nombreDocuments`` sequence), plus an
+external <-> internal id translation table built at open time from each
+document's stored ``identifiantExterne``. Each document's definition lists
+every term that occurs in it (delta-encoded relative term ids) together
+with the positions ("localisations") it occurs at - the data
+:class:`~nind.nind_engine.NindEngine` uses for term-frequency and
+document-length calculations.
+"""
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
@@ -106,9 +117,23 @@ TAILLE_SPEJCIFIQUES = 8
 TAILLE_TESTE_DEJFINITION = 11
 
 class NindLocalindex(NindIndex):
+    """Read-only per-document local index: term occurrences and positions, keyed by document id.
+
+    Documents are addressed by their *external* id everywhere in the
+    public API (:meth:`donneListeTermes`, :meth:`afficheDocument`); the
+    class transparently translates to/from the internal id used inside the
+    file, via a table built once at open time.
+    """
+
     def __init__(self, localindexFileName):
+        """Open ``localindexFileName`` read-only and build the external<->internal id table.
+
+        :param localindexFileName: path to the ``.nindlocalindex`` file.
+        :raises Exception: if the file's pad-file envelope is invalid, or
+            its specifics block has the wrong size.
+        """
         NindIndex.__init__(self, localindexFileName)
-        #rejcupehre l'adresse et la longueur des spejcifiques 
+        #rejcupehre l'adresse et la longueur des spejcifiques
         (offsetSpejcifiques, tailleSpejcifiques) = self.donneSpejcifiques()
         if tailleSpejcifiques != TAILLE_SPEJCIFIQUES: 
             raise Exception('%s : taille incompatible des spécifiques'%(self.latFileName))
@@ -152,6 +177,19 @@ class NindLocalindex(NindIndex):
     #######################################################################
     #retourne la structure dejcrivant les localisations de termes pour le document spejcifiej
     def donneListeTermes(self, noDocExterne):
+        """Return every term occurrence and its positions for a given document.
+
+        French *donneListeTermes* = "gives term list".
+
+        :param noDocExterne: the document's external identifier.
+        :return: a list of ``(noTerme, catejgorie, localisationsList)``
+            tuples, one per term occurring in the document; ``localisationsList``
+            is a list of ``(localisationAbsolue, longueur)`` pairs (token
+            position in the document, token length - the latter currently
+            unused, always written as 1). Empty list if ``noDocExterne`` is
+            unknown.
+        :raises Exception: if the file is internally inconsistent.
+        """
         #trouve le numejro interne
         if noDocExterne not in self.docIdTradExtInt: return []          #doc inconnu
         noDocInterne = self.docIdTradExtInt[noDocExterne]
@@ -182,6 +220,13 @@ class NindLocalindex(NindIndex):
     #######################################################################
     #retourne les identifiants interne et externe du dernier document indexej
     def donneMaxIdentifiants(self):
+        """Return the internal and external identifiers of the last-indexed document.
+
+        French *donneMaxIdentifiants* = "gives max identifiers".
+
+        :return: an ``(internalId, externalId)`` tuple, or ``(0, 0)`` if
+            that document has since been erased.
+        """
         #trouve les donnejes du dernier doc indexej
         trouvej, dummy, dummy, identifiantExterne = self.__donneDonnejes(self.maxIdentifiantInterne)
         if not trouvej: return (0, 0)   # il a ejtej effacej
@@ -190,6 +235,18 @@ class NindLocalindex(NindIndex):
     #######################################################################
     #analyse du fichier
     def analyseFichierLocalindex(self, trace):
+        """Validate the file and report corpus-wide document/occurrence statistics.
+
+        French *analyseFichierLocalindex* = "analyzes local-index file".
+        Extends :meth:`~nind.NindIndex.NindIndex.analyseFichierIndex` with
+        totals (document count, term-document and term-position occurrence
+        counts) and a per-document occurrence-count distribution.
+
+        :param trace: if ``True``, print a human-readable report to stdout.
+        :return: ``False`` if the underlying index is invalid; otherwise
+            prints the report when ``trace`` is set (no explicit return
+            value on the success path).
+        """
         cestbon = self.analyseFichierIndex(trace)
         if not cestbon: return False
         if trace: print ("======LOCALINDEX=======")
@@ -273,6 +330,13 @@ class NindLocalindex(NindIndex):
     #######################################################################
     #dumpe le fichier lexique sur un fichier texte
     def dumpeFichier(self, outFile):
+        """Dump every document's full term/position data to a text file, for inspection.
+
+        French *dumpeFichier* = "dumps file".
+
+        :param outFile: a writable text file object (UTF-8).
+        :return: the number of documents written.
+        """
         nbLignes = 0
         #trouve le max des identifiants
         maxIdent = self.donneMaxIdentifiant()
@@ -303,11 +367,29 @@ class NindLocalindex(NindIndex):
 
     #######################################################################
     def donneidentifiantsExternes(self):
+        """Return every ``(externalId, internalId)`` pair known to this file.
+
+        French *donneIdentifiantsExternes* = "gives external identifiers".
+        Used by :class:`~nind.nind_engine.NindEngine` to enumerate the
+        whole corpus (e.g. to compute the total document count and average
+        document length).
+
+        :return: a list of ``(noDocExterne, noDocInterne)`` tuples.
+        """
         return list(self.docIdTradExtInt.items())
 
     #######################################################################
     #dejcode les donnejes associejes ah un terme
     def afficheDocument(self, noDocExterne):
+        """Format one document's full term/position data as a human-readable string.
+
+        French *afficheDocument* = "displays document". Same content as
+        one :meth:`dumpeFichier` line, computed for a single document.
+
+        :param noDocExterne: the document's external identifier.
+        :return: a formatted string, or ``"<id> : inconnu"`` if
+            ``noDocExterne`` is unknown.
+        """
         rejsultat = StringIO()
         #trouve l'identifiant interne
         if noDocExterne not in self.docIdTradExtInt: return '%d : inconnu'%(noDocExterne)

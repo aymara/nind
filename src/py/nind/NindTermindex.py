@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""The inverted file itself: term identifier -> (category, frequency, postings).
+
+A ``.nindtermindex`` file is a :class:`~nind.NindIndex.NindIndex` keyed
+directly by term identifier (as assigned by
+:class:`~nind.NindLexiconindex.NindLexiconindex`). Each term's definition
+holds one or more "CG" (*catégorie grammaticale*, grammatical-category)
+groups, each with the term's total frequency in that category and its
+posting list - the (relative, delta-encoded) document ids and per-document
+frequencies where it occurs. This is what
+:class:`~nind.nind_engine.NindEngine` reads to compute document/term
+frequencies for BM25 scoring.
+"""
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
@@ -95,10 +107,22 @@ TAILLE_TESTE_DEJFINITION = 8
 ############################################################
 
 class NindTermindex(NindIndex):
+    """Read-only inverted file: term identifier -> posting lists, grouped by grammatical category.
+
+    :meth:`donneListeTermesCG` is the main lookup method; the rest
+    (``analyseFichierTermindex``, ``dumpeFichier``, ``afficheTerme``) are
+    diagnostics used by the ``Nind_*`` command-line tools.
+    """
+
     def __init__(self, termindexFileName):
+        """Open ``termindexFileName`` read-only.
+
+        :param termindexFileName: path to the ``.nindtermindex`` file.
+        :raises Exception: if the file's pad-file envelope is invalid.
+        """
         NindIndex.__init__(self, termindexFileName)
 
-    #trouve les donnejes 
+    #trouve les donnejes
     def __donneDonnejes(self, identifiant):
         #lit la définition du mot
         (offsetDejfinition, longueurDejfinition) = self.donneAdresseDejfinition(identifiant)
@@ -117,7 +141,24 @@ class NindTermindex(NindIndex):
 
     #retourne la structure dejcrivant le fichier inversej pour ce terme
     def donneListeTermesCG(self, ident):
-        #trouve les donnejes 
+        """Return the inverted-file entry for a term, grouped by grammatical category.
+
+        French *donneListeTermesCG* = "gives term list [by] grammatical
+        category" (*CG* = *catégorie grammaticale*). Amose's richer
+        term-type model (``LAT2015.JYS.448``) allows the same term id to
+        carry several categories (e.g. a word used as both noun and verb),
+        each with its own frequency and posting list.
+
+        :param ident: the term identifier (as produced by
+            :class:`~nind.NindLexiconindex.NindLexiconindex`).
+        :return: a list of ``(catejgorie, frejquenceTerme, docs)`` tuples,
+            one per grammatical category the term was seen in; ``docs`` is
+            a list of ``(noDoc, frejquenceDoc)`` pairs (internal document
+            id, occurrence count in that document). Empty list if ``ident``
+            is unknown.
+        :raises Exception: if the file's ``FLAG_CG`` marker is missing.
+        """
+        #trouve les donnejes
         trouvej, longueurDonnejes, tailleExtension = self.__donneDonnejes(ident)
         if not trouvej: return []          #terme inconnu
         finDonnejes = self.tell() + longueurDonnejes
@@ -144,6 +185,22 @@ class NindTermindex(NindIndex):
     #######################################################################"
     #analyse du fichier
     def analyseFichierTermindex(self, trace):
+        """Validate the file and report corpus-wide term/document statistics.
+
+        French *analyseFichierTermindex* = "analyzes term-index file".
+        Extends :meth:`~nind.NindIndex.NindIndex.analyseFichierIndex` with
+        totals (document count, term-document occurrences, hapax count)
+        and a frequency distribution, plus a consistency check that each
+        CG group's posting-list frequencies sum to its declared term
+        frequency.
+
+        :param trace: if ``True``, print a human-readable report to stdout.
+        :return: ``False`` if the underlying index is invalid; otherwise
+            prints the report when ``trace`` is set (no explicit return
+            value on the success path).
+        :raises Exception: if a term's posting-list frequencies are
+            inconsistent with its declared total.
+        """
         cestbon = self.analyseFichierIndex(trace)
         if not cestbon: return False
         if trace: print ("======TERMINDEX=======")
@@ -237,6 +294,15 @@ class NindTermindex(NindIndex):
     #######################################################################
     #dumpe le fichier lexique sur un fichier texte
     def dumpeFichier(self, outFile):
+        """Dump every term's full posting lists to a text file, for inspection.
+
+        French *dumpeFichier* = "dumps file".
+
+        :param outFile: a writable text file object (UTF-8).
+        :return: the number of terms written.
+        :raises Exception: if a term's posting-list frequencies are
+            inconsistent with its declared total.
+        """
         nbLignes = 0
         #trouve le max des identifiants
         maxIdent = self.donneMaxIdentifiant()
@@ -277,6 +343,17 @@ class NindTermindex(NindIndex):
     #######################################################################
     #dejcode les donnejes associejes ah un terme
     def afficheTerme(self, identifiant):
+        """Format one term's full posting lists as a human-readable string.
+
+        French *afficheTerme* = "displays term". Same content as one
+        :meth:`dumpeFichier` line, computed for a single term.
+
+        :param identifiant: the term identifier to format.
+        :return: a formatted multi-line string, or ``"<id> : inconnu"`` if
+            ``identifiant`` is unknown.
+        :raises Exception: if the term's posting-list frequencies are
+            inconsistent with its declared total.
+        """
         rejsultat = StringIO()
         rejsultat.write('%06d:  '%(identifiant))
         #trouve les donnejes 

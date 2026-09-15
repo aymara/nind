@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Low-level binary codec for nind's "Latecon" number/string encodings.
+
+:class:`NindFile` is the base of every other class in this package: it wraps
+a plain file handle and adds readers/writers for the primitive types used
+throughout nind's binary formats (fixed-width big/little-endian integers,
+variable-length "ULat"/"SLat" integers, and length-prefixed UTF-8 strings).
+Every other reader (:class:`~nind.NindPadFile.NindPadFile`,
+:class:`~nind.NindIndex.NindIndex`, ...) builds on top of it.
+
+This module is read/write-oriented but does no structural interpretation of
+the files it reads or writes - that is the job of :mod:`nind.NindPadFile`
+and the classes built on it. See the ``<fichier>`` grammar comment below for
+the primitive types it implements.
+"""
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
@@ -61,8 +75,17 @@ def main():
     #affiche
     for i in range(4): print ("U: %d S: %d"%(nonSignes[i], signes[i]))
     
-#calcule la clef A
 def clefA(mot):
+    """Compute the "A" hash key of a word (French: *clefA* = "key A").
+
+    A simple rolling XOR/shift hash over the word's UTF-8 bytes. Used
+    where nind needs a second, differently-shifted hash from the same word
+    (`clefB` is the other one) - see the C++ ``NindLexicon`` header comments
+    for the rationale.
+
+    :param mot: the word to hash.
+    :return: the hash as an unsigned integer.
+    """
     mBytes = mot.encode('utf-8')
     clef = 0x55555555
     shifts = 0
@@ -71,8 +94,17 @@ def clefA(mot):
         shifts += 7
     return clef
 
-#calcule la clef B
 def clefB(mot):
+    """Compute the "B" hash key of a word (French: *clefB* = "key B").
+
+    Same idea as :func:`clefA` with different shift constants. This is the
+    hash :class:`~nind.NindLexiconindex.NindLexiconindex` actually uses to
+    bucket words: a word's entry lives at index ``clefB(mot) %
+    nombreIndirection`` in the ``.nindlexiconindex`` file.
+
+    :param mot: the word to hash.
+    :return: the hash as an unsigned integer.
+    """
     mBytes = mot.encode('utf-8')
     clef = 0x55555555
     shifts = 0
@@ -81,8 +113,18 @@ def clefB(mot):
         shifts += 5
     return clef
 
-#donne la catégorie grammaticale en clair
 def catNb2Str(cat):
+    """Translate a grammatical-category code into its short label.
+
+    French: *donne la catégorie grammaticale en clair* = "give the
+    grammatical category in clear [text]". The numeric codes are the
+    ``<catégorie>`` values stored in ``.nindtermindex``/``.nindlocalindex``
+    entries (Amose's term-type model, see ``LAT2015.JYS.448``).
+
+    :param cat: the numeric category code.
+    :return: the category's short label (e.g. ``"ADJ"``, ``"NC"``, ``"V"``),
+        or ``''`` if ``cat`` is out of range.
+    """
     catList = ["", "ADJ", "ADV", "CONJ", "DET", "DETERMINEUR", "DIVERS", "DIVERS_DATE", "EXCLAMATION", "INTERJ", "NC", "NOMBRE", "NP", "PART", "PONCTU", "PREP", "PRON", "V", "DIVERS_PARTICULE", "CLASS", "AFFIX"]
     if cat >= len(catList): return ''
     return catList[cat]
@@ -101,7 +143,39 @@ def catNb2Str(cat):
 # <EntierSLat>            ::= { <Octet> }
 ######################################################################################
 class NindFile:
+    """Binary file wrapper implementing nind's "Latecon" primitive codecs.
+
+    Wraps a single OS file handle opened in one of three modes (read-only,
+    write-from-scratch, or read/modify-in-place) and exposes matching pairs
+    of ``litXxx`` (French *lit* = "reads") / ``ejcritXxx`` (French *écrit* =
+    "writes", spelled with the project's "ej" transliteration of ``é``)
+    methods for each primitive type in the grammar above: fixed-width
+    1/3/4/5-byte integers (some little-endian/"petit-boutiste", some
+    big-endian/"gros-boutiste" - see each method), the ``ULat``/``SLat``
+    variable-length integer encodings, and length-prefixed or raw UTF-8
+    byte strings.
+
+    Every higher-level nind reader (:class:`~nind.NindPadFile.NindPadFile`
+    and its subclasses) subclasses this and only adds *structure* on top -
+    none of them re-implement byte-level (de)serialization.
+
+    Usable as a context manager (``with NindFile(...) as f:``), which
+    guarantees :meth:`close` is called.
+    """
+
     def __init__(self, latFileName, enEjcriture = False, enModification = False):
+        """Open ``latFileName`` in one of three modes.
+
+        :param latFileName: path to the file to open.
+        :param enEjcriture: if ``True``, open for writing (French
+            *enÉcriture* = "in writing [mode]"); the file is truncated and
+            written from scratch unless ``enModification`` is also set. If
+            ``False`` (the default), the file is opened read-only.
+        :param enModification: if ``True`` (and ``enEjcriture`` is also
+            ``True``), open an *existing* file for in-place read/write
+            modification (French *enModification* = "in modification
+            [mode]") instead of truncating it.
+        """
         self.latFileName = latFileName
         if not enEjcriture:
             #ouvre le fichier en lecture
@@ -116,28 +190,38 @@ class NindFile:
             self.latFile.seek(0, 0)
         
     def seek(self, offset, from_what):
+        """Move the file position, exactly like :meth:`io.IOBase.seek`.
+
+        :param offset: byte offset, interpreted relative to ``from_what``.
+        :param from_what: ``0`` = from the start, ``1`` = from the current
+            position, ``2`` = from the end (same convention as the stdlib).
+        """
         self.latFile.seek(offset, from_what)
-        
+
     def tell(self):
+        """Return the current byte position in the file."""
         return self.latFile.tell()
-    
+
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
-        
+
     def litNombre1(self):
+        """Read and return an unsigned 1-byte integer (0..255)."""
         return ord(self.latFile.read(1))
 
     def litNombre2(self):
+        """Read and return an unsigned 2-byte big-endian integer."""
         #gros-boutiste
         ba = bytes(self.latFile.read(2))
         return int( ba[0]*0x100 + ba[1] )
         #return (ba[0] <<8) + ba[1]
 
     def litNombre3(self):
+        """Read and return an unsigned 3-byte little-endian integer."""
         #petit-boutiste
         ba = bytes(self.latFile.read(3))
         return int( (ba[2]*0x100 + ba[1])*0x100 + ba[0] )
@@ -145,15 +229,17 @@ class NindFile:
         #return (ba[2] <<16) + (ba[1] <<8) + ba[0]
 
     def litNombreS3(self):
+        """Read and return a signed (two's-complement) 3-byte little-endian integer."""
         #petit-boutiste
         ba = bytes(self.latFile.read(3))
         res = (ba[2]*0x100 + ba[1])*0x100 + ba[0]
         #res = (((ba[2] <<8) + ba[1]) <<8) + ba[0]
         #res = (ba[2] <<16) + (ba[1] <<8) + ba[0]
-        if res < 0x800000: return int(res) 
+        if res < 0x800000: return int(res)
         return int( res - 0x1000000 )
 
     def litNombre4(self):
+        """Read and return an unsigned 4-byte little-endian integer."""
         #petit-boutiste
         ba = bytes(self.latFile.read(4))
         return int( ((ba[3]*0x100 + ba[2])*0x100 + ba[1])*0x100 + ba[0] )
@@ -161,13 +247,19 @@ class NindFile:
         #return (ba[3] <<24) + (ba[2] <<16) + (ba[1] <<8) + ba[0]
 
     def litNombreS4(self):
+        """Read and return a signed (two's-complement) 4-byte little-endian integer."""
         #petit-boutiste
         ba = bytes(self.latFile.read(4))
         res = ((ba[3]*0x100 + ba[2])*0x100 + ba[1])*0x100 + ba[0]
-        if res < 0x80000000: return int(res) 
+        if res < 0x80000000: return int(res)
         return int(res - 0x100000000)
 
     def litNombre5(self):
+        """Read and return an unsigned 5-byte big-endian integer.
+
+        Used for file offsets (e.g. ``<offsetDéfinition>`` in index files),
+        which need more than 4 bytes of range.
+        """
         #gros-boutiste
         ba = bytes(self.latFile.read(5))
         return int( (((ba[0]*0x100 + ba[1])*0x100 + ba[2])*0x100 + ba[3])*0x100 + ba[4] )
@@ -175,6 +267,17 @@ class NindFile:
         #return (ba[0] <<32) + (ba[1] <<24) + (ba[2] <<16) + (ba[3] <<8) + ba[4]
 
     def litNombreULat(self):
+        """Read and return an unsigned "ULat" variable-length integer.
+
+        This is nind's own variable-length encoding (French *Latecon*, the
+        project's original code-name): the top bits of the first byte say
+        how many extra continuation bytes follow (0 to 4), so small values
+        take 1 byte and the encoding scales up to a full unsigned 32-bit
+        value in 5 bytes. Used wherever a count or a delta is expected to
+        usually be small (term/document frequencies, relative doc ids, ...).
+
+        :raises Exception: if the encoding is malformed.
+        """
         octet = ord(self.latFile.read(1))
         if not octet&0x80: return octet
         result = ord(self.latFile.read(1))
@@ -188,6 +291,15 @@ class NindFile:
         raise Exception('entier Ulatecon invalide à %08X'%(self.latFile.tell()))
 
     def litNombreSLat(self):
+        """Read and return a signed "SLat" variable-length integer.
+
+        The signed counterpart of :meth:`litNombreULat`: same
+        self-describing variable-length scheme, but reserving one bit per
+        tier for the sign so it can encode negative deltas (e.g. relative
+        term-id or position deltas that can go backwards).
+
+        :raises Exception: if the encoding is malformed.
+        """
         octet = ord(self.latFile.read(1))
         if octet&0xC0 == 0x00: return octet
         if octet&0xC0 == 0x40: return octet - 0x80
@@ -206,31 +318,59 @@ class NindFile:
         raise Exception('entier Slatecon invalide à %08X'%(self.latFile.tell()))
     
     def litString(self):
+        """Read a length-prefixed UTF-8 string (French *litString*, mixed EN/FR name).
+
+        Reads one length byte (0..255) followed by that many bytes,
+        decoded as UTF-8 - i.e. the ``<MotUtf8>`` grammar rule.
+
+        :return: the decoded string.
+        """
         longueur = ord(self.latFile.read(1))
         #return self.latFile.read(longueur).decode('utf-8')
         return bytes(self.latFile.read(longueur)).decode()
-    
+
     def litChaine(self, longueur):
+        """Read ``longueur`` bytes and decode them as UTF-8 (French *litChaine* = "reads string").
+
+        Like :meth:`litString` but the caller supplies the length (already
+        read separately), rather than a leading length byte.
+
+        :param longueur: number of bytes to read.
+        :return: the decoded string.
+        """
         #return self.latFile.read(longueur).decode('utf-8')
         return bytes(self.latFile.read(longueur)).decode()
-    
+
     def litOctets(self, longueur):
+        """Read and return ``longueur`` raw bytes, undecoded (French *litOctets* = "reads bytes")."""
         return bytes(self.latFile.read(longueur))
-    
+
     def ejcritNombre1(self, entier):
+        """Write ``entier`` as an unsigned 1-byte integer.
+
+        :param entier: value in 0..255.
+        """
         ba = bytearray(1)
         ba[0] = entier&0xFF
         self.latFile.write(ba)
 
     def ejcritNombre3(self, entier):
+        """Write ``entier`` as an unsigned 3-byte little-endian integer (see :meth:`litNombre3`).
+
+        :param entier: value in 0..0xFFFFFF.
+        """
         ba = bytearray(3)
         #petit-boutiste
         ba[0] = entier&0xFF
         ba[1] = (entier//0x100)&0xFF
         ba[2] = (entier//0x10000)&0xFF
         self.latFile.write(ba)
-        
+
     def ejcritNombre4(self, entier):
+        """Write ``entier`` as an unsigned 4-byte little-endian integer (see :meth:`litNombre4`).
+
+        :param entier: value in 0..0xFFFFFFFF.
+        """
         ba = bytearray(4)
         #petit-boutiste
         ba[0] = entier&0xFF
@@ -238,8 +378,12 @@ class NindFile:
         ba[2] = (entier//0x10000)&0xFF
         ba[3] = (entier//0x1000000)&0xFF
         self.latFile.write(ba)
-        
+
     def ejcritNombre5(self, entier):
+        """Write ``entier`` as an unsigned 5-byte big-endian integer (see :meth:`litNombre5`).
+
+        :param entier: value in 0..0xFFFFFFFFFF.
+        """
         ba = bytearray(5)
         #gros-boutiste
         ba[0] = (entier//0x100000000)&0xFF
@@ -250,6 +394,11 @@ class NindFile:
         self.latFile.write(ba)
 
     def ejcritNombreULat(self, entier):
+        """Write ``entier`` using the unsigned "ULat" variable-length encoding (see :meth:`litNombreULat`).
+
+        :param entier: non-negative value; must fit in 32 bits.
+        :raises ValueError: if ``entier`` is too large to encode.
+        """
         if entier <= 0x7F:
             self.latFile.write(bytes([entier]))
         elif entier <= 0x3FFF:
@@ -264,6 +413,11 @@ class NindFile:
             raise ValueError('entier trop grand pour un codage ULat: %d'%(entier))
 
     def ejcritNombreSLat(self, entier):
+        """Write ``entier`` using the signed "SLat" variable-length encoding (see :meth:`litNombreSLat`).
+
+        :param entier: signed value; must fit in 32 bits.
+        :raises ValueError: if ``entier`` is too large to encode.
+        """
         if -64 <= entier <= 63:
             octet = entier if entier >= 0 else entier + 0x80
             self.latFile.write(bytes([octet]))
@@ -295,12 +449,29 @@ class NindFile:
             raise ValueError('entier trop grand pour un codage SLat: %d'%(entier))
 
     def ejcritChaine(self, chaine):
+        """Write ``chaine`` as raw UTF-8 bytes, with no length prefix (French *ejcritChaine* = "writes string").
+
+        Callers that need a length prefix write it separately (see how
+        :class:`~nind.nind_engine.NindIndexer` pairs this with
+        :meth:`ejcritNombre1` of ``len(encoded)`` to build a ``<MotUtf8>``).
+
+        :param chaine: the string to write.
+        """
         self.latFile.write(chaine.encode('utf-8'))
-        
+
     def ejcritZejros(self, taille):
+        """Write ``taille`` zero bytes (French *ejcritZéros* = "writes zeros").
+
+        Used to reserve/pad a region (e.g. an indirection table or the
+        specifics+identification trailer) before patching it with real
+        values once their final offsets are known.
+
+        :param taille: number of zero bytes to write.
+        """
         self.latFile.write(bytearray(taille))
 
     def close(self):
+        """Close the underlying file handle."""
         self.latFile.close()
 
        
