@@ -49,3 +49,4 @@ push = true
 "src/py/nind/Nind_trouveMotsSansOccurrence.py" = ['^__version__ = "{pep440_version}"$']
 "src/py/nind/Nind_trouveNombresPremiers.py" = ['^__version__ = "{pep440_version}"$']
 "src/py/nind/amose/NindIdentifiantsClef.py" = ['^__version__ = "{pep440_version}"$']
+"CMakeLists.txt" = ['^set(NIND_VERSION "{pep440_version}")$']
