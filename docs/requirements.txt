@@ -1,0 +1,9 @@
+# Dependencies to build this documentation site (see docs/conf.py).
+# Kept separate from pyproject.toml's [dependency-groups]: building the docs
+# only needs these on top of a plain Python interpreter - it imports the
+# pure-Python nind package straight from src/py/ (conf.py adds it to
+# sys.path) rather than installing the nind wheel, so it doesn't need to
+# join the project's own dependency resolution/lock.
+sphinx>=8
+furo>=2024.8
+myst-parser>=4

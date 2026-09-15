@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""The shared "pad file" envelope used by every nind index/lexicon file.
+
+A "pad file" (the name reflects that entries are padded to a fixed size so
+they can be located by simple arithmetic) is nind's common on-disk
+container: a small fixed header, one or more *indexed blocks* (fixed-size
+indirection tables mapping an integer identifier to an offset+length
+elsewhere in the file), the variable-length definitions those indirections
+point to ("en vrac", i.e. loosely packed), and a trailer holding
+format-specific data plus a max-identifier/timestamp identification stamp.
+See the ``<fichier>`` grammar comment below for the exact layout.
+
+:class:`NindPadFile` implements this envelope read-only (mirroring
+``NindBasics::NindPadFile`` in C++, which also has no writer - every
+concrete writer, in C++ or in
+:class:`~nind.nind_engine.NindIndexer` here, hand-rolls the envelope
+itself). Concrete formats (:class:`~nind.NindIndex.NindIndex` and its
+``.nindlexiconindex``/``.nindtermindex``/``.nindlocalindex`` subclasses,
+:class:`~nind.NindRetrolexicon.NindRetrolexicon`) subclass it and only add
+the meaning of the "en vrac" definitions and the specifics block.
+"""
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
@@ -83,8 +103,31 @@ TAILLE_FIXES = 4
     
 #############################################################
 class NindPadFile(NindFile):
-    
+    """Read-only base class implementing the pad-file envelope over :class:`~nind.NindFile.NindFile`.
+
+    Subclasses get, for free, the machinery to locate an entry by
+    identifier (:meth:`donnePositionEntreje`), find the file's specifics
+    and identification trailer (:meth:`donneSpejcifiques`,
+    :meth:`donneIdentificationFichier`), and walk/validate the whole file
+    (:meth:`analyseFichierPadFile`).
+    """
+
     def __init__(self, padFileName, enEjcriture = False, enModification = False, tailleEntreje = 0, tailleSpejcifiques = 0):
+        """Open (or create) a pad file.
+
+        :param padFileName: path to the file.
+        :param enEjcriture: if ``True``, create the file for writing and
+            write its fixed header (``tailleEntreje``/``tailleSpejcifiques``)
+            plus zeroed specifics+identification; if ``False`` (default),
+            open read-only and read that same fixed header back.
+        :param enModification: passed through to
+            :class:`~nind.NindFile.NindFile` (in-place modification mode).
+        :param tailleEntreje: size in bytes of one indirection-table entry
+            (French *tailleEntrée* = "entry size"); only used when writing.
+        :param tailleSpejcifiques: size in bytes of the format-specific
+            trailer block (French *tailleSpécifiques* = "specifics size");
+            only used when writing.
+        """
         #en lecture uniquement
         NindFile.__init__(self, padFileName, enEjcriture, enModification)
         self.entriesBlocksMap = []
@@ -104,50 +147,94 @@ class NindPadFile(NindFile):
             self.tailleEntreje = self.litNombre1()
             self.tailleSpejcifiques = self.litNombre3()
         
-    #############################################################   
+    #############################################################
     # vejrifie l'intejgritej du fichier (pour pouvoir analyser un fichier dejconnant)
     def vejrifieFichier(self):
+        """Check the file's structural integrity (French *vérifieFichier* = "checks file").
+
+        Builds the indirection-blocks map (raising if the ``FLAG_INDEXEJ``
+        markers are missing/misplaced) and confirms the specifics block's
+        ``FLAG_SPEJCIFIQUE`` marker is where expected. Subclasses'
+        ``__init__`` call this right after opening, so that a malformed
+        file fails fast rather than on first lookup.
+
+        :raises Exception: if the file's structure is invalid.
+        """
         #ejtablit la carte des index sur les diffejrents blocs
         self.__ejtablitCarteIndex()
         # vejrifie les spejcifiques
         self.donneSpejcifiques()
-        
-    #############################################################   
+
+    #############################################################
     #retourne l'identification du fichier
     def donneIdentificationFichier(self):
+        """Return the file's identification trailer (French *donneIdentificationFichier* = "gives file identification").
+
+        :return: a ``(maxIdentifiant, identifieurUnique)`` tuple: the
+            highest identifier ever assigned in this file, and a unique
+            stamp (in practice a Unix timestamp) written when the file was
+            finalized.
+        :raises Exception: if the trailer's ``FLAG_IDENTIFICATION`` marker
+            is missing.
+        """
         #<flagIdentification=53> <maxIdentifiant> <identifieurUnique>
         self.seek(-TAILLE_IDENTIFICATION, 2)
-        if self.litNombre1() != FLAG_IDENTIFICATION: 
+        if self.litNombre1() != FLAG_IDENTIFICATION:
             raise Exception('%s : pas FLAG_IDENTIFICATION à %08X'%(self.latFileName, self.tell() -1))
         maxIdentifiant = self.litNombre4()
         identifieurUnique = self.litNombre4()
         return (maxIdentifiant, identifieurUnique)
-    
-    #############################################################   
+
+    #############################################################
     #retourne l'adresse et la longueur des spejcifiques
     def donneSpejcifiques(self):
+        """Locate the format-specific trailer block (French *donneSpécifiques* = "gives specifics").
+
+        The "specifics" block holds whatever extra fixed-size data a
+        concrete format needs beyond the generic envelope (e.g.
+        :class:`~nind.NindLocalindex.NindLocalindex` stores the document
+        count there).
+
+        :return: a ``(offsetSpejcifiques, tailleSpejcifiques)`` tuple: the
+            byte offset of the block and its size (as declared in the
+            file's fixed header).
+        :raises Exception: if the block's ``FLAG_SPEJCIFIQUE`` marker is
+            missing.
+        """
         #<flagSpecifique=57> <spejcifiques>
         self.seek(-TAILLE_IDENTIFICATION -TAILLE_ENTETE_SPEJCIFIQUE - self.tailleSpejcifiques , 2)
-        if self.litNombre1() != FLAG_SPEJCIFIQUE: 
+        if self.litNombre1() != FLAG_SPEJCIFIQUE:
             raise Exception('%s : pas FLAG_SPEJCIFIQUE à %08X'%(self.latFileName, self.tell() -1))
         offsetSpejcifiques = self.tell()
         return (offsetSpejcifiques, self.tailleSpejcifiques)
 
-    #############################################################   
+    #############################################################
     #donne l'adresse de l'index correspondant ah l'ident spejcifiej, 0 si hors limite
     def donnePositionEntreje(self, ident):
+        """Return the file offset of the indirection-table entry for ``ident``.
+
+        French *donnePositionEntrée* = "gives entry position". Looks up
+        ``ident`` across the (possibly chained) indexed blocks built by
+        :meth:`vejrifieFichier`; if not found, rebuilds the blocks map once
+        (in case the file grew since it was opened) before giving up.
+
+        :param ident: the identifier to locate.
+        :return: the byte offset of that identifier's indirection entry, or
+            ``0`` if ``ident`` is out of range.
+        """
         position = self.__donneJustePositionEntreje(ident)
         #si pas trouvej, recharge la map une fois (au cas ouh le fichier aurait changej)
-        if position == 0: 
+        if position == 0:
             self.__ejtablitCarteIndex()
             position = self.__donneJustePositionEntreje(ident)
         return position
-    
-    #############################################################   
+
+    #############################################################
     #donne la taille du fichier
     def donneTailleFichier(self):
-       self.seek(0, 2)
-       return self.tell()
+        """Return the total size of the file in bytes (French *donneTailleFichier* = "gives file size")."""
+        self.seek(0, 2)
+        return self.tell()
     
     #############################################################   
     #donne l'adresse de l'index correspondant ah l'ident spejcifiej, 0 si hors limite
@@ -177,9 +264,19 @@ class NindPadFile(NindFile):
             #saute au bloc d'indirection suivant
             self.seek(addrBlocSuivant, 0)
             
-    #############################################################   
+    #############################################################
     #retourne l'identifiant maximum possible avec le systehme d'index du fichier
     def donneMaxIdentifiant(self):
+        """Return the highest identifier addressable by this file's index blocks.
+
+        French *donneMaxIdentifiant* = "gives max identifier". This is the
+        *capacity* of the indirection system (sum of ``nombreIndex`` across
+        all chained indexed blocks), not necessarily the highest identifier
+        actually in use - compare with :meth:`donneIdentificationFichier`'s
+        ``maxIdentifiant``, which is.
+
+        :raises Exception: if a block's ``FLAG_INDEXEJ`` marker is missing.
+        """
         self.seek(TAILLE_FIXES, 0)
         maxIdent = 0
         while True:
@@ -194,9 +291,22 @@ class NindPadFile(NindFile):
             self.seek(addrBlocSuivant, 0)
         return maxIdent
     
-    #############################################################   
+    #############################################################
     #retourne la liste des occupations des fixes, des blocs indexejs, des spejcifiques et de l'identification
     def donneCarteNonVides(self):
+        """Return the file's known "non-empty" (occupied) byte ranges.
+
+        French *donneCarteNonVides* = "gives non-empty map". Lists the
+        ranges occupied by the fixed header and every indexed block, as a
+        starting point for callers that then add the ranges occupied by
+        the definitions themselves, so :func:`chercheVides` can find what's
+        left over ("holes" - freed or never-written space).
+
+        :return: a ``(maxIdent, nonVidesList)`` tuple: the addressable
+            identifier capacity (same as :meth:`donneMaxIdentifiant`), and
+            a list of ``(address, length)`` occupied ranges.
+        :raises Exception: if a block's ``FLAG_INDEXEJ`` marker is missing.
+        """
         #les fixes
         nonVidesList = [ (0, TAILLE_FIXES) ]
         self.seek(TAILLE_FIXES, 0)
@@ -221,10 +331,22 @@ class NindPadFile(NindFile):
         nonVidesList.append((self.tell(), tailleSpejcifIdent))
         return maxIdent, nonVidesList
     
-    #############################################################   
-    #############################################################   
+    #############################################################
+    #############################################################
     # change l'identification ah la fin du fichier
     def changeIdentificationFichier(self, maxIdentifiant, identifieurUnique):
+        """Overwrite the file's identification trailer in place.
+
+        French *changeIdentificationFichier* = "changes file
+        identification". The file must have been opened in a writable mode
+        (``enEjcriture``/``enModification``); this seeks to the trailer and
+        rewrites its two fields.
+
+        :param maxIdentifiant: new highest-identifier value to record.
+        :param identifieurUnique: new unique stamp to record.
+        :raises Exception: if the trailer's ``FLAG_IDENTIFICATION`` marker
+            is missing.
+        """
         # <flagIdentification=53> <maxIdentifiant> <identifieurUnique>
         self.seek(-TAILLE_IDENTIFICATION, 2)
         if self.litNombre1() != FLAG_IDENTIFICATION: 
@@ -232,9 +354,23 @@ class NindPadFile(NindFile):
         self.ejcritNombre4(maxIdentifiant)
         self.ejcritNombre4(identifieurUnique)
     
-    #############################################################""    
+    #############################################################""
     #analyse complehtement le fichier et retourne True si ok
     def analyseFichierPadFile(self, trace):
+        """Walk and validate the whole pad-file envelope, optionally printing a report.
+
+        French *analyseFichierPadFile* = "analyzes pad file". Walks every
+        indexed block and the specifics+identification trailer, checking
+        markers and computing size breakdowns (fixed header / indexed
+        blocks / "en vrac" data / specifics / identification). Used both as
+        a diagnostic (``Nind_dumpDocument.py`` and friends) and as the
+        first step of every subclass's own ``analyseFichierXxx`` method.
+
+        :param trace: if ``True``, print a human-readable report to stdout.
+        :return: ``True`` if the envelope is structurally valid, ``False``
+            otherwise (errors are reported via ``trace`` rather than
+            raised).
+        """
         cestBon = True
         if trace: print ("======PADFILE=======")
         blocIndex = 0
@@ -329,9 +465,27 @@ class NindPadFile(NindFile):
             print ("taille fichier % 10d %08X"%(offsetFin, offsetFin))
         return cestBon
     
-#############################################################""    
+#############################################################""
 #ah partir de la carte des non-vides, trouve le nombre et la taille des vides
 def chercheVides(nonVidesList):
+    """Derive the "holes" (unused gaps) between a file's occupied byte ranges.
+
+    French *chercheVides* = "looks for empties". Sorts ``nonVidesList`` by
+    address and walks it, reporting any gap between consecutive occupied
+    ranges as a "vide" (hole) - typically caused by entries that were
+    deleted or replaced by a bigger definition without compacting the file.
+    Used by every ``analyseFichierXxx``/statistics method to report on file
+    fragmentation.
+
+    :param nonVidesList: list of ``(address, length)`` occupied ranges
+        (as produced by e.g. :meth:`NindPadFile.donneCarteNonVides`); sorted
+        in place.
+    :return: a ``(nbreVides, tailleVides, typesVides, typesNonVides)``
+        tuple: the number and total size of holes found, and two
+        ``{length: count}`` histograms (of hole sizes and of occupied-range
+        sizes, respectively).
+    :raises Exception: if two occupied ranges overlap.
+    """
     #ordonne les indirections
     nonVidesList.sort()
     addressePrec = longueurPrec = 0
@@ -354,9 +508,19 @@ def chercheVides(nonVidesList):
         longueurPrec = longueur 
     return nbreVides, tailleVides, typesVides, typesNonVides
 
-#############################################################   
-#ah partir d'une liste calcule le max, le min, la moyenne et l'ejcart-type 
+#############################################################
+#ah partir d'une liste calcule le max, le min, la moyenne et l'ejcart-type
 def calculeRejpartition(nombres):
+    """Compute basic descriptive statistics over a list of numbers.
+
+    French *calculeRépartition* = "computes distribution". Small helper
+    shared by the various ``analyseFichierXxx`` methods to summarize things
+    like definition sizes or term frequencies.
+
+    :param nombres: list of numbers (int or float).
+    :return: a ``(count, min, max, sum, mean, stddev)`` tuple; all zeros if
+        ``nombres`` is empty.
+    """
     if len(nombres) == 0: return 0, 0, 0, 0, 0.0, 0.0
     somme = somme2 = 0
     min = max = nombres[0]

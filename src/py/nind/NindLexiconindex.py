@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Lexicon-as-index: word (text) -> identifier, hash-bucketed.
+
+A ``.nindlexiconindex`` file is a :class:`~nind.NindIndex.NindIndex` whose
+identifiers are hash buckets (``clefB(mot) % nombreIndirection``, see
+:func:`~nind.NindFile.clefB`) rather than direct word ids: each bucket's
+definition packs every word that hashed into it, alongside its identifier
+and, for compound words, the identifiers of its components. This is the
+format :class:`~nind.nind_engine.NindIndexer` writes as ``.nindlexiconindex``
+and :class:`~nind.nind_engine.NindEngine` reads to turn a query term into
+the identifier used to look it up in :class:`~nind.NindTermindex.NindTermindex`.
+"""
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
@@ -115,7 +126,21 @@ FLAG_DEJFINITION = 13
 TAILLE_TESTE_DEJFINITION = 7
 
 class NindLexiconindex(NindIndex):
+    """Read-only word-to-identifier lexicon, hash-bucketed by :func:`~nind.NindFile.clefB`.
+
+    The only public entry point most callers need is
+    :meth:`donneIdentifiant`; the rest (``analyseFichierLexiconindex``,
+    ``dumpeFichier``, ``debogueIndex``, ``donneCollisions``, ``donneMax``,
+    ``donneClef``) are diagnostics used by ``Nind_*`` command-line tools to
+    inspect hash-bucket distribution and collisions.
+    """
+
     def __init__(self, lexiconindexFileName):
+        """Open ``lexiconindexFileName`` read-only.
+
+        :param lexiconindexFileName: path to the ``.nindlexiconindex`` file.
+        :raises Exception: if the file's pad-file envelope is invalid.
+        """
         NindIndex.__init__(self, lexiconindexFileName)
         #trouve le modulo = nombreIndirection
         self.nombreIndirection = self.donneMaxIdentifiant()
@@ -174,6 +199,18 @@ class NindLexiconindex(NindIndex):
     
     #trouve l'identifiant du mot fourni sous forme d'une liste de mots simples
     def donneIdentifiant(self, motsSimples):
+        """Look up the identifier of a word, given as a list of simple words.
+
+        French *donneIdentifiant* = "gives identifier". A single-element
+        list looks up a simple word; a multi-element list looks up the
+        compound word formed by those simple words in order (resolving
+        each intermediate compound's identifier as it goes).
+
+        :param motsSimples: list of one or more simple-word strings, e.g.
+            ``["compulsive"]`` or ``["épistémologie", "compulsive"]``.
+        :return: the word's identifier, or ``0`` if it is not in the
+            lexicon.
+        """
         sousMotId = 0
         for mot in motsSimples:
             sousMotId = self.__donneIdentifiantIntermejdiaire(mot, sousMotId)
@@ -183,6 +220,18 @@ class NindLexiconindex(NindIndex):
     #######################################################################"
     #analyse du fichier
     def analyseFichierLexiconindex(self, trace):
+        """Validate the file and report simple/compound word statistics.
+
+        French *analyseFichierLexiconindex* = "analyzes lexicon-index
+        file". Extends :meth:`~nind.NindIndex.NindIndex.analyseFichierIndex`
+        with a breakdown of simple vs. compound words per bucket and the
+        distribution of compound-word component counts.
+
+        :param trace: if ``True``, print a human-readable report to stdout.
+        :return: ``False`` if the underlying index is invalid; otherwise
+            prints the report when ``trace`` is set (no explicit return
+            value on the success path).
+        """
         cestbon = self.analyseFichierIndex(trace)
         if not cestbon: return False
         if trace: print ("======LEXICON=======")
@@ -261,12 +310,22 @@ class NindLexiconindex(NindIndex):
     #######################################################################
     #dumpe le fichier lexique sur un fichier texte
     def dumpeFichier(self, outFile):
+        """Dump every bucket's entries to a text file, for inspection.
+
+        French *dumpeFichier* = "dumps file". One line per word: its
+        identifier, the word itself, and (for compound words) its
+        component identifier pairs.
+
+        :param outFile: a writable text file object (UTF-8).
+        :return: a ``(nbLignes, nbErreurs)`` tuple: number of lines
+            written, and number of those that hit a decoding error.
+        """
         nbLignes = nbErreurs = 0
         #trouve le max des identifiants
         maxIdent = self.donneMaxIdentifiant()
         for index in range(maxIdent):
             try:
-                #trouve les donnejes 
+                #trouve les donnejes
                 trouvej, longueurDonnejes, tailleExtension = self.__donneDonnejes(index)
                 if not trouvej: continue      #index pas trouve
                 #examine les données
@@ -296,6 +355,14 @@ class NindLexiconindex(NindIndex):
     #######################################################################
     #parcourt le fichier en mode debogue pour trouver une dejfinition
     def debogueIndex(self, index):
+        """Print a step-by-step trace of decoding one bucket's definition.
+
+        French *debogueIndex* = "debugs index". Diagnostic helper for the
+        ``Nind_checkRejtroAndLexicon.py`` CLI: prints every field as it is
+        read, to help pinpoint where a corrupted bucket goes wrong.
+
+        :param index: the bucket (hash) index to inspect.
+        """
         print('index=', index)
         (offsetDejfinition, longueurDejfinition) = self.donneAdresseDejfinition(index)
         print('offsetDejfinition=', offsetDejfinition)
@@ -349,6 +416,14 @@ class NindLexiconindex(NindIndex):
     #######################################################################
     #donne les mots simples enregistrejs sur l'indirection spejcifieje et le nombre de composants
     def donneCollisions(self, index):
+        """List every word hash-bucketed onto ``index`` (a "hash collision" report).
+
+        French *donneCollisions* = "gives collisions".
+
+        :param index: the bucket (hash) index to inspect.
+        :return: a list of ``(motSimple, identifiantS, nbreComposes)``
+            tuples, one per word sharing that bucket.
+        """
         rejsultat = []
         #trouve les donnejes 
         trouvej, longueurDonnejes, tailleExtension = self.__donneDonnejes(index)
@@ -370,6 +445,19 @@ class NindLexiconindex(NindIndex):
     #######################################################################
     #donne les identifiants des mots composejs qui ont le plus de composants
     def donneMax(self, taille):
+        """Find the words with the most components and the buckets with the most collisions.
+
+        French *donneMax* = "gives max[ima]". Scans the whole file to find
+        the top ``taille`` compound words by component count, and the top
+        ``taille`` buckets by number of colliding words.
+
+        :param taille: how many top entries to keep for each ranking.
+        :return: a ``(composejs, collisions)`` tuple: ``composejs`` is a
+            list of ``(nbreComposejs, identifiantS, index)`` tuples sorted
+            by descending component count; ``collisions`` is a list of
+            ``(nbreCollisions, index)`` tuples sorted by descending
+            collision count.
+        """
         #trouve le max des identifiants
         maxIdent = self.donneMaxIdentifiant()
         composejs = []
@@ -404,6 +492,16 @@ class NindLexiconindex(NindIndex):
     #######################################################################
     #donne la clef d'accehs (pour deboguer)
     def donneClef(self, mot):
+        """Return the bucket index a given simple word hashes to.
+
+        French *donneClef* = "gives key". Debugging helper: same
+        computation :meth:`donneIdentifiant` performs internally, exposed
+        so a caller can e.g. inspect a specific bucket with
+        :meth:`donneCollisions` or :meth:`debogueIndex`.
+
+        :param mot: the simple word to hash.
+        :return: its bucket index (``clefB(mot) % nombreIndirection``).
+        """
         clefB = NindFile.clefB(mot)
         return clefB % self.nombreIndirection
         

@@ -2,6 +2,8 @@
 
 New Indexation method in the ``Amose`` search engine since the former ``S2`` and ``Lucene`` are deprecated.
 
+**Python package documentation:** https://aymara.github.io/nind/
+
 In 2014, **Atejcon** developed and documented nind, a simple indexing module based on flat files. It was developed to meet the need for indexing an application such **ANT'inno**'s ``ANT'box`` but can undoubtedly be used for other more ambitious applications in terms of volume and speed of indexing and reading.
 
 **CEA LVIC** used the Lucene indexer for its ``Amose`` engine and wished to find an alternative. nind was a candidate and had to prove its relevance with regard to interfacing and volume performance.
