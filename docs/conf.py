@@ -53,11 +53,20 @@ intersphinx_mapping = {
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
-html_theme = "furo"
+html_theme = "pydata_sphinx_theme"
 html_title = f"nind {version}"
 html_static_path = []
 html_theme_options = {
-    "source_repository": "https://github.com/aymara/nind/",
-    "source_branch": "master",
-    "source_directory": "docs/",
+    "github_url": "https://github.com/aymara/nind",
+    "use_edit_page_button": True,
+    "show_toc_level": 2,
+    "navigation_with_keys": True,
+    "footer_start": ["copyright"],
+    "footer_end": [],
+}
+html_context = {
+    "github_user": "aymara",
+    "github_repo": "nind",
+    "github_version": "master",
+    "doc_path": "docs",
 }

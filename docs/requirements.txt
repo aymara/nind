@@ -5,5 +5,5 @@
 # sys.path) rather than installing the nind wheel, so it doesn't need to
 # join the project's own dependency resolution/lock.
 sphinx>=8
-furo>=2024.8
+pydata-sphinx-theme>=0.15
 myst-parser>=4
