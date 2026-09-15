@@ -57,15 +57,25 @@ Every class `NindEngine` builds on
 {class}`~nind.NindTermindex.NindTermindex`,
 {class}`~nind.NindLocalindex.NindLocalindex`) can also open index files
 produced by the C++ stack directly - they only need the binary files on
-disk, not anything written by `NindIndexer`:
+disk, not anything written by `NindIndexer`. `NindTermindex` and
+`NindLocalindex` do need the lexicon's identification stamp to look
+anything up (a cross-check the underlying format itself requires), so open
+the lexicon first:
 
 ```python
+from nind.NindLexiconindex import NindLexiconindex
 from nind.NindTermindex import NindTermindex
 
-term_index = NindTermindex("/path/to/corpus.nindtermindex")
-for categorie, frequence, docs in term_index.donneListeTermesCG(term_id):
-    print(categorie, frequence, docs)
+lexicon = NindLexiconindex("/path/to/corpus.nindlexiconindex")
+term_index = NindTermindex("/path/to/corpus.nindtermindex", lexicon.donneIdentification())
+for term_cg in term_index.donneListeTermesCG(term_id):
+    print(term_cg.cg, term_cg.frequency, term_cg.documents)
 ```
+
+`donneListeTermesCG` (and the equivalent lookup methods on the other
+reader classes) return the `nind._native` objects directly - here, a list
+of `TermCG`, each with `.cg`/`.frequency`/`.documents` (a list of
+`Document`, each with `.ident`/`.frequency`) - rather than plain tuples.
 
 See {doc}`architecture` for how these lower-level classes relate to each
 other, and {doc}`api/index` for the full reference.

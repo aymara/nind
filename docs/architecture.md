@@ -18,54 +18,67 @@ this documentation quotes them as-is:
   `NindTermindex` reads `.nindtermindex`, and so on. This convention holds
   across the Python and C++ implementations.
 
-## Two independent implementations, one binary format
+## One binary format, one C++ implementation, an ergonomic Python API
 
-nind's binary file formats are specified in an EBNF grammar. The intended
-workflow is: the production C++ library writes the files, and this Python
-package - built with **no shared code** - independently reads and checks
-them against the same grammar. Class comments throughout the source quote
-the relevant grammar rules directly above each class, since the original
-design documents (referenced by internal report codes like
-`LAT2014.JYS.440`) are not in the repository.
+nind's binary file formats are specified in an EBNF grammar. Class comments
+throughout the source quote the relevant grammar rules directly above each
+class, since the original design documents (referenced by internal report
+codes like `LAT2014.JYS.440`) are not in the repository.
 
-The `nind` wheel additionally bundles `nind._native`: pybind11 bindings
-over the core C++ index stack. This is a *third*, independent code path
-(full read/write, unlike the read-only pure-Python classes below) - it
-does not change the two-implementation cross-verification design.
+The `nind` wheel bundles a compiled extension, `nind._native`: pybind11
+bindings over the core C++ index stack (`NindLexiconIndex`, `NindTermIndex`,
+`NindLocalIndex`, `NindRetrolexicon`, `NindLexicon`; full read/write). This
+is the real backing for the low-level Python classes below - their
+hot-path lookups/writes, and their shared structural-diagnostic base
+(`analyseFichierPadFile`/`analyseFichierIndex`), delegate to it rather than
+re-implementing the binary format in Python. The one remaining place with
+hand-rolled pure-Python parsing is the per-format diagnostic/introspection
+methods (`dumpeFichier`, `debogueIndex`, `donneCollisions`, `donneMax`,
+`donneClef`, `afficheTerme`, `afficheDocument`, and each class's own
+`analyseFichierXxx` beyond the shared base) - `nind._native` doesn't expose
+that introspection surface yet (see `CLAUDE.md`'s "Planned follow-up work"
+for the plan to close that gap too).
 
 ## Python module layering
 
-The pure-Python classes mirror the C++ library's layering:
+The pure-Python classes mirror the C++ library's layering, but the class
+body itself is mostly a thin wrapper - the class hierarchy below is where
+the file-format envelope's *shared, hand-rolled* parsing still lives (used
+by the per-format diagnostic methods each subclass adds), while the actual
+hot-path reads/writes go straight to `nind._native`:
 
 ```text
-NindFile            binary "Latecon" number/string codec (read + write)
-  |
+NindFile            binary "Latecon" number/string codec (read + write) -
+  |                 still used to write and to back the diagnostic-only
+  |                 parsing paths below
   +-- NindPadFile    generic pad-file envelope: header, indirection
         |            block(s), "en vrac" definitions, specifics +
-        |            identification trailer (read only)
+        |            identification trailer. analyseFichierPadFile()
+        |            delegates to nind._native's analyse_pad_file().
         |
         +-- NindRetrolexicon    id -> word, .nindretrolexicon
+        |                       donneMot() delegates to nind._native
         |
-        +-- NindIndex           id -> (offset, length), read only
+        +-- NindIndex           id -> (offset, length). analyseFichierIndex()
+              |                 delegates to nind._native's analyse_index().
               |
               +-- NindLexiconindex   word -> id, .nindlexiconindex
               +-- NindTermindex      term id -> postings, .nindtermindex
               +-- NindLocalindex     doc id -> term positions, .nindlocalindex
 
-nind_engine (no C++ equivalent - pure-Python frontend)
+nind_engine (no C++ equivalent - pure-Python frontend, native-backed)
   NindIndexer   the only Python *writer* for the index-family formats;
-                hand-rolls the pad-file envelope via NindFile directly,
-                since there is no Python writer base class to build on.
+                builds them via nind._native's is_writer=True constructors.
   NindEngine    BM25 search, built on NindLexiconindex/NindTermindex/
                 NindLocalindex.
 ```
 
-Every reader class down to `NindLocalindex` is **read-only** - deliberately,
-since the Python side's role is verification, not production writing. The
-one exception is `NindIndexer`, which exists purely to make the package
-useful stand-alone (e.g. in this documentation's {doc}`quickstart`)
-without requiring the compiled `nind._native` extension or the C++ CLI
-tools.
+None of these classes write the index-family formats themselves except
+`NindIndexer` (which, like the readers, delegates to `nind._native` rather
+than hand-rolling the envelope) - `nind_engine` is the whole package's only
+writer path. `nind._native` is a hard runtime dependency throughout: every
+class above requires the compiled extension to be built (`uv sync`), even
+for read-only or diagnostic use.
 
 ## Where the C++ layer fits
 

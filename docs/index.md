@@ -1,19 +1,22 @@
 # nind
 
 **nind** ("nouvelle indexation") is a flat-file inverted-index module. This
-site documents the **Python package** (`nind`, in `src/py/nind/`): a
-pure-Python re-implementation of nind's binary index formats, plus a
-modern BM25-style search API layered on top.
+site documents the **Python package** (`nind`, in `src/py/nind/`): an
+ergonomic Python frontend to nind's binary index formats, plus a modern
+BM25-style search API layered on top.
 
-```{admonition} Two implementations, one format
+```{admonition} One format, one C++ implementation, an ergonomic Python API
 :class: note
 
-nind ships two independent implementations of the same binary file
-formats: a production C++ stack, and this Python package. They share no
-code - the Python classes exist, per the project's original design, to
-read and verify the C++-produced files against the format's EBNF grammar,
-in addition to standing on their own as a lightweight, install-anywhere
-search frontend.
+nind's binary file formats are specified in an EBNF grammar (see the
+project `README`) and produced/read by a single production C++ stack. The
+`nind` Python package is not a second, independent implementation of that
+stack - its low-level classes are thin wrappers over `nind._native`
+(pybind11 bindings compiled from that same C++ code), so reading or
+writing a file in Python exercises the real C++ implementation underneath.
+The only genuinely hand-rolled Python parsing left is for a handful of
+diagnostic/introspection methods (`dumpeFichier`, `afficheTerme`, and
+similar) that `nind._native` doesn't expose yet.
 ```
 
 ## Where to start
