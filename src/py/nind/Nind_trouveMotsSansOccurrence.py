@@ -3,7 +3,7 @@
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2019 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.0.6"
+__version__ = "2.0.7"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2019
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
