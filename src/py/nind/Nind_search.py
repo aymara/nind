@@ -3,7 +3,7 @@
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.0.7"
+__version__ = "2.1.0"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -57,8 +57,9 @@ def main():
     
     #ouvre les classes
     nindLexiconindex = NindLexiconindex(nindlexiconindexName)
-    nindTermindex = NindTermindex(nindtermindexName)
-    nindLocalindex = NindLocalindex(nindlocalindexName)
+    lexiconIdentification = nindLexiconindex.donneIdentification()
+    nindTermindex = NindTermindex(nindtermindexName, lexiconIdentification)
+    nindLocalindex = NindLocalindex(nindlocalindexName, lexiconIdentification)
     
     #1) verifie l'identification des fichiers
     (maxIdentifiant, dateHeure) = nindLexiconindex.donneIdentificationFichier()
@@ -79,10 +80,10 @@ def main():
         
     #3) trouve les utilisations du terme dans le fichier inverse et les affiche
     termesCGList = nindTermindex.donneListeTermesCG(motId)
-    for (categorie, frequenceTerme, docs) in termesCGList:
+    for termeCG in termesCGList:
         docsListe = []
-        for (noDoc, frequenceDoc) in docs: docsListe.append('%d(%d)'%(noDoc, frequenceDoc))
-        print ('%s[%s] %s%s %d fois dans %s'%(RED, motId, NindFile.catNb2Str(categorie), OFF, frequenceTerme, ' '.join(docsListe)))
+        for document in termeCG.documents: docsListe.append('%d(%d)'%(document.ident, document.frequency))
+        print ('%s[%s] %s%s %d fois dans %s'%(RED, motId, NindFile.catNb2Str(termeCG.cg), OFF, termeCG.frequency, ' '.join(docsListe)))
 
     #4) choisit un doc et affiche ce qui concerne le terme
     noDocStr = input("%sno doc : %s"%(BLUE, OFF))
@@ -90,11 +91,11 @@ def main():
     noDoc = int(noDocStr)
     termList = nindLocalindex.donneListeTermes(noDoc)
     resultat = []
-    for (noTerme, categorie, localisationsList) in termList:
-        if noTerme != motId: continue
+    for terme in termList:
+        if terme.term != motId: continue
         locListe = []
-        for (localisationAbsolue, longueur) in localisationsList: locListe.append('%d(%d)'%(localisationAbsolue, longueur))
-        resultat.append('%s<%s>'%(NindFile.catNb2Str(categorie), ' '.join(locListe)))
+        for localisation in terme.localisation: locListe.append('%d(%d)'%(localisation.position, localisation.length))
+        resultat.append('%s<%s>'%(NindFile.catNb2Str(terme.cg), ' '.join(locListe)))
     print (' '.join(resultat))
                                                                                   
 

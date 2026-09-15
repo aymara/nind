@@ -14,7 +14,7 @@ the identifier used to look it up in :class:`~nind.NindTermindex.NindTermindex`.
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.0.7"
+__version__ = "2.1.0"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -27,9 +27,18 @@ __version__ = "2.0.7"
 import sys
 from os import getenv, path
 import codecs
-from . import NindFile
-from .NindIndex import NindIndex
-from .NindPadFile import calculeRejpartition
+try:
+    from . import NindFile
+    from .NindIndex import NindIndex
+    from .NindPadFile import calculeRejpartition
+except ImportError:
+    # run directly (not as part of the installed package): see docs/cli.md
+    import NindFile
+    from NindIndex import NindIndex
+    from NindPadFile import calculeRejpartition
+from nind import _native as native
+
+NINDLEXICONINDEX_EXT = '.nindlexiconindex'
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')
@@ -128,11 +137,13 @@ TAILLE_TESTE_DEJFINITION = 7
 class NindLexiconindex(NindIndex):
     """Read-only word-to-identifier lexicon, hash-bucketed by :func:`~nind.NindFile.clefB`.
 
-    The only public entry point most callers need is
-    :meth:`donneIdentifiant`; the rest (``analyseFichierLexiconindex``,
+    :meth:`donneIdentifiant` and :meth:`donneIdentification` delegate to the
+    ``nind._native`` bindings; the rest (``analyseFichierLexiconindex``,
     ``dumpeFichier``, ``debogueIndex``, ``donneCollisions``, ``donneMax``,
     ``donneClef``) are diagnostics used by ``Nind_*`` command-line tools to
-    inspect hash-bucket distribution and collisions.
+    inspect hash-bucket distribution and collisions, and remain hand-rolled
+    pure-Python parsing since ``nind._native`` doesn't expose that
+    introspection.
     """
 
     def __init__(self, lexiconindexFileName):
@@ -144,7 +155,10 @@ class NindLexiconindex(NindIndex):
         NindIndex.__init__(self, lexiconindexFileName)
         #trouve le modulo = nombreIndirection
         self.nombreIndirection = self.donneMaxIdentifiant()
-        
+        base = lexiconindexFileName
+        if base.endswith(NINDLEXICONINDEX_EXT): base = base[:-len(NINDLEXICONINDEX_EXT)]
+        self._native = native.NindLexiconIndex(base, is_writer=False)
+
     #trouve les donnejes 
     def __donneDonnejes(self, identifiant):
         #lit la définition du mot
@@ -162,60 +176,29 @@ class NindLexiconindex(NindIndex):
             raise Exception('%s : %d incohérent à %08X'%(self.latFileName, identifiant, offsetDejfinition+5))
         return True, longueurDonnejes, tailleExtension
         
-    #trouve l'identifiant du mot
-    def __donneIdentifiantIntermejdiaire(self, mot, sousMotId):
-        clefB = NindFile.clefB(mot)
-        index = clefB % self.nombreIndirection
-        #trouve les donnejes 
-        trouvej, longueurDonnejes, tailleExtension = self.__donneDonnejes(index)
-        if not trouvej: return 0      #identifiant pas trouve
-        finDonnejes = self.tell() + longueurDonnejes
-        while self.tell() < finDonnejes:
-            #<motSimple> <identifiantS> <nbreComposes> <composes>
-            motSimple = self.litString()
-            #longueur = self.litNombre1()
-            #motSimple = self.litOctets(longueur)
-            if motSimple != mot: 
-            #if motSimple != bytes(mot.encode()): 
-                #pas le mot cherche, on continue
-                self.litNombre4()      #identifiantS
-                nbreComposes = self.litNombreULat()
-                for i in range(nbreComposes):
-                    self.litNombre4()          #identifiantA
-                    self.litNombreSLat()       #identifiantRelC
-                continue
-            #c'est le mot cherche
-            identifiantS = self.litNombre4()
-            if sousMotId == 0: return identifiantS        #identifiant simple trouve
-            nbreComposes = self.litNombreULat()
-            identifiantC = identifiantS
-            for i in range(nbreComposes):
-                #<identifiantA> <identifiantRelC>
-                identifiantA = self.litNombre4()
-                identifiantC += self.litNombreSLat()
-                if sousMotId == identifiantA: return identifiantC    #identifiant compose trouve
-        #pas trouve
-        return 0
-    
     #trouve l'identifiant du mot fourni sous forme d'une liste de mots simples
     def donneIdentifiant(self, motsSimples):
         """Look up the identifier of a word, given as a list of simple words.
 
         French *donneIdentifiant* = "gives identifier". A single-element
         list looks up a simple word; a multi-element list looks up the
-        compound word formed by those simple words in order (resolving
-        each intermediate compound's identifier as it goes).
+        compound word formed by those simple words in order.
 
         :param motsSimples: list of one or more simple-word strings, e.g.
             ``["compulsive"]`` or ``["épistémologie", "compulsive"]``.
         :return: the word's identifier, or ``0`` if it is not in the
             lexicon.
         """
-        sousMotId = 0
-        for mot in motsSimples:
-            sousMotId = self.__donneIdentifiantIntermejdiaire(mot, sousMotId)
-            if sousMotId == 0: break
-        return sousMotId
+        return self._native.get_word_id(motsSimples)
+
+    def donneIdentification(self):
+        """Return this lexicon's :class:`nind._native.Identification`.
+
+        Needed to open the corresponding ``.nindtermindex``/
+        ``.nindlocalindex``/``.nindretrolexicon`` files, which cross-check
+        against it.
+        """
+        return self._native.get_identification()
 
     #######################################################################"
     #analyse du fichier

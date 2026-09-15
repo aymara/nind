@@ -5,11 +5,21 @@ The `nind` package is not currently wired up with installed
 plain commands after `pip install nind`. They are plain scripts that import
 their sibling modules with absolute imports (e.g. `from NindFile import
 ...`, not `from nind.NindFile import ...`), so run them **from inside
-`src/py/nind/`** (or with that directory - not `src/py` - on `PYTHONPATH`):
+`src/py/nind/`** (or with that directory - not `src/py` - on `PYTHONPATH`).
+Each affected module falls back to that plain-sibling import only when the
+package-relative one fails (i.e. when run this way, outside the installed
+package), so the same file works both standalone and as `nind.NindXxx`.
+
+The lookup-heavy readers (`NindLexiconindex`, `NindTermindex`,
+`NindLocalindex`, `NindRetrolexicon`) also import the compiled
+`nind._native` extension unconditionally (always via the installed
+package, since it's a binary artifact with no loose sibling-file
+equivalent) - so the `nind` package must be installed (`uv sync`) and its
+venv active/used to run these scripts, even when run standalone:
 
 ```bash
 cd src/py/nind
-python3 Nind_search.py ../../../indices/FRE.nindlexiconindex syntagme_nominal
+uv run python3 Nind_search.py ../../../indices/FRE.nindlexiconindex syntagme_nominal
 ```
 
 ## Corpus-level tools

@@ -1,13 +1,13 @@
-"""High-level, pure-Python nind frontend: index text files and search them with BM25.
+"""High-level nind frontend: index text files and search them with BM25.
 
 This module is the modern entry point for the ``nind`` package: unlike
 :mod:`~nind.NindFile`/:mod:`~nind.NindPadFile` and the ``Nind*index``
-classes (which only *read* the nind binary formats, mirroring the C++
-implementation for cross-verification purposes - see the package's
-``CLAUDE.md``), :class:`NindIndexer` here is the only Python code that
-*writes* ``.nindlexiconindex``/``.nindtermindex``/``.nindlocalindex`` files,
-and :class:`NindEngine` provides a simple BM25 search API built on top of
-the read-only classes.
+classes (which only *read* the nind binary formats, as ergonomic Python
+wrappers over the ``nind._native`` bindings where available - see the
+package's ``CLAUDE.md``), :class:`NindIndexer` here is the only Python code
+that *writes* ``.nindlexiconindex``/``.nindtermindex``/``.nindlocalindex``
+files, and :class:`NindEngine` provides a simple BM25 search API built on
+top of the read-only classes.
 
 Typical usage::
 
@@ -21,26 +21,11 @@ Typical usage::
 import math
 import os
 import re
-import time
 from collections import Counter, defaultdict
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
-from . import NindFile
-
-############################################################
-# Flags and sizes from the nind binary format (see NindPadFile.py, NindIndex.py,
-# NindLexiconindex.py, NindTermindex.py, NindLocalindex.py for the full grammar).
-############################################################
-FLAG_INDEXEJ = 47
-FLAG_SPEJCIFIQUE = 57
-FLAG_IDENTIFICATION = 53
-TAILLE_INDIRECTION = 8         # <offsetDejfinition:5> <longueurDejfinition:3>
-
-FLAG_LEXICON_DEJFINITION = 13
-FLAG_TERME_DEJFINITION = 17
-FLAG_CG = 61
-FLAG_LOCAL_DEJFINITION = 19
+from . import _native as native
 
 class NindEngine:
     """BM25 search engine on top of a nind index produced by :class:`NindIndexer`.
@@ -73,8 +58,9 @@ class NindEngine:
             raise FileNotFoundError("Could not find .nindlexiconindex file in the specified directory.")
 
         self.lexicon = NindLexiconindex(os.path.join(index_dir, f"{prefix}.nindlexiconindex"))
-        self.term_index = NindTermindex(os.path.join(index_dir, f"{prefix}.nindtermindex"))
-        self.local_index = NindLocalindex(os.path.join(index_dir, f"{prefix}.nindlocalindex"))
+        lexicon_identification = self.lexicon.donneIdentification()
+        self.term_index = NindTermindex(os.path.join(index_dir, f"{prefix}.nindtermindex"), lexicon_identification)
+        self.local_index = NindLocalindex(os.path.join(index_dir, f"{prefix}.nindlocalindex"), lexicon_identification)
 
         self.total_docs = len(self.local_index.donneidentifiantsExternes())
         self.avg_doc_len = self._calculate_avg_doc_len()
@@ -127,10 +113,10 @@ class NindEngine:
         if term_id == 0: return 0
 
         term_defs = self.term_index.donneListeTermesCG(term_id)
-        for cg, freq, docs in term_defs:
-            for d_id, d_freq in docs:
-                if d_id == doc_id:
-                    return d_freq
+        for term_cg in term_defs:
+            for document in term_cg.documents:
+                if document.ident == doc_id:
+                    return document.frequency
         return 0
 
     def get_df(self, term):
@@ -145,8 +131,8 @@ class NindEngine:
 
         term_defs = self.term_index.donneListeTermesCG(term_id)
         df = 0
-        for cg, freq, docs in term_defs:
-            df += len(docs)
+        for term_cg in term_defs:
+            df += len(term_cg.documents)
         return df
 
     def get_doc_len(self, doc_id):
@@ -155,7 +141,7 @@ class NindEngine:
         :param doc_id: the document's external identifier.
         :return: the document's length in tokens.
         """
-        return sum(len(localisations) for _, _, localisations in self.local_index.donneListeTermes(doc_id))
+        return sum(len(term.localisation) for term in self.local_index.donneListeTermes(doc_id))
 
     def bm25_score(self, query, doc_id, k1=1.5, b=0.75):
         """Compute the Okapi BM25 relevance score of a document for a query.
@@ -207,10 +193,8 @@ class NindIndexer:
     """Builds a nind binary index (lexicon + term + local files) from a list of text files.
 
     The only Python *writer* for the nind index-family formats (see the
-    module docstring): it hand-rolls the ``.nindlexiconindex``/
-    ``.nindtermindex``/``.nindlocalindex`` binary layout directly via
-    :mod:`~nind.NindFile`, since there is no Python writer base class to
-    build on (unlike the C++ side's ``NindIndex``).
+    module docstring): it builds them via ``nind._native``'s
+    ``is_writer=True`` constructors.
     """
 
     def __init__(self, index_dir, prefix="corpus"):
@@ -247,11 +231,7 @@ class NindIndexer:
                 corpus_tokens.append(tokens)
                 global_lexicon.update(tokens)
 
-        term_to_id = {}
-        id_counter = 1
-        for term in sorted(global_lexicon.keys()):
-            term_to_id[term] = id_counter
-            id_counter += 1
+        term_to_id, lexicon_identification = self._write_lexicon(sorted(global_lexicon.keys()))
 
         inverted_index = defaultdict(list)
         for doc_id, tokens in enumerate(corpus_tokens):
@@ -260,10 +240,8 @@ class NindIndexer:
                 term_id = term_to_id[term]
                 inverted_index[term_id].append((doc_id, freq))
 
-        max_term_id = max(term_to_id.values()) if term_to_id else 0
-        self._write_lexicon(term_to_id)
-        self._write_term_index(inverted_index, max_term_id)
-        self._write_local_index(corpus_tokens, term_to_id)
+        self._write_term_index(inverted_index, lexicon_identification)
+        self._write_local_index(corpus_tokens, term_to_id, lexicon_identification)
 
     def _default_tokenize(self, text):
         tokens = re.split(r'[^a-zA-Z0-9_]', text)
@@ -274,164 +252,53 @@ class NindIndexer:
             refined.extend(parts if parts else [t])
         return refined
 
-    ########################################################################
-    # Shared helpers for the nind "pad file" envelope: fixed header, a single
-    # indexed block (indirection table), the definitions themselves ("en vrac"),
-    # then the specifics + identification trailer required by NindPadFile.
-    ########################################################################
-    def _open_index_file(self, suffix, nombre_index, taille_specifiques):
-        file_path = os.path.join(self.index_dir, f"{self.prefix}.{suffix}")
-        nf = NindFile.NindFile(file_path, enEjcriture=True)
-        nf.ejcritNombre1(TAILLE_INDIRECTION)    # tailleEntreje
-        nf.ejcritNombre3(taille_specifiques)    # tailleSpejcifiques
-        nf.ejcritNombre1(FLAG_INDEXEJ)
-        nf.ejcritNombre5(0)                     # addrBlocSuivant : un seul bloc
-        nf.ejcritNombre3(nombre_index)
-        indirection_offset = nf.tell()
-        for _ in range(nombre_index):
-            nf.ejcritNombre5(0)
-            nf.ejcritNombre3(0)
-        return nf, indirection_offset
-
-    def _patch_indirection(self, nf, indirection_offset, index, offset, length):
-        nf.seek(indirection_offset + index * TAILLE_INDIRECTION, 0)
-        nf.ejcritNombre5(offset)
-        nf.ejcritNombre3(length)
-
-    def _write_footer(self, nf, specifiques_entier4, max_identifiant):
-        nf.seek(0, 2)
-        nf.ejcritNombre1(FLAG_SPEJCIFIQUE)
-        for valeur in specifiques_entier4:
-            nf.ejcritNombre4(valeur)
-        nf.ejcritNombre1(FLAG_IDENTIFICATION)
-        nf.ejcritNombre4(max_identifiant)
-        nf.ejcritNombre4(int(time.time()) & 0xFFFFFFFF)
+    def _base_path(self):
+        # nind._native appends the format-specific extension itself.
+        return os.path.join(self.index_dir, self.prefix)
 
     ########################################################################
-    # .nindlexiconindex : hash table keyed by clefB(mot) % nombreIndirection.
+    # .nindlexiconindex : one simple word per term, ids assigned by the writer.
     ########################################################################
-    def _write_lexicon(self, term_to_id):
-        nombre_buckets = max(1, len(term_to_id))
-        buckets = defaultdict(list)
-        for term, tid in term_to_id.items():
-            buckets[NindFile.clefB(term) % nombre_buckets].append((term, tid))
-
-        nf, indirection_offset = self._open_index_file('nindlexiconindex', nombre_buckets, 0)
-        try:
-            placements = []
-            for bucket in sorted(buckets):
-                def_start = nf.tell()
-                nf.ejcritNombre1(FLAG_LEXICON_DEJFINITION)   # <flagDejfinition=13>
-                nf.ejcritNombre3(bucket)                     # <identifiantHash>
-                len_pos = nf.tell()
-                nf.ejcritNombre3(0)                          # <longueurDonnejes> (placeholder)
-                data_start = nf.tell()
-                for term, tid in sorted(buckets[bucket], key=lambda t: t[1]):
-                    encoded = term.encode('utf-8')
-                    nf.ejcritNombre1(len(encoded))           # <motSimple> = <MotUtf8>
-                    nf.ejcritChaine(term)
-                    nf.ejcritNombre4(tid)                    # <identifiantS>
-                    nf.ejcritNombreULat(0)                   # <nbreComposejs> : pas de mots composés
-                data_end = nf.tell()
-                nf.seek(len_pos, 0)
-                nf.ejcritNombre3(data_end - data_start)
-                nf.seek(0, 2)
-                placements.append((bucket, def_start, data_end - def_start))
-
-            for bucket, offset, length in placements:
-                self._patch_indirection(nf, indirection_offset, bucket, offset, length)
-
-            max_id = max(term_to_id.values()) if term_to_id else 0
-            self._write_footer(nf, [], max_id)
-        finally:
-            nf.close()
+    def _write_lexicon(self, terms):
+        lexicon_writer = native.NindLexiconIndex(self._base_path(), is_writer=True,
+                                                   indirection_bloc_size=max(1, len(terms)))
+        term_to_id = {}
+        for term in terms:
+            term_to_id[term] = lexicon_writer.add_word([term])
+        return term_to_id, lexicon_writer.get_identification()
 
     ########################################################################
-    # .nindtermindex : directly indexed by identifiant terme (1..maxTermId).
+    # .nindtermindex : directly indexed by identifiant terme.
     ########################################################################
-    def _write_term_index(self, inverted_index, max_term_id):
-        nombre_index = max_term_id + 1     # slot 0 inutilisé
-        nf, indirection_offset = self._open_index_file('nindtermindex', nombre_index, 0)
-        try:
-            placements = []
-            for tid in sorted(inverted_index):
-                postings = sorted(inverted_index[tid])   # tri croissant par doc_id pour le delta
-                def_start = nf.tell()
-                nf.ejcritNombre1(FLAG_TERME_DEJFINITION)  # <flagDejfinition=17>
-                nf.ejcritNombre4(tid)                     # <identifiantTerme>
-                len_pos = nf.tell()
-                nf.ejcritNombre3(0)                       # <longueurDonnejes> (placeholder)
-                data_start = nf.tell()
-                nf.ejcritNombre1(FLAG_CG)                 # <flagCg=61>
-                nf.ejcritNombre1(0)                       # <catejgorie> : non utilisée
-                nf.ejcritNombreULat(sum(f for _, f in postings))   # <frejquenceTerme>
-                nf.ejcritNombreULat(len(postings))                 # <nbreDocs>
-                noDocPrec = 0
-                for doc_id, freq in postings:
-                    nf.ejcritNombreULat(doc_id - noDocPrec)  # <identDocRelatif>
-                    nf.ejcritNombreULat(freq)                # <frejquenceDoc>
-                    noDocPrec = doc_id
-                data_end = nf.tell()
-                nf.seek(len_pos, 0)
-                nf.ejcritNombre3(data_end - data_start)
-                nf.seek(0, 2)
-                placements.append((tid, def_start, data_end - def_start))
-
-            for tid, offset, length in placements:
-                self._patch_indirection(nf, indirection_offset, tid, offset, length)
-
-            self._write_footer(nf, [], max_term_id)
-        finally:
-            nf.close()
+    def _write_term_index(self, inverted_index, lexicon_identification):
+        max_term_id = max(inverted_index) if inverted_index else 0
+        term_writer = native.NindTermIndex(self._base_path(), is_writer=True,
+                                            lexicon_identification=lexicon_identification,
+                                            specifics_number=0,
+                                            indirection_bloc_size=max_term_id + 1)
+        for tid in sorted(inverted_index):
+            postings = sorted(inverted_index[tid])   # tri croissant par doc_id pour le delta
+            term_cg = native.TermCG(cg=0, frequency=sum(freq for _, freq in postings))
+            term_cg.documents = [native.Document(ident=doc_id, frequency=freq) for doc_id, freq in postings]
+            term_writer.set_term_def(tid, [term_cg], lexicon_identification, [])
 
     ########################################################################
-    # .nindlocalindex : directly indexed by identifiant document interne
-    # (1..nombreDocuments), avec table de traduction externe <-> interne.
+    # .nindlocalindex : directly indexed by identifiant document externe
+    # (la traduction externe <-> interne est faite en interne par le C++).
     ########################################################################
-    def _write_local_index(self, corpus_tokens, term_to_id):
-        nombre_documents = len(corpus_tokens)
-        nombre_index = nombre_documents + 1     # slot 0 inutilisé
-        specifiques = [nombre_documents, nombre_documents]   # maxIdentifiantInterne, nombreDocuments
+    def _write_local_index(self, corpus_tokens, term_to_id, lexicon_identification):
+        local_writer = native.NindLocalIndex(self._base_path(), is_writer=True,
+                                              lexicon_identification=lexicon_identification,
+                                              indirection_bloc_size=len(corpus_tokens) + 1)
+        for doc_id, tokens in enumerate(corpus_tokens):
+            positions_par_terme = defaultdict(list)
+            for position, token in enumerate(tokens):
+                positions_par_terme[term_to_id[token]].append(position)
 
-        nf, indirection_offset = self._open_index_file('nindlocalindex', nombre_index, 8)
-        try:
-            placements = []
-            for doc_id, tokens in enumerate(corpus_tokens):
-                noDocInterne = doc_id + 1
-                identifiantExterne = doc_id
-
-                positions_par_terme = defaultdict(list)
-                for position, token in enumerate(tokens):
-                    positions_par_terme[term_to_id[token]].append(position)
-
-                def_start = nf.tell()
-                nf.ejcritNombre1(FLAG_LOCAL_DEJFINITION)  # <flagDejfinition=19>
-                nf.ejcritNombre3(noDocInterne)             # <identifiantDoc>
-                nf.ejcritNombre4(identifiantExterne)       # <identifiantExterne>
-                len_pos = nf.tell()
-                nf.ejcritNombre3(0)                        # <longueurDonnejes> (placeholder)
-                data_start = nf.tell()
-                noTermePrec = 0
-                localisationPrec = 0   # accumule sur tout le document, pas par terme (voir donneListeTermes)
-                for tid in sorted(positions_par_terme):
-                    nf.ejcritNombreSLat(tid - noTermePrec)   # <identTermeRelatif>
-                    noTermePrec = tid
-                    nf.ejcritNombre1(0)                      # <catejgorie> : non utilisée
-                    positions = positions_par_terme[tid]
-                    nf.ejcritNombre1(len(positions))         # <nbreLocalisations>
-                    for position in positions:
-                        nf.ejcritNombreSLat(position - localisationPrec)   # <localisationRelatif>
-                        localisationPrec = position
-                        nf.ejcritNombre1(1)                                # <longueur> : non utilisée
-                data_end = nf.tell()
-                nf.seek(len_pos, 0)
-                nf.ejcritNombre3(data_end - data_start)
-                nf.seek(0, 2)
-                placements.append((noDocInterne, def_start, data_end - def_start))
-
-            for noDocInterne, offset, length in placements:
-                self._patch_indirection(nf, indirection_offset, noDocInterne, offset, length)
-
-            self._write_footer(nf, specifiques, nombre_documents)
-        finally:
-            nf.close()
+            terms = []
+            for tid in sorted(positions_par_terme):
+                term = native.Term(term=tid, cg=0)
+                term.localisation = [native.Localisation(position=p, length=1)
+                                      for p in positions_par_terme[tid]]
+                terms.append(term)
+            local_writer.set_local_def(doc_id, terms, lexicon_identification)

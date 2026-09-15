@@ -17,7 +17,7 @@ exists to read files produced by the C++ side or by legacy nind tooling.
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.0.7"
+__version__ = "2.1.0"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -31,8 +31,16 @@ import sys
 from os import getenv, path
 import codecs
 import math
-from .NindPadFile import NindPadFile
-from .NindPadFile import chercheVides
+try:
+    from .NindPadFile import NindPadFile
+    from .NindPadFile import chercheVides
+except ImportError:
+    # run directly (not as part of the installed package): see docs/cli.md
+    from NindPadFile import NindPadFile
+    from NindPadFile import chercheVides
+from nind import _native as native
+
+NINDRETROLEXICON_EXT = '.nindretrolexicon'
 
 def usage():
     if getenv("PY") != None: script = sys.argv[0].replace(getenv("PY"), '$PY')
@@ -128,12 +136,24 @@ class NindRetrolexicon(NindPadFile):
     the file's "en vrac" area) or a "compound word" (a pair of identifiers
     ``identifiantA``/``identifiantS`` pointing at the word's two parts,
     themselves resolved recursively by :meth:`donneMot`).
+
+    :meth:`donneMot` delegates to the ``nind._native`` bindings when opened
+    with ``lexicon_identification``; otherwise (including when called from
+    the diagnostics below, which don't have a lexicon on hand) it falls
+    back to the original hand-rolled chain-walk, since ``dumpeFichier``/
+    ``analyseFichierRetrolexicon`` themselves call :meth:`donneMot` and must
+    keep working standalone.
     """
 
-    def __init__(self, retrolexiconFileName):
+    def __init__(self, retrolexiconFileName, lexicon_identification=None):
         """Open ``retrolexiconFileName`` read-only and verify its structure.
 
         :param retrolexiconFileName: path to the ``.nindretrolexicon`` file.
+        :param lexicon_identification: the ``nind._native.Identification``
+            of the :class:`~nind.NindLexiconindex.NindLexiconindex` this
+            retrolexicon was built against (see its ``donneIdentification``).
+            Optional: enables the ``nind._native``-backed fast path in
+            :meth:`donneMot`; omit it to use the pure-Python fallback.
         :raises Exception: if the file does not exist, or its pad-file
             envelope is invalid.
         """
@@ -142,6 +162,12 @@ class NindRetrolexicon(NindPadFile):
         #on initialise la classe mehre en lecture uniquement
         NindPadFile.__init__(self, retrolexiconFileName)
         self.vejrifieFichier()
+        self._native = None
+        if lexicon_identification is not None:
+            base = retrolexiconFileName
+            if base.endswith(NINDRETROLEXICON_EXT): base = base[:-len(NINDRETROLEXICON_EXT)]
+            self._native = native.NindRetrolexicon(base, is_writer=False,
+                                                     lexicon_identification=lexicon_identification)
 
     def createFile(self):
         """No-op: this class is read-only and never creates a file.
@@ -167,6 +193,9 @@ class NindRetrolexicon(NindPadFile):
             identifier, a non-terminal entry where a terminal one was
             expected, or a self-referential loop).
         """
+        if self._native is not None:
+            components = self._native.get_components(ident)
+            return components if components is not None else []
         motsSimples = []
         (trouvej, motSimple, identifiantA, identifiantS) = self.__donneDefMot(ident)
         #si pas trouvej, retourne chaisne vide
