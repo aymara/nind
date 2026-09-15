@@ -14,7 +14,7 @@ the identifier used to look it up in :class:`~nind.NindTermindex.NindTermindex`.
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -36,7 +36,14 @@ except ImportError:
     import NindFile
     from NindIndex import NindIndex
     from NindPadFile import calculeRejpartition
-from nind import _native as native
+try:
+    from nind import _native as native
+except ImportError:
+    # nind._native is a compiled extension: not available when introspecting
+    # the pure-Python source without building it (e.g. Sphinx autodoc, see
+    # docs/conf.py). Constructing NindLexiconindex still requires it - only
+    # module import is tolerant.
+    native = None
 
 NINDLEXICONINDEX_EXT = '.nindlexiconindex'
 
@@ -155,6 +162,8 @@ class NindLexiconindex(NindIndex):
         NindIndex.__init__(self, lexiconindexFileName)
         #trouve le modulo = nombreIndirection
         self.nombreIndirection = self.donneMaxIdentifiant()
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         base = lexiconindexFileName
         if base.endswith(NINDLEXICONINDEX_EXT): base = base[:-len(NINDLEXICONINDEX_EXT)]
         self._native = native.NindLexiconIndex(base, is_writer=False)

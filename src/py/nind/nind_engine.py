@@ -25,7 +25,14 @@ from collections import Counter, defaultdict
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
-from . import _native as native
+try:
+    from . import _native as native
+except ImportError:
+    # nind._native is a compiled extension: not available when introspecting
+    # the pure-Python source without building it (e.g. Sphinx autodoc, see
+    # docs/conf.py). NindIndexer.index_files still requires it - only module
+    # import is tolerant.
+    native = None
 
 class NindEngine:
     """BM25 search engine on top of a nind index produced by :class:`NindIndexer`.
@@ -260,6 +267,8 @@ class NindIndexer:
     # .nindlexiconindex : one simple word per term, ids assigned by the writer.
     ########################################################################
     def _write_lexicon(self, terms):
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         lexicon_writer = native.NindLexiconIndex(self._base_path(), is_writer=True,
                                                    indirection_bloc_size=max(1, len(terms)))
         term_to_id = {}

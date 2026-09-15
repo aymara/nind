@@ -15,7 +15,7 @@ frequencies for BM25 scoring.
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -36,7 +36,14 @@ except ImportError:
     # run directly (not as part of the installed package): see docs/cli.md
     from NindPadFile import calculeRejpartition
     from NindIndex import NindIndex
-from nind import _native as native
+try:
+    from nind import _native as native
+except ImportError:
+    # nind._native is a compiled extension: not available when introspecting
+    # the pure-Python source without building it (e.g. Sphinx autodoc, see
+    # docs/conf.py). Constructing NindTermindex with lexicon_identification
+    # still requires it - only module import is tolerant.
+    native = None
 
 NINDTERMINDEX_EXT = '.nindtermindex'
 
@@ -139,6 +146,8 @@ class NindTermindex(NindIndex):
         NindIndex.__init__(self, termindexFileName)
         self._native = None
         if lexicon_identification is not None:
+            if native is None:
+                raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
             base = termindexFileName
             if base.endswith(NINDTERMINDEX_EXT): base = base[:-len(NINDTERMINDEX_EXT)]
             self._native = native.NindTermIndex(base, is_writer=False,
