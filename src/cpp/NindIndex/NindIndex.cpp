@@ -37,6 +37,8 @@ using namespace std;
 ////////////////////////////////////////////////////////////
 //<offsetDejfinition> <longueurDejfinition> = 8
 #define TAILLE_INDIRECTION 8
+//<tailleEntreje>(1) <tailleSpejcifiques>(3) = 4
+#define TAILLE_ENTETE_FIXE 4
 ////////////////////////////////////////////////////////////
 //brief Creates NindIndex with a specified name associated with.
 //param fileName absolute path file name
@@ -175,6 +177,51 @@ void NindIndex::checkExtendIndirection(const unsigned int ident,
         indirection = getEntryPos(ident);
         if (indirection == 0) throw NindIndexException("NindIndex::checkExtendIndirection : " + m_fileName);
     }
+}
+////////////////////////////////////////////////////////////
+//brief Validate the file and compute indirection-usage statistics
+//return the file's index-level structural statistics
+//throws NindPadFileException/NindIndexException if the file is structurally invalid */
+NindIndex::IndexStats NindIndex::analyseIndex()
+{
+    IndexStats stats;
+    stats.maxIdent = getMaxIdent();
+
+    //trouve la carte des non vides : d'abord les fixes, puis les blocs d'indirection
+    list<pair<uint64_t, unsigned int> > nonVidesList;
+    nonVidesList.push_back(pair<uint64_t, unsigned int>(0, TAILLE_ENTETE_FIXE));
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
+        it != m_entriesBlocksMap.end(); it++) {
+        const pair<uint64_t, unsigned int> nonVide((*it).first - TAILLE_TETE_INDEX,
+            (*it).second * TAILLE_INDIRECTION + TAILLE_TETE_INDEX);
+        nonVidesList.push_back(nonVide);
+    }
+    //puis chaque dejfinition indexeje
+    list<int64_t> definitionSizes;
+    for (unsigned int identifiant = 0; identifiant < stats.maxIdent; identifiant++) {
+        const uint64_t indirection = getEntryPos(identifiant);
+        if (indirection == 0)
+            throw NindIndexException("NindIndex::analyseIndex : identifiant sans indirection " + m_fileName);
+        m_file.setPos(indirection, SEEK_SET);
+        //<offsetDejfinition> <longueurDejfinition>
+        m_file.readBuffer(TAILLE_INDIRECTION);
+        const uint64_t offsetDejfinition = m_file.getInt5();
+        const unsigned int longueurDejfinition = m_file.getInt3();
+        //si la dejfinition n'a pas encore ete indexe, n'en tient pas compte
+        if (offsetDejfinition != 0) {
+            nonVidesList.push_back(pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition));
+            definitionSizes.push_back((int64_t)longueurDejfinition);
+            stats.usedCount++;
+        }
+    }
+    //enfin les spejcifiques et l'identification
+    const int tailleQueue = getSpecificsAndIdentificationSize();
+    m_file.setPos(-tailleQueue, SEEK_END);
+    nonVidesList.push_back(pair<uint64_t, unsigned int>((uint64_t)m_file.getPos(), tailleQueue));
+
+    stats.holes = chercheVides(nonVidesList);
+    stats.definitionSizes = calculeRejpartition(definitionSizes);
+    return stats;
 }
 ////////////////////////////////////////////////////////////
 //ejcrit une nouvelle indirection dans l'index

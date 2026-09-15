@@ -81,3 +81,20 @@ def test_document_count_matches_number_of_documents_indexed(tmp_path):
     path = write_local_index(tmp_path, [["a"], ["a"], ["a"]], term_to_id)
     index = NindLocalindex(path, IDENTIFICATION)
     assert len(index.donneidentifiantsExternes()) == 3
+
+
+def test_structural_analysis_is_consistent(tmp_path):
+    term_to_id = {"a": 1, "b": 2}
+    path = write_local_index(tmp_path, [["a", "b"], ["b"]], term_to_id)
+    index = NindLocalindex(path, IDENTIFICATION)
+    assert index.analyseFichierIndex(False) is True
+
+
+def test_structural_analysis_works_without_lexicon_identification(tmp_path):
+    # analyseFichierPadFile/analyseFichierIndex are diagnostics that must
+    # keep working even when the caller has no lexicon on hand (unlike
+    # donneListeTermes, which requires lexicon_identification).
+    term_to_id = {"a": 1, "b": 2}
+    path = write_local_index(tmp_path, [["a", "b"], ["b"]], term_to_id)
+    index = NindLocalindex(path)
+    assert index.analyseFichierIndex(False) is True

@@ -21,6 +21,7 @@
 ////////////////////////////////////////////////////////////
 #include "NindPadFile.h"
 #include <iostream>
+#include <cmath>
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
@@ -346,5 +347,128 @@ void NindPadFile::checkIdentification(const Identification &referenceIdentificat
     if (Identification(maxIdent, identification) != referenceIdentification) {
         throw NindPadFileException("NindPadFile::checkIdentification Incompatible file: " + m_fileName);
     }
+}
+////////////////////////////////////////////////////////////
+//brief Compute basic descriptive statistics over a list of numbers
+//param nombres the numbers to summarize
+//return the computed statistics (all zero if nombres is empty) */
+NindPadFile::Repartition NindPadFile::calculeRejpartition(const list<int64_t> &nombres)
+{
+    Repartition stats;
+    if (nombres.empty()) return stats;
+    int64_t somme = 0;
+    double somme2 = 0.0;
+    int64_t minValue = *nombres.begin();
+    int64_t maxValue = minValue;
+    for (list<int64_t>::const_iterator it = nombres.begin(); it != nombres.end(); it++) {
+        const int64_t nombre = *it;
+        somme += nombre;
+        somme2 += (double)nombre * (double)nombre;
+        if (minValue > nombre) minValue = nombre;
+        if (maxValue < nombre) maxValue = nombre;
+    }
+    stats.count = (unsigned int)nombres.size();
+    stats.minValue = minValue;
+    stats.maxValue = maxValue;
+    stats.sum = somme;
+    stats.mean = (double)somme / nombres.size();
+    const double variance = somme2 / nombres.size() - stats.mean * stats.mean;
+    stats.stddev = sqrt(variance);
+    return stats;
+}
+////////////////////////////////////////////////////////////
+//brief Derive the "holes" (unused gaps) between a file's occupied byte ranges
+//param nonVidesList occupied (address, length) ranges (a local sorted copy is used)
+//return the computed hole statistics
+//throws NindPadFileException if two occupied ranges overlap */
+NindPadFile::HoleStats NindPadFile::chercheVides(list<pair<uint64_t, unsigned int> > nonVidesList)
+{
+    HoleStats stats;
+    nonVidesList.sort();
+    uint64_t addressePrec = 0;
+    unsigned int longueurPrec = 0;
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = nonVidesList.begin();
+         it != nonVidesList.end(); it++) {
+        const uint64_t addresse = (*it).first;
+        const unsigned int longueur = (*it).second;
+        stats.occupiedSizeHistogram[longueur]++;
+        const int64_t longueurVide = (int64_t)addresse - (int64_t)addressePrec - (int64_t)longueurPrec;
+        if (longueurVide < 0)
+            throw NindPadFileException("NindPadFile::chercheVides : chevauchement");
+        if (longueurVide > 0) {
+            stats.holesCount++;
+            stats.holesSize += longueurVide;
+            stats.holeSizeHistogram[longueurVide]++;
+        }
+        addressePrec = addresse;
+        longueurPrec = longueur;
+    }
+    return stats;
+}
+////////////////////////////////////////////////////////////
+//brief Walk and validate the whole pad-file envelope, computing size statistics
+//return the file's structural statistics
+//throws NindPadFileException if the file's structure is invalid */
+NindPadFile::PadFileStats NindPadFile::analysePadFile()
+{
+    PadFileStats stats;
+    stats.dataEntrySize = m_dataEntrySize;
+    stats.specificsSize = m_specificsSize;
+    const int offsetSpecifIdent = TAILLE_IDENTIFICATION + TAILLE_ENTETE_SPEJCIFIQUE + m_specificsSize;
+
+    uint64_t addrIndex = TAILLE_ENTETE_FIXE;
+    unsigned int blocNum = 0;
+    while (true) {
+        m_file.setPos(addrIndex, SEEK_SET);
+        //<flagIndexej=47> <addrBlocSuivant> <nombreIndex>
+        m_file.readBuffer(TAILLE_TETE_INDEX);
+        if (m_file.getInt1() != FLAG_INDEXEJ)
+            throw NindPadFileException("NindPadFile::analysePadFile : pas FLAG_INDEXEJ " + m_fileName);
+        const uint64_t addrBlocSuivant = m_file.getInt5();
+        const unsigned int nombreIndex = m_file.getInt3();
+        blocNum++;
+        BlockStats block;
+        block.blockAddr = addrIndex;
+        block.blockNum = blocNum;
+        block.entriesTotal = nombreIndex;
+        //chaque entreje vide a tous ses octets ah 0
+        for (unsigned int i = 0; i < nombreIndex; i++) {
+            m_file.readBuffer(m_dataEntrySize);
+            unsigned int somme = 0;
+            for (unsigned int j = 0; j < m_dataEntrySize; j++) somme += m_file.getInt1();
+            if (somme != 0) block.entriesUsed++;
+        }
+        const uint64_t addrEnVrac = m_file.getPos();
+        uint64_t tailleEnVracBloc;
+        if (addrBlocSuivant != 0) {
+            tailleEnVracBloc = addrBlocSuivant - addrEnVrac;
+        }
+        else {
+            m_file.setPos(-offsetSpecifIdent, SEEK_END);
+            tailleEnVracBloc = m_file.getPos() - addrEnVrac;
+        }
+        block.enVracAddr = addrEnVrac;
+        block.enVracSize = tailleEnVracBloc;
+        stats.indexTotalSize += TAILLE_TETE_INDEX + (uint64_t)nombreIndex * m_dataEntrySize;
+        stats.enVracTotalSize += tailleEnVracBloc;
+        stats.blocks.push_back(block);
+        if (addrBlocSuivant == 0) break;
+        addrIndex = addrBlocSuivant;
+    }
+
+    //<flagSpecifique=57> <spejcifiques> <flagIdentification=53>
+    m_file.setPos(-offsetSpecifIdent, SEEK_END);
+    if (m_file.readInt1() != FLAG_SPEJCIFIQUE)
+        throw NindPadFileException("NindPadFile::analysePadFile : pas FLAG_SPEJCIFIQUE " + m_fileName);
+    for (unsigned int i = 0; i < m_specificsSize; i++) m_file.readInt1();
+    if (m_file.readInt1() != FLAG_IDENTIFICATION)
+        throw NindPadFileException("NindPadFile::analysePadFile : taille des spécifiques incorrecte " + m_fileName);
+
+    getFileIdentification(stats.identification);
+
+    m_file.setPos(0, SEEK_END);
+    stats.fileSize = (uint64_t)m_file.getPos();
+
+    return stats;
 }
 ////////////////////////////////////////////////////////////

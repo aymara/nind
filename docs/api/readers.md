@@ -1,9 +1,13 @@
 # Low-level API: binary format readers
 
 Read-only classes mirroring nind's on-disk formats, layered as described
-in {doc}`../architecture`. They can open files written by either this
-package's own {class}`~nind.nind_engine.NindIndexer` or the C++
-implementation.
+in {doc}`../architecture`. Their hot-path lookups and shared structural
+diagnostics (`analyseFichierPadFile`/`analyseFichierIndex`) delegate to
+the compiled `nind._native` extension; only the remaining per-format
+diagnostic/introspection methods (`dumpeFichier` and similar) still parse
+the binary format directly in Python. They can open files written by
+either this package's own {class}`~nind.nind_engine.NindIndexer` or the
+C++ implementation.
 
 ## nind.NindFile
 

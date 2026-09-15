@@ -48,15 +48,18 @@ These operate on a whole indexed corpus, given the path to any one of its
 
 Every low-level reader module (see {doc}`api/readers`) is also a runnable
 script exposing an `analyse`/dump/debug CLI for its own file format - handy
-when inspecting a file's structure or chasing down a corruption. Run one
-with no arguments to print its usage, for example:
+when inspecting a file's structure or chasing down a corruption. `analyse`
+(and, for `NindLexiconindex.py`/`NindTermindex.py`/`NindLocalindex.py`,
+its `NindIndex`-level portion) runs through `nind._native`, same as the
+corpus-level tools above - so these also need `uv run` (or the venv
+active). Run one with no arguments to print its usage, for example:
 
 ```bash
 cd src/py/nind
-python3 NindTermindex.py FRE.nindtermindex analyse
-python3 NindTermindex.py FRE.nindtermindex affiche 186201
-python3 NindLexiconindex.py FRE.nindlexiconindex collision 1268512
-python3 NindRetrolexicon.py FRE.nindretrolexicon lexique
+uv run python3 NindTermindex.py FRE.nindtermindex analyse
+uv run python3 NindTermindex.py FRE.nindtermindex affiche 186201
+uv run python3 NindLexiconindex.py FRE.nindlexiconindex collision 1268512
+uv run python3 NindRetrolexicon.py FRE.nindretrolexicon lexique
 ```
 
 Available for `NindFile.py`, `NindPadFile.py`, `NindIndex.py`,

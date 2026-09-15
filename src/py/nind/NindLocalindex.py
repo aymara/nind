@@ -14,7 +14,7 @@ document-length calculations.
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -158,14 +158,15 @@ class NindLocalindex(NindIndex):
             its specifics block has the wrong size.
         """
         NindIndex.__init__(self, localindexFileName)
-        self._native = None
-        if lexicon_identification is not None:
-            if native is None:
-                raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
-            base = localindexFileName
-            if base.endswith(NINDLOCALINDEX_EXT): base = base[:-len(NINDLOCALINDEX_EXT)]
-            self._native = native.NindLocalIndex(base, is_writer=False,
-                                                  lexicon_identification=lexicon_identification)
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
+        self._has_lexicon_identification = lexicon_identification is not None
+        #sans identification rejelle, ouvre quand mesme (sans vejrification croisejes) pour les diagnostics
+        effective_identification = lexicon_identification if lexicon_identification is not None else native.Identification(0, 0)
+        base = localindexFileName
+        if base.endswith(NINDLOCALINDEX_EXT): base = base[:-len(NINDLOCALINDEX_EXT)]
+        self._native = native.NindLocalIndex(base, is_writer=False,
+                                              lexicon_identification=effective_identification)
         #rejcupehre l'adresse et la longueur des spejcifiques
         (offsetSpejcifiques, tailleSpejcifiques) = self.donneSpejcifiques()
         if tailleSpejcifiques != TAILLE_SPEJCIFIQUES: 
@@ -221,7 +222,7 @@ class NindLocalindex(NindIndex):
             document. Empty list if ``noDocExterne`` is unknown.
         :raises Exception: if opened without ``lexicon_identification``.
         """
-        if self._native is None:
+        if not self._has_lexicon_identification:
             raise Exception('%s : donneListeTermes nécessite lexicon_identification à l\'ouverture'%(self.latFileName))
         #nind._native.NindLocalIndex.get_local_def prend directement l'identifiant externe
         #(la traduction externe -> interne est faite en interne par le C++)

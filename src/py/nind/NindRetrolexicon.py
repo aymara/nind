@@ -17,7 +17,7 @@ exists to read files produced by the C++ side or by legacy nind tooling.
 __author__ = "jys"
 __copyright__ = "Copyright (C) 2017 LATEJCON"
 __license__ = "GNU LGPL"
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 # Author: jys <jy.sage@orange.fr>, (C) LATEJCON 2017
 # Copyright: 2014-2017 LATEJCON. See LICENCE.md file that comes with this distribution
 # This file is part of NIND (as "nouvelle indexation").
@@ -144,12 +144,11 @@ class NindRetrolexicon(NindPadFile):
     ``identifiantA``/``identifiantS`` pointing at the word's two parts,
     themselves resolved recursively by :meth:`donneMot`).
 
-    :meth:`donneMot` delegates to the ``nind._native`` bindings when opened
-    with ``lexicon_identification``; otherwise (including when called from
-    the diagnostics below, which don't have a lexicon on hand) it falls
-    back to the original hand-rolled chain-walk, since ``dumpeFichier``/
-    ``analyseFichierRetrolexicon`` themselves call :meth:`donneMot` and must
-    keep working standalone.
+    :meth:`donneMot` delegates to the ``nind._native`` bindings (opened with
+    a real ``lexicon_identification`` when given, or a "no cross-check"
+    sentinel otherwise - a real lexicon isn't required just to read this
+    file's own words) - ``dumpeFichier``/``analyseFichierRetrolexicon``
+    themselves call :meth:`donneMot` and keep working standalone either way.
     """
 
     def __init__(self, retrolexiconFileName, lexicon_identification=None):
@@ -169,14 +168,15 @@ class NindRetrolexicon(NindPadFile):
         #on initialise la classe mehre en lecture uniquement
         NindPadFile.__init__(self, retrolexiconFileName)
         self.vejrifieFichier()
-        self._native = None
-        if lexicon_identification is not None:
-            if native is None:
-                raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
-            base = retrolexiconFileName
-            if base.endswith(NINDRETROLEXICON_EXT): base = base[:-len(NINDRETROLEXICON_EXT)]
-            self._native = native.NindRetrolexicon(base, is_writer=False,
-                                                     lexicon_identification=lexicon_identification)
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
+        self._has_lexicon_identification = lexicon_identification is not None
+        #sans identification rejelle, ouvre quand mesme (sans vejrification croisejes) pour les diagnostics
+        effective_identification = lexicon_identification if lexicon_identification is not None else native.Identification(0, 0)
+        base = retrolexiconFileName
+        if base.endswith(NINDRETROLEXICON_EXT): base = base[:-len(NINDRETROLEXICON_EXT)]
+        self._native = native.NindRetrolexicon(base, is_writer=False,
+                                                 lexicon_identification=effective_identification)
 
     def createFile(self):
         """No-op: this class is read-only and never creates a file.
