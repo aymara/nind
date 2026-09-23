@@ -4,3 +4,4 @@ build/
 *.pyc
 Dist*/
 docs/_build/
+bench/results/
