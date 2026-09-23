@@ -57,6 +57,10 @@ public:
     *\return current size of file */
     inline long int getFileSize() const;
 
+    /**\brief Get the actual size of the file on disk, as it is now (another process may be extending it)
+    * \return file size in bytes */
+    uint64_t getCurrentFileSize();
+
     /**\brief get unique identifiant of file
     *\return identifiant of file */
     inline long int getFileIdent() const;
@@ -237,6 +241,10 @@ public:
                     const unsigned int count);
        
 private:
+    //non copiable : possehde un FILE* et deux buffers allouejs (une copie provoquerait double fclose/delete[])
+    NindFile(const NindFile &);
+    NindFile &operator=(const NindFile &);
+
     //Read bytes from file into specified buffer
     void readBytes(unsigned char* bytes,
                    const unsigned int bytesNb);
@@ -253,6 +261,18 @@ private:
     long int m_fileSize;             //taille du fichier
     bool m_isLittleEndian;
     NindSignalCatcher *m_nindSignalCatcher;
+};
+////////////////////////////////////////////////////////////
+/**\brief Scoped critical section: control-C is deferred for the lifetime of this object.
+ * The section is closed on every exit path, including early returns and exceptions. */
+class NindCriticalSection {
+public:
+    explicit NindCriticalSection(NindFile &file): m_file(file) { m_file.beginCriticalSection(); }
+    ~NindCriticalSection() { m_file.endCriticalSection(); }
+private:
+    NindCriticalSection(const NindCriticalSection &);
+    NindCriticalSection &operator=(const NindCriticalSection &);
+    NindFile &m_file;
 };
 ////////////////////////////////////////////////////////////
 //brief get current position in file
@@ -312,6 +332,8 @@ inline bool NindFile::endOfInBuffer()
 //param offset from buffer head where to read next time */
 inline void NindFile::setInBufferPtr(const unsigned int offset)
 {
+    if (offset > (unsigned long)(m_rbufferAbsEnd - m_rbuffer))
+        throw OutReadBufferException("in read buffer (V) " + m_fileName);
     m_rPtr = m_rbuffer + offset;
 }
 ////////////////////////////////////////////////////////////
@@ -319,6 +341,8 @@ inline void NindFile::setInBufferPtr(const unsigned int offset)
 //param offset from actual read pointer where to read next time */
 inline void NindFile::setRelInBufferPtr(const unsigned int offset)
 {
+    if (offset > (unsigned long)(m_rbufferAbsEnd - m_rPtr))
+        throw OutReadBufferException("in read buffer (W) " + m_fileName);
     m_rPtr += offset;
 }
 ////////////////////////////////////////////////////////////

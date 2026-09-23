@@ -1,13 +1,12 @@
 //
-// TestTempDir: RAII helper for the GTest-based unit tests.
+// TestTempDir: RAII helper for the (doctest-based) unit tests.
 //
 // Creates a fresh, empty, uniquely-named directory for a test to write nind
 // files into, and recursively removes it (and everything the test wrote into
 // it) when the test ends, so tests never leave files behind and never
 // collide with each other or with a previous run.
 //
-// POSIX only (Linux/macOS): fine for these unit tests, which are only built
-// when GoogleTest is found (see tst/cpp/CMakeLists.txt).
+// POSIX only (Linux/macOS), like the rest of the unit tests.
 ////////////////////////////////////////////////////////////
 #ifndef NindTestTempDir_H
 #define NindTestTempDir_H

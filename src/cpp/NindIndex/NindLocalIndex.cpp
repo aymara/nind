@@ -83,7 +83,7 @@ NindLocalIndex::NindLocalIndex(const std::string &fileNameExtensionLess,
     //lit le plus grand identifiant interne utilisej
     getSpecifics();
     //initialise la map de traduction des id externes -> id internes
-    fillDocIdTradExtInt(1, m_file.getInt4() +1);
+    fillDocIdTradExtInt(1, m_file.getInt4());
 }        
 ////////////////////////////////////////////////////////////
 NindLocalIndex::~NindLocalIndex()
@@ -211,8 +211,14 @@ void NindLocalIndex::setLocalDef(const unsigned int ident,
                                  const std::list<struct Term> &localDef,
                                  const Identification &fileIdentification)
 {
-    //dejbut section critique ah protejger des control-C
-    m_file.beginCriticalSection();
+    //<nbreLocalisations> tient sur 1 octet : au-delah, le fichier serait illisible.
+    //Vejrifiej avant toute modification d'ejtat.
+    for (list<struct Term>::const_iterator it = localDef.begin(); it != localDef.end(); it++) {
+        if ((*it).localisation.size() > 255)
+            throw NindLocalIndexException("NindLocalIndex::setLocalDef more than 255 localisations for a term : " + m_fileName);
+    }
+    //section critique ah protejger des control-C (refermeje sur tout chemin de sortie, exceptions comprises)
+    NindCriticalSection criticalSection(m_file);
     //est-ce que ce document est dejah connu ?
     map<unsigned int, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
     //si non, on le creje
@@ -270,7 +276,8 @@ void NindLocalIndex::setLocalDef(const unsigned int ident,
             //<localisationRelatif> <longueur>
             m_file.putSIntLat((*it2).position - positionPrec);
             positionPrec = (*it2).position;
-            m_file.putInt1((*it2).length);
+            //<longueur> tient sur 1 octet : sature plutôt que tronquer modulo 256
+            m_file.putInt1((*it2).length > 255 ? 255 : (*it2).length);
         }     
     }
     //ecrit la taille reelle du buffer
@@ -282,8 +289,6 @@ void NindLocalIndex::setLocalDef(const unsigned int ident,
     //4) ejcrit les spejcifiques et l'identification
     writeSpecificsAndIdentification(fileIdentification);
     setDefinition(identInt);
-    //fin section critique ah protejger des control-C
-    m_file.endCriticalSection();
 }
 ////////////////////////////////////////////////////////////
 //brief number of documents in the collection
@@ -319,7 +324,7 @@ unsigned int NindLocalIndex::getInternalIdent(const unsigned int ident)
     getSpecifics();
     //met ah jour la map
     //initialise la map de traduction des id externes -> id internes uniquement pour les nouveaux docs
-    fillDocIdTradExtInt(m_currIdent +1, m_file.getInt4() +1);
+    fillDocIdTradExtInt(m_currIdent +1, m_file.getInt4());
     //cherche l'identifiant dans la map courante
     itident = m_docIdTradExtInt.find(ident);
     //si l'identifiant externe est connu, retourne l'identifiant interne
@@ -328,11 +333,19 @@ unsigned int NindLocalIndex::getInternalIdent(const unsigned int ident)
     return 0;
 }
 ////////////////////////////////////////////////////////////
-//met ah jour la map de traduction des id externes -> id internes
+//met ah jour la map de traduction des id externes -> id internes (intIdMin..intIdMax inclus)
 void NindLocalIndex::fillDocIdTradExtInt(const unsigned int intIdMin,
-                                         const unsigned int intIdMax) 
+                                         const unsigned int intIdMax)
 {
-    for (unsigned int ident = intIdMin; ident != intIdMax; ident++) {
+    //intIdMax vient du fichier : il est bornej par le nombre d'entrejes d'indirection rejellement prejsentes,
+    //et la boucle est en 64 bits (intIdMax = 0xFFFFFFFF ne doit pas boucler ~4 milliards de fois)
+    uint64_t identMax = intIdMax;
+    //un lecteur rafraîchit sa carte des blocs si l'ejcrivain en a ajoutej (getEntryPos le fait sur ejchec)
+    if (identMax >= getMaxIdent()) getEntryPos(intIdMax);
+    const uint64_t maxEntries = getMaxIdent();
+    if (maxEntries == 0) return;
+    if (identMax > maxEntries - 1) identMax = maxEntries - 1;
+    for (uint64_t ident = intIdMin; ident <= identMax; ident++) {
         const bool existe = getDefinition(ident, TAILLE_TESTE_IDENT_EXTERNE);
         if (!existe) continue;
         //<flagDejfinition=19> <identifiantDoc> <identifiantExterne> 

@@ -1,18 +1,18 @@
 #include "NindBasics/NindFile.h"
 #include "NindExceptions.h"
 #include "TestTempDir.h"
-#include <gtest/gtest.h>
+#include "doctest.h"
 #include <vector>
 #include <string>
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, BufferedRoundTripOfAllIntegerWidths) {
+TEST_CASE("NindFileTest.BufferedRoundTripOfAllIntegerWidths") {
     TestTempDir tmp;
     const string path = tmp.file("ints.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(64);
     writer.putInt1(0xAB);
     writer.putInt2(0x1234);
@@ -24,23 +24,23 @@ TEST(NindFileTest, BufferedRoundTripOfAllIntegerWidths) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
     reader.readBuffer(written);
-    EXPECT_EQ(0xABu, reader.getInt1());
-    EXPECT_EQ(0x1234u, reader.getInt2());
-    EXPECT_EQ(0x123456u, reader.getInt3());
-    EXPECT_EQ(0x12345678u, reader.getInt4());
-    EXPECT_EQ(0x123456789AUL, reader.getInt5());
+    CHECK_EQ(0xABu, reader.getInt1());
+    CHECK_EQ(0x1234u, reader.getInt2());
+    CHECK_EQ(0x123456u, reader.getInt3());
+    CHECK_EQ(0x12345678u, reader.getInt4());
+    CHECK_EQ(0x123456789AUL, reader.getInt5());
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, GetSInt3AndGetSInt4DecodeTwosComplement) {
+TEST_CASE("NindFileTest.GetSInt3AndGetSInt4DecodeTwosComplement") {
     TestTempDir tmp;
     const string path = tmp.file("signed.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(16);
     writer.putInt3(static_cast<unsigned int>(-12345) & 0xFFFFFF);
     writer.putInt4(static_cast<unsigned int>(-987654321));
@@ -49,15 +49,15 @@ TEST(NindFileTest, GetSInt3AndGetSInt4DecodeTwosComplement) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
     reader.readBuffer(written);
-    EXPECT_EQ(-12345, reader.getSInt3());
-    EXPECT_EQ(-987654321, reader.getSInt4());
+    CHECK_EQ(-12345, reader.getSInt3());
+    CHECK_EQ(-987654321, reader.getSInt4());
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, PutInt3AtOffsetPatchesInPlace) {
+TEST_CASE("NindFileTest.PutInt3AtOffsetPatchesInPlace") {
     // Exercises the "write a placeholder, come back and patch it once the
     // real value is known" pattern used throughout the higher-level classes
     // (e.g. writing a definition's length after writing the definition).
@@ -65,7 +65,7 @@ TEST(NindFileTest, PutInt3AtOffsetPatchesInPlace) {
     const string path = tmp.file("patch.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(16);
     writer.putInt1(0xAB);
     const unsigned int placeholderOffset = writer.getOutBufferSize();
@@ -77,16 +77,16 @@ TEST(NindFileTest, PutInt3AtOffsetPatchesInPlace) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
     reader.readBuffer(written);
-    EXPECT_EQ(0xABu, reader.getInt1());
-    EXPECT_EQ(999999u, reader.getInt3());
-    EXPECT_EQ(0xCDu, reader.getInt1());
+    CHECK_EQ(0xABu, reader.getInt1());
+    CHECK_EQ(999999u, reader.getInt3());
+    CHECK_EQ(0xCDu, reader.getInt1());
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, UIntLatRoundTripsAcrossAllTierBoundaries) {
+TEST_CASE("NindFileTest.UIntLatRoundTripsAcrossAllTierBoundaries") {
     const vector<unsigned int> values = {
         0, 1, 126, 127,               // 1 byte : 0-127
         128, 129, 16382, 16383,       // 2 bytes : 128-16383
@@ -99,7 +99,7 @@ TEST(NindFileTest, UIntLatRoundTripsAcrossAllTierBoundaries) {
     const string path = tmp.file("ulat.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(values.size() * 5);
     for (unsigned int v : values) writer.putUIntLat(v);
     const unsigned int written = writer.getOutBufferSize();
@@ -107,14 +107,14 @@ TEST(NindFileTest, UIntLatRoundTripsAcrossAllTierBoundaries) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
     reader.readBuffer(written);
-    for (unsigned int v : values) EXPECT_EQ(v, reader.getUIntLat()) << "value=" << v;
+    for (unsigned int v : values) { INFO("value=" << v); CHECK_EQ(v, reader.getUIntLat()); }
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, SIntLatRoundTripsAcrossAllTierBoundaries) {
+TEST_CASE("NindFileTest.SIntLatRoundTripsAcrossAllTierBoundaries") {
     const vector<signed int> values = {
         0, 63, -64, -63,                          // 1 byte
         64, 8191, -65, -8192,                     // 2 bytes
@@ -127,7 +127,7 @@ TEST(NindFileTest, SIntLatRoundTripsAcrossAllTierBoundaries) {
     const string path = tmp.file("slat.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(values.size() * 5);
     for (signed int v : values) writer.putSIntLat(v);
     const unsigned int written = writer.getOutBufferSize();
@@ -135,14 +135,14 @@ TEST(NindFileTest, SIntLatRoundTripsAcrossAllTierBoundaries) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
     reader.readBuffer(written);
-    for (signed int v : values) EXPECT_EQ(v, reader.getSIntLat()) << "value=" << v;
+    for (signed int v : values) { INFO("value=" << v); CHECK_EQ(v, reader.getSIntLat()); }
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, StringRoundTrip) {
+TEST_CASE("NindFileTest.StringRoundTrip") {
     TestTempDir tmp;
     const string path = tmp.file("strings.bin");
     const string s1 = "hello nind";
@@ -151,7 +151,7 @@ TEST(NindFileTest, StringRoundTrip) {
     const string bytes = "raw-bytes-no-length-prefix";
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(1024);
     writer.putString(s1);
     writer.putString(s2);
@@ -162,26 +162,26 @@ TEST(NindFileTest, StringRoundTrip) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
     reader.readBuffer(written);
-    EXPECT_EQ(s1, reader.getString());
-    EXPECT_EQ(s2, reader.getString());
-    EXPECT_EQ(s3, reader.getString());
-    EXPECT_EQ(bytes, reader.getStringAsBytes(static_cast<unsigned char>(bytes.length())));
+    CHECK_EQ(s1, reader.getString());
+    CHECK_EQ(s2, reader.getString());
+    CHECK_EQ(s3, reader.getString());
+    CHECK_EQ(bytes, reader.getStringAsBytes(static_cast<unsigned char>(bytes.length())));
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, PutStringRejectsTooLong) {
+TEST_CASE("NindFileTest.PutStringRejectsTooLong") {
     TestTempDir tmp;
     NindFile writer(tmp.file("toolong.bin"));
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(1024);
     const string tooLong(255, 'x');   // putString's limit is 254
-    EXPECT_THROW(writer.putString(tooLong), OutWriteBufferException);
+    CHECK_THROWS_AS(writer.putString(tooLong), OutWriteBufferException);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, DirectUnbufferedReadMatchesBufferedWrite) {
+TEST_CASE("NindFileTest.DirectUnbufferedReadMatchesBufferedWrite") {
     // NindFile exposes two independent reading APIs: the buffered one
     // (readBuffer + getXxx) and a direct one (readXxx, unbuffered, reads
     // straight from the file at the current position). Both must agree on
@@ -190,7 +190,7 @@ TEST(NindFileTest, DirectUnbufferedReadMatchesBufferedWrite) {
     const string path = tmp.file("direct.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(64);
     writer.putInt1(42);
     writer.putInt3(1234567);
@@ -201,22 +201,22 @@ TEST(NindFileTest, DirectUnbufferedReadMatchesBufferedWrite) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
-    EXPECT_EQ(42u, reader.readInt1());
-    EXPECT_EQ(1234567u, reader.readInt3());
-    EXPECT_EQ(99999u, reader.readUIntLat());
-    EXPECT_EQ(-99999, reader.readSIntLat());
-    EXPECT_EQ("direct-read", reader.readString());
+    CHECK_EQ(42u, reader.readInt1());
+    CHECK_EQ(1234567u, reader.readInt3());
+    CHECK_EQ(99999u, reader.readUIntLat());
+    CHECK_EQ(-99999, reader.readSIntLat());
+    CHECK_EQ("direct-read", reader.readString());
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, SeekAndTell) {
+TEST_CASE("NindFileTest.SeekAndTell") {
     TestTempDir tmp;
     const string path = tmp.file("seek.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(8);
     writer.putInt4(1);
     writer.putInt4(2);
@@ -224,34 +224,34 @@ TEST(NindFileTest, SeekAndTell) {
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
-    EXPECT_EQ(8, reader.getFileSize());
+    REQUIRE(reader.open("rb"));
+    CHECK_EQ(8, reader.getFileSize());
     reader.setPos(4, SEEK_SET);
-    EXPECT_EQ(4, reader.getPos());
+    CHECK_EQ(4, reader.getPos());
     reader.readBuffer(4);
-    EXPECT_EQ(2u, reader.getInt4());
+    CHECK_EQ(2u, reader.getInt4());
     reader.close();
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, ReadPastEndOfFileThrowsEof) {
+TEST_CASE("NindFileTest.ReadPastEndOfFileThrowsEof") {
     TestTempDir tmp;
     const string path = tmp.file("short.bin");
 
     NindFile writer(path);
-    ASSERT_TRUE(writer.open("wb"));
+    REQUIRE(writer.open("wb"));
     writer.createBuffer(4);
     writer.putInt4(1);
     writer.writeBuffer();
     writer.close();
 
     NindFile reader(path);
-    ASSERT_TRUE(reader.open("rb"));
+    REQUIRE(reader.open("rb"));
     reader.setPos(0, SEEK_SET);   // open() leaves the position at EOF (it seeks there to measure the file)
-    EXPECT_THROW(reader.readBuffer(8), EofException);
+    CHECK_THROWS_AS(reader.readBuffer(8), EofException);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindFileTest, OpenMissingFileForReadingFails) {
+TEST_CASE("NindFileTest.OpenMissingFileForReadingFails") {
     TestTempDir tmp;
     NindFile reader(tmp.file("does_not_exist.bin"));
-    EXPECT_FALSE(reader.open("rb"));
+    CHECK_FALSE(reader.open("rb"));
 }

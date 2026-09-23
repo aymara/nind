@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
 
-include(GoogleTest)
 include_directories(${CMAKE_SOURCE_DIR}/src/cpp)
 include_directories(${CMAKE_SOURCE_DIR}/tst/cpp/unit)
+
+# single translation unit holding doctest's implementation and main()
+add_library(nind_doctest_main STATIC doctest_main.cpp)
 
 add_subdirectory(NindBasics)
 add_subdirectory(NindLexicon)

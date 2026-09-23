@@ -107,7 +107,7 @@ private:
     //Rejcupehre l'identifiant interne 
     unsigned int getInternalIdent(const unsigned int ident);
     
-    //met ah jour la map de traduction des id externes -> id internes
+    //met ah jour la map de traduction des id externes -> id internes (intIdMin..intIdMax inclus)
     void fillDocIdTradExtInt(const unsigned int intIdMin,
                              const unsigned int intIdMax);
    

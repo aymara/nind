@@ -167,7 +167,7 @@ bool NindRetrolexicon::getComponents(const unsigned int ident,
         struct RetroWord retroWordS;
         existe = getRetroWord(retroWord.identifiantS, retroWordS);
         if (!existe) throw NindRetrolexiconException("NindRetrolexicon::getComponents A : " + m_fileName);
-        if (retroWordS.identifiantA != 0) NindRetrolexiconException("NindRetrolexicon::getComponents B : " + m_fileName);
+        if (retroWordS.identifiantA != 0) throw NindRetrolexiconException("NindRetrolexicon::getComponents B : " + m_fileName);
         components.push_front(retroWordS.motSimple);
         //recupere l'autre mot du couple
         existe = getRetroWord(retroWord.identifiantA, retroWord);

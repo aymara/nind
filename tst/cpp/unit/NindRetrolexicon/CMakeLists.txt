@@ -1,5 +1,7 @@
 add_executable(NindRetrolexiconUnitTests
   NindRetrolexiconTest.cpp
 )
-target_link_libraries(NindRetrolexiconUnitTests NindRetrolexicon NindBasics GTest::gtest GTest::gtest_main)
-gtest_discover_tests(NindRetrolexiconUnitTests)
+target_link_libraries(NindRetrolexiconUnitTests NindRetrolexicon NindBasics nind_doctest_main)
+add_test(NAME NindRetrolexiconUnitTests COMMAND NindRetrolexiconUnitTests)
+set_tests_properties(NindRetrolexiconUnitTests PROPERTIES TIMEOUT 600
+  ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")

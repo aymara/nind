@@ -1,7 +1,7 @@
 #include "NindAmose/NindTermAmose.h"
 #include "NindAmose/NindLexiconAmose.h"
 #include "TestTempDir.h"
-#include <gtest/gtest.h>
+#include "doctest.h"
 #include <list>
 using namespace latecon::nindex;
 using namespace std;
@@ -16,7 +16,7 @@ list<Document> oneDoc(unsigned int ident, unsigned int freq) {
 }
 }
 ////////////////////////////////////////////////////////////
-TEST(NindTermAmoseTest, AddDocsToTermAggregatesCountsAndDocList) {
+TEST_CASE("NindTermAmoseTest.AddDocsToTermAggregatesCountsAndDocList") {
     TestTempDir tmp;
     NindLexiconAmose lexicon(tmp.file("term1"), true, 16, 16);
     const unsigned int catId = lexicon.addWord("cat", SIMPLE_TERM);
@@ -27,17 +27,17 @@ TEST(NindTermAmoseTest, AddDocsToTermAggregatesCountsAndDocList) {
     termIndex.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(2, 5), identification);
 
     list<unsigned int> docs;
-    ASSERT_TRUE(termIndex.getDocList(catId, docs));
-    ASSERT_EQ(2u, docs.size());
-    EXPECT_EQ(2u, termIndex.getDocFreq(catId));
+    REQUIRE(termIndex.getDocList(catId, docs));
+    REQUIRE_EQ(2u, docs.size());
+    CHECK_EQ(2u, termIndex.getDocFreq(catId));
 
-    EXPECT_EQ(1u, termIndex.getUniqueTermCount(SIMPLE_TERM));
-    EXPECT_EQ(1u, termIndex.getUniqueTermCount(ALL));
-    EXPECT_EQ(8u, termIndex.getTermOccurrences(SIMPLE_TERM));
-    EXPECT_EQ(8u, termIndex.getTermOccurrences(ALL));
+    CHECK_EQ(1u, termIndex.getUniqueTermCount(SIMPLE_TERM));
+    CHECK_EQ(1u, termIndex.getUniqueTermCount(ALL));
+    CHECK_EQ(8u, termIndex.getTermOccurrences(SIMPLE_TERM));
+    CHECK_EQ(8u, termIndex.getTermOccurrences(ALL));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindTermAmoseTest, AddingSameDocAgainAccumulatesFrequency) {
+TEST_CASE("NindTermAmoseTest.AddingSameDocAgainAccumulatesFrequency") {
     TestTempDir tmp;
     NindLexiconAmose lexicon(tmp.file("term2"), true, 16, 16);
     const unsigned int catId = lexicon.addWord("cat", SIMPLE_TERM);
@@ -47,11 +47,11 @@ TEST(NindTermAmoseTest, AddingSameDocAgainAccumulatesFrequency) {
     termIndex.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(1, 3), identification);
     termIndex.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(1, 4), identification);
 
-    EXPECT_EQ(1u, termIndex.getDocFreq(catId));            // still a single document
-    EXPECT_EQ(7u, termIndex.getTermOccurrences(ALL));       // 3 + 4
+    CHECK_EQ(1u, termIndex.getDocFreq(catId));            // still a single document
+    CHECK_EQ(7u, termIndex.getTermOccurrences(ALL));       // 3 + 4
 }
 ////////////////////////////////////////////////////////////
-TEST(NindTermAmoseTest, RemovingLastDocFromTermErasesItAndDecrementsUniqueCount) {
+TEST_CASE("NindTermAmoseTest.RemovingLastDocFromTermErasesItAndDecrementsUniqueCount") {
     TestTempDir tmp;
     NindLexiconAmose lexicon(tmp.file("term3"), true, 16, 16);
     const unsigned int catId = lexicon.addWord("cat", SIMPLE_TERM);
@@ -59,16 +59,16 @@ TEST(NindTermAmoseTest, RemovingLastDocFromTermErasesItAndDecrementsUniqueCount)
 
     NindTermAmose termIndex(tmp.file("term3"), true, identification, 8);
     termIndex.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(1, 3), identification);
-    ASSERT_EQ(1u, termIndex.getUniqueTermCount(SIMPLE_TERM));
+    REQUIRE_EQ(1u, termIndex.getUniqueTermCount(SIMPLE_TERM));
 
     termIndex.removeDocFromTerm(catId, SIMPLE_TERM, 1, identification);
-    EXPECT_EQ(0u, termIndex.getUniqueTermCount(SIMPLE_TERM));
-    EXPECT_EQ(0u, termIndex.getDocFreq(catId));
+    CHECK_EQ(0u, termIndex.getUniqueTermCount(SIMPLE_TERM));
+    CHECK_EQ(0u, termIndex.getDocFreq(catId));
     list<unsigned int> docs;
-    EXPECT_FALSE(termIndex.getDocList(catId, docs));
+    CHECK_FALSE(termIndex.getDocList(catId, docs));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindTermAmoseTest, DistinctTermTypesAreCountedSeparately) {
+TEST_CASE("NindTermAmoseTest.DistinctTermTypesAreCountedSeparately") {
     TestTempDir tmp;
     NindLexiconAmose lexicon(tmp.file("term4"), true, 16, 16);
     const unsigned int catId = lexicon.addWord("cat", SIMPLE_TERM);
@@ -79,15 +79,15 @@ TEST(NindTermAmoseTest, DistinctTermTypesAreCountedSeparately) {
     termIndex.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(1, 2), identification);
     termIndex.addDocsToTerm(parisId, NAMED_ENTITY, oneDoc(1, 1), identification);
 
-    EXPECT_EQ(1u, termIndex.getUniqueTermCount(SIMPLE_TERM));
-    EXPECT_EQ(1u, termIndex.getUniqueTermCount(NAMED_ENTITY));
-    EXPECT_EQ(2u, termIndex.getUniqueTermCount(ALL));
-    EXPECT_EQ(2u, termIndex.getTermOccurrences(SIMPLE_TERM));
-    EXPECT_EQ(1u, termIndex.getTermOccurrences(NAMED_ENTITY));
-    EXPECT_EQ(3u, termIndex.getTermOccurrences(ALL));
+    CHECK_EQ(1u, termIndex.getUniqueTermCount(SIMPLE_TERM));
+    CHECK_EQ(1u, termIndex.getUniqueTermCount(NAMED_ENTITY));
+    CHECK_EQ(2u, termIndex.getUniqueTermCount(ALL));
+    CHECK_EQ(2u, termIndex.getTermOccurrences(SIMPLE_TERM));
+    CHECK_EQ(1u, termIndex.getTermOccurrences(NAMED_ENTITY));
+    CHECK_EQ(3u, termIndex.getTermOccurrences(ALL));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindTermAmoseTest, CountsPersistAcrossReopenAsReader) {
+TEST_CASE("NindTermAmoseTest.CountsPersistAcrossReopenAsReader") {
     TestTempDir tmp;
     const string path = tmp.file("term5");
     NindLexiconAmose lexicon(path, true, 16, 16);
@@ -98,7 +98,7 @@ TEST(NindTermAmoseTest, CountsPersistAcrossReopenAsReader) {
         writer.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(1, 3), identification);
     }
     NindTermAmose reader(path, false, identification, 8);
-    EXPECT_EQ(1u, reader.getUniqueTermCount(SIMPLE_TERM));
-    EXPECT_EQ(3u, reader.getTermOccurrences(SIMPLE_TERM));
-    EXPECT_EQ(1u, reader.getDocFreq(catId));
+    CHECK_EQ(1u, reader.getUniqueTermCount(SIMPLE_TERM));
+    CHECK_EQ(3u, reader.getTermOccurrences(SIMPLE_TERM));
+    CHECK_EQ(1u, reader.getDocFreq(catId));
 }

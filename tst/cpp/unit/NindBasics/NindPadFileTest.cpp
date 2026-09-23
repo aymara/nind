@@ -1,7 +1,7 @@
 #include "NindBasics/NindPadFile.h"
 #include "NindExceptions.h"
 #include "TestTempDir.h"
-#include <gtest/gtest.h>
+#include "doctest.h"
 #include <string>
 #include <set>
 using namespace latecon::nindex;
@@ -33,51 +33,51 @@ public:
 };
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, NewWriterAllocatesFirstBlock) {
+TEST_CASE("NindPadFileTest.NewWriterAllocatesFirstBlock") {
     TestTempDir tmp;
     TestPadFile pad(tmp.file("a.pad"), true, NindPadFile::Identification(0, 0), 4, 8, 4);
-    EXPECT_EQ(4u, pad.getFirstEntriesBlockSize());
-    EXPECT_EQ(4u, pad.getMaxIdent());
-    EXPECT_NE(0u, pad.getEntryPos(0));
-    EXPECT_NE(0u, pad.getEntryPos(3));
-    EXPECT_EQ(0u, pad.getEntryPos(4));    // out of the single allocated block
+    CHECK_EQ(4u, pad.getFirstEntriesBlockSize());
+    CHECK_EQ(4u, pad.getMaxIdent());
+    CHECK_NE(0u, pad.getEntryPos(0));
+    CHECK_NE(0u, pad.getEntryPos(3));
+    CHECK_EQ(0u, pad.getEntryPos(4));    // out of the single allocated block
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, AddEntriesBlockExtendsIndirectionRange) {
+TEST_CASE("NindPadFileTest.AddEntriesBlockExtendsIndirectionRange") {
     TestTempDir tmp;
     TestPadFile pad(tmp.file("b.pad"), true, NindPadFile::Identification(0, 0), 4, 8, 4);
     pad.addEntriesBlock(NindPadFile::Identification(0, 0));
-    EXPECT_EQ(8u, pad.getMaxIdent());
-    for (unsigned int ident = 0; ident < 8; ident++) EXPECT_NE(0u, pad.getEntryPos(ident)) << "ident=" << ident;
-    EXPECT_EQ(0u, pad.getEntryPos(8));
+    CHECK_EQ(8u, pad.getMaxIdent());
+    for (unsigned int ident = 0; ident < 8; ident++) { INFO("ident=" << ident); CHECK_NE(0u, pad.getEntryPos(ident)); }
+    CHECK_EQ(0u, pad.getEntryPos(8));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, MultiBlockChainingGivesDistinctPositions) {
+TEST_CASE("NindPadFileTest.MultiBlockChainingGivesDistinctPositions") {
     TestTempDir tmp;
     TestPadFile pad(tmp.file("c.pad"), true, NindPadFile::Identification(0, 0), 0, 8, 2);
     pad.addEntriesBlock(NindPadFile::Identification(0, 0));
     pad.addEntriesBlock(NindPadFile::Identification(0, 0));
-    ASSERT_EQ(6u, pad.getMaxIdent());
+    REQUIRE_EQ(6u, pad.getMaxIdent());
     std::set<unsigned long int> positions;
     for (unsigned int ident = 0; ident < 6; ident++) {
         const unsigned long int pos = pad.getEntryPos(ident);
-        EXPECT_NE(0u, pos) << "ident=" << ident;
-        EXPECT_TRUE(positions.insert(pos).second) << "duplicate position for ident=" << ident;
+        { INFO("ident=" << ident); CHECK_NE(0u, pos); }
+        { INFO("duplicate position for ident=" << ident); CHECK(positions.insert(pos).second); }
     }
-    EXPECT_EQ(0u, pad.getEntryPos(6));
+    CHECK_EQ(0u, pad.getEntryPos(6));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, SpecificsStartZeroFilled) {
+TEST_CASE("NindPadFileTest.SpecificsStartZeroFilled") {
     TestTempDir tmp;
     TestPadFile pad(tmp.file("d.pad"), true, NindPadFile::Identification(0, 0), 4, 8, 4);
     pad.getSpecifics();
-    EXPECT_EQ(0u, pad.m_file.getInt1());
-    EXPECT_EQ(0u, pad.m_file.getInt1());
-    EXPECT_EQ(0u, pad.m_file.getInt1());
-    EXPECT_EQ(0u, pad.m_file.getInt1());
+    CHECK_EQ(0u, pad.m_file.getInt1());
+    CHECK_EQ(0u, pad.m_file.getInt1());
+    CHECK_EQ(0u, pad.m_file.getInt1());
+    CHECK_EQ(0u, pad.m_file.getInt1());
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, IdentificationIsPersistedAndReadBack) {
+TEST_CASE("NindPadFileTest.IdentificationIsPersistedAndReadBack") {
     TestTempDir tmp;
     const string path = tmp.file("e.pad");
     const NindPadFile::Identification identification(42, 1000);
@@ -85,56 +85,56 @@ TEST(NindPadFileTest, IdentificationIsPersistedAndReadBack) {
         TestPadFile pad(path, true, identification, 0, 8, 4);
         NindPadFile::Identification readBack;
         pad.getFileIdentification(readBack);
-        EXPECT_EQ(identification, readBack);
+        CHECK_EQ(identification, readBack);
     }
     // Reopening as a reader with the same non-zero reference must succeed
     // and must still report the same identification.
     TestPadFile reopened(path, false, identification, 0, 8, 4);
     NindPadFile::Identification readBack;
     reopened.getFileIdentification(readBack);
-    EXPECT_EQ(identification, readBack);
+    CHECK_EQ(identification, readBack);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, ZeroReferenceIdentificationSkipsCheck) {
+TEST_CASE("NindPadFileTest.ZeroReferenceIdentificationSkipsCheck") {
     TestTempDir tmp;
     const string path = tmp.file("f.pad");
     { TestPadFile pad(path, true, NindPadFile::Identification(7, 77), 0, 8, 4); }
     // A zero reference means "don't check": must not throw even though the
     // file's real identification (7, 77) differs.
-    EXPECT_NO_THROW(TestPadFile(path, false, NindPadFile::Identification(0, 0), 0, 8, 4));
+    CHECK_NOTHROW(TestPadFile(path, false, NindPadFile::Identification(0, 0), 0, 8, 4));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, MismatchedIdentificationThrowsOnReopen) {
+TEST_CASE("NindPadFileTest.MismatchedIdentificationThrowsOnReopen") {
     TestTempDir tmp;
     const string path = tmp.file("g.pad");
     { TestPadFile pad(path, true, NindPadFile::Identification(7, 77), 0, 8, 4); }
-    EXPECT_THROW(TestPadFile(path, false, NindPadFile::Identification(1, 1), 0, 8, 4), NindPadFileException);
-    EXPECT_THROW(TestPadFile(path, true, NindPadFile::Identification(1, 1), 0, 8, 4), NindPadFileException);
+    CHECK_THROWS_AS(TestPadFile(path, false, NindPadFile::Identification(1, 1), 0, 8, 4), NindPadFileException);
+    CHECK_THROWS_AS(TestPadFile(path, true, NindPadFile::Identification(1, 1), 0, 8, 4), NindPadFileException);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, NewWriterRequiresNonZeroDataEntrySize) {
+TEST_CASE("NindPadFileTest.NewWriterRequiresNonZeroDataEntrySize") {
     TestTempDir tmp;
-    EXPECT_THROW(TestPadFile(tmp.file("h.pad"), true, NindPadFile::Identification(0, 0), 0, 0, 4),
+    CHECK_THROWS_AS(TestPadFile(tmp.file("h.pad"), true, NindPadFile::Identification(0, 0), 0, 0, 4),
                  NindPadFileException);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, NewWriterRequiresNonZeroBlocSize) {
+TEST_CASE("NindPadFileTest.NewWriterRequiresNonZeroBlocSize") {
     TestTempDir tmp;
-    EXPECT_THROW(TestPadFile(tmp.file("i.pad"), true, NindPadFile::Identification(0, 0), 0, 8, 0),
+    CHECK_THROWS_AS(TestPadFile(tmp.file("i.pad"), true, NindPadFile::Identification(0, 0), 0, 8, 0),
                  NindPadFileException);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, ReaderOnMissingFileThrows) {
+TEST_CASE("NindPadFileTest.ReaderOnMissingFileThrows") {
     TestTempDir tmp;
     // NindPadFile throws the more specific OpenFileException (rather than the
     // generic NindPadFileException) when the underlying file can't be opened at all.
-    EXPECT_THROW(TestPadFile(tmp.file("missing.pad"), false, NindPadFile::Identification(0, 0), 0, 8, 4),
+    CHECK_THROWS_AS(TestPadFile(tmp.file("missing.pad"), false, NindPadFile::Identification(0, 0), 0, 8, 4),
                  OpenFileException);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindPadFileTest, ReopenWriterWithDifferentDataEntrySizeThrows) {
+TEST_CASE("NindPadFileTest.ReopenWriterWithDifferentDataEntrySizeThrows") {
     TestTempDir tmp;
     const string path = tmp.file("j.pad");
     { TestPadFile pad(path, true, NindPadFile::Identification(0, 0), 0, 8, 4); }
-    EXPECT_THROW(TestPadFile(path, true, NindPadFile::Identification(0, 0), 0, 4, 4), NindPadFileException);
+    CHECK_THROWS_AS(TestPadFile(path, true, NindPadFile::Identification(0, 0), 0, 4, 4), NindPadFileException);
 }

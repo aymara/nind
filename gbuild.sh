@@ -219,6 +219,7 @@ echoerr "Running make test:"
 eval $make_test
 result=$?
 echoerr "Done make test:"
+if [ "$result" != "0" ]; then echoerr "NIND unit tests failed."; popd; exit $result; fi
 fi
 
 echoerr "Running make install:"

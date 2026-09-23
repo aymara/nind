@@ -1,7 +1,7 @@
 #include "NindLexicon/NindLexiconFile.h"
 #include "NindExceptions.h"
 #include "TestTempDir.h"
-#include <gtest/gtest.h>
+#include "doctest.h"
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,15 +32,15 @@ vector<WordRecord> readAllWords(NindLexiconFile &file) {
 }
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLexiconFileTest, FreshWriterStartsWithJustAnIdentification) {
+TEST_CASE("NindLexiconFileTest.FreshWriterStartsWithJustAnIdentification") {
     TestTempDir tmp;
     NindLexiconFile file(tmp.file("fresh.nindlexicon"), true);
     unsigned int maxIdent, identification;
-    EXPECT_TRUE(file.readNextRecordAsLexiconIdentification(maxIdent, identification));
-    EXPECT_EQ(0u, maxIdent);
+    CHECK(file.readNextRecordAsLexiconIdentification(maxIdent, identification));
+    CHECK_EQ(0u, maxIdent);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLexiconFileTest, WriteThenReadSimpleAndCompoundWords) {
+TEST_CASE("NindLexiconFileTest.WriteThenReadSimpleAndCompoundWords") {
     TestTempDir tmp;
     const string path = tmp.file("words.nindlexicon");
     {
@@ -51,28 +51,28 @@ TEST(NindLexiconFileTest, WriteThenReadSimpleAndCompoundWords) {
     }
     NindLexiconFile reader(path, false);
     const vector<WordRecord> words = readAllWords(reader);
-    ASSERT_EQ(3u, words.size());
+    REQUIRE_EQ(3u, words.size());
 
-    EXPECT_EQ(1u, words[0].ident);
-    EXPECT_TRUE(words[0].isSimpleWord);
-    EXPECT_EQ("alpha", words[0].simpleWord);
+    CHECK_EQ(1u, words[0].ident);
+    CHECK(words[0].isSimpleWord);
+    CHECK_EQ("alpha", words[0].simpleWord);
 
-    EXPECT_EQ(2u, words[1].ident);
-    EXPECT_TRUE(words[1].isSimpleWord);
-    EXPECT_EQ("beta", words[1].simpleWord);
+    CHECK_EQ(2u, words[1].ident);
+    CHECK(words[1].isSimpleWord);
+    CHECK_EQ("beta", words[1].simpleWord);
 
-    EXPECT_EQ(3u, words[2].ident);
-    EXPECT_FALSE(words[2].isSimpleWord);
-    EXPECT_EQ(1u, words[2].compoundWord.first);
-    EXPECT_EQ(2u, words[2].compoundWord.second);
+    CHECK_EQ(3u, words[2].ident);
+    CHECK_FALSE(words[2].isSimpleWord);
+    CHECK_EQ(1u, words[2].compoundWord.first);
+    CHECK_EQ(2u, words[2].compoundWord.second);
 
     unsigned int maxIdent, identification;
-    EXPECT_TRUE(reader.readNextRecordAsLexiconIdentification(maxIdent, identification));
-    EXPECT_EQ(3u, maxIdent);
-    EXPECT_EQ(1002u, identification);
+    CHECK(reader.readNextRecordAsLexiconIdentification(maxIdent, identification));
+    CHECK_EQ(3u, maxIdent);
+    CHECK_EQ(1002u, identification);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLexiconFileTest, ReopenedWriterAppendsAfterExistingWords) {
+TEST_CASE("NindLexiconFileTest.ReopenedWriterAppendsAfterExistingWords") {
     TestTempDir tmp;
     const string path = tmp.file("append.nindlexicon");
     {
@@ -92,20 +92,20 @@ TEST(NindLexiconFileTest, ReopenedWriterAppendsAfterExistingWords) {
     }
     NindLexiconFile reader(path, false);
     const vector<WordRecord> words = readAllWords(reader);
-    ASSERT_EQ(2u, words.size());
-    EXPECT_EQ("alpha", words[0].simpleWord);
-    EXPECT_EQ("beta", words[1].simpleWord);
+    REQUIRE_EQ(2u, words.size());
+    CHECK_EQ("alpha", words[0].simpleWord);
+    CHECK_EQ("beta", words[1].simpleWord);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLexiconFileTest, WritingOnAReaderThrows) {
+TEST_CASE("NindLexiconFileTest.WritingOnAReaderThrows") {
     TestTempDir tmp;
     const string path = tmp.file("readonly.nindlexicon");
     { NindLexiconFile writer(path, true); }
     NindLexiconFile reader(path, false);
-    EXPECT_THROW(reader.writeSimpleWordDefinition(1, "alpha", 1, 1), BadUseException);
+    CHECK_THROWS_AS(reader.writeSimpleWordDefinition(1, "alpha", 1, 1), BadUseException);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLexiconFileTest, OpeningMissingFileAsReaderThrows) {
+TEST_CASE("NindLexiconFileTest.OpeningMissingFileAsReaderThrows") {
     TestTempDir tmp;
-    EXPECT_THROW(NindLexiconFile(tmp.file("missing.nindlexicon"), false), NindLexiconException);
+    CHECK_THROWS_AS(NindLexiconFile(tmp.file("missing.nindlexicon"), false), NindLexiconException);
 }

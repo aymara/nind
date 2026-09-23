@@ -108,6 +108,9 @@ void NindIndex::setDefinition(const unsigned int ident)
     m_file.readBuffer(TAILLE_INDIRECTION);
     const uint64_t oldOffsetEntry = m_file.getInt5();
     const unsigned int oldLengthEntry = m_file.getInt3();
+    //le buffer d'ejcriture contient <dejfinition> puis les spejcifiques et l'identification
+    if (m_file.getOutBufferSize() < (unsigned int)tailleQueue)
+        throw NindIndexException("NindIndex::setDefinition write buffer smaller than specifics : " + m_fileName);
     //taille de la dejfinition
     const unsigned int dataSize = m_file.getOutBufferSize() - tailleQueue;
     //si la taille est ah 0, c'est un effacement
@@ -279,7 +282,7 @@ void NindIndex::mapEmptySpaces()
     unsigned int longueurPrec = 0;
     for (list<pair<uint64_t, unsigned int> >::const_iterator it = nonVidesList.begin();
         it != nonVidesList.end(); it++) {
-        const int longueurVide = (*it).first - addressePrec - longueurPrec;
+        const int64_t longueurVide = (int64_t)(*it).first - (int64_t)addressePrec - (int64_t)longueurPrec;
         if (longueurVide < 0) throw NindIndexException("NindIndex::mapEmptySpaces " + m_fileName);
         if (longueurVide > 0) {
             const pair<uint64_t, unsigned int> emptyArea(addressePrec + longueurPrec, longueurVide);
