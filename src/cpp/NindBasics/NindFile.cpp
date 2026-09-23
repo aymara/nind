@@ -17,11 +17,40 @@
 ////////////////////////////////////////////////////////////
 #include "NindFile.h"
 #include <string.h>
+#include <sys/stat.h>
 //#include <iostream>
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
-// <fichier>               ::= { <Entier1> | <Entier2> | <Entier3> | <Entier4> | <Entier5> |
+//taille de lecture au-delah de laquelle readBuffer() verifie d'abord la taille rejelle du fichier
+#define READ_SIZE_CHECK_THRESHOLD 65536
+////////////////////////////////////////////////////////////
+//Les octets sont assemblejs en arithmejtique non signeje 32 bits : assembler en int
+//(promotion des unsigned char) dejborde dehs que la valeur atteint 2^31 (comportement indejfini).
+//Extension de signe d'une valeur non signeje de bitsNb bits, sans dejcalage de valeur nejgative.
+static inline signed int signExtend(const uint32_t value, const unsigned int bitsNb)
+{
+    const uint32_t signBit = uint32_t(1) << (bitsNb - 1);
+    return static_cast<int32_t>((value ^ signBit) - signBit);
+}
+static inline uint32_t be2(const unsigned char *b) { return (uint32_t(b[0]) << 8) | b[1]; }
+static inline uint32_t be3(const unsigned char *b) { return (be2(b) << 8) | b[2]; }
+static inline uint32_t be4(const unsigned char *b) { return (be3(b) << 8) | b[3]; }
+static inline uint32_t le3(const unsigned char *b) { return (uint32_t(b[2]) << 16) | (uint32_t(b[1]) << 8) | b[0]; }
+static inline uint32_t le4(const unsigned char *b) { return (uint32_t(b[3]) << 24) | le3(b); }
+//Dejcode un entier latecon dont les nbBytes octets sont en bytes[0..nbBytes-1]
+static inline uint32_t latBits(const unsigned char *b, const unsigned int bytesNb)
+{
+    switch (bytesNb) {
+    case 1: return b[0] & 0x7F;
+    case 2: return ((uint32_t(b[0]) & 0x3F) << 8) | b[1];
+    case 3: return ((uint32_t(b[0]) & 0x1F) << 16) | (uint32_t(b[1]) << 8) | b[2];
+    case 4: return ((uint32_t(b[0]) & 0x0F) << 24) | (uint32_t(b[1]) << 16) | (uint32_t(b[2]) << 8) | b[3];
+    default: return be4(b + 1);
+    }
+}
+////////////////////////////////////////////////////////////
+// <fichier>              ::= { <Entier1> | <Entier2> | <Entier3> | <Entier4> | <Entier5> |
 //                              <EntierULat> | <EntierULat> |
 //                              <MotUtf8> | <Utf8> | <Octet> }
 // <MotUtf8>               ::= <longueur> <Utf8>
@@ -104,6 +133,16 @@ void NindFile::close()
     }
 }
 ////////////////////////////////////////////////////////////
+//brief Get the actual size of the file on disk, as it is now
+//return file size in bytes */
+uint64_t NindFile::getCurrentFileSize()
+{
+    //pas de fflush : toutes les ejcritures de NindFile sont dejjah suivies d'un fflush
+    struct stat fileStat;
+    if (fstat(fileno(m_file), &fileStat) != 0) throw ReadFileException(m_fileName);
+    return (uint64_t)fileStat.st_size;
+}
+////////////////////////////////////////////////////////////
 //brief Read a single byte from the file
 //return byte value */
 unsigned char NindFile::readInt1()
@@ -120,7 +159,7 @@ unsigned int NindFile::readInt3()
     //petit boutiste
     unsigned char bytes[3];
     readBytes(bytes, 3);
-    return (bytes[2]*256 + bytes[1])*256 + bytes[0];
+    return le3(bytes);
 }
 ////////////////////////////////////////////////////////////
 //brief Get an unsigned latecon integer from the file
@@ -130,20 +169,20 @@ unsigned int NindFile::readUIntLat()
     unsigned char bytes[5];
     readBytes(bytes, 1);
     //0-2^7-1 : 0-127
-    if (!(bytes[0]&0x80)) return bytes[0];
+    if (!(bytes[0]&0x80)) return latBits(bytes, 1);
     readBytes(bytes+1, 1);
     //2^7-2^14-1 : 128-16383
-    if (!(bytes[0]&0x40)) return (bytes[0]&0x3F)*256 + bytes[1];
+    if (!(bytes[0]&0x40)) return latBits(bytes, 2);
     readBytes(bytes+2, 1);
     //2^14-2^21-1 : 16384-2097151
-    if (!(bytes[0]&0x20)) return ((bytes[0]&0x1F)*256 + bytes[1])*256 + bytes[2];
+    if (!(bytes[0]&0x20)) return latBits(bytes, 3);
     readBytes(bytes+3, 1);
     //2^21-2^28 : 2097152-268435455
-    if (!(bytes[0]&0x10)) return (((bytes[0]&0x0F)*256 + bytes[1])*256 + bytes[2])*256 + bytes[3];
+    if (!(bytes[0]&0x10)) return latBits(bytes, 4);
     readBytes(bytes+4, 1);
     if (bytes[0]&0x08) throw FormatFileException(m_fileName);
     //2^28-2^32-1 : 268435456-4294967295
-    return ((bytes[1]*256 + bytes[2])*256 + bytes[3])*256 + bytes[4];
+    return latBits(bytes, 5);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a signed latecon integer from the file
@@ -153,20 +192,20 @@ signed int NindFile::readSIntLat()
     unsigned char bytes[5];
     readBytes(bytes, 1);
     //de -2^6 a 2^6-1 : de -64 a 63
-    if (!(bytes[0]&0x80)) return ((int(bytes[0]))<<25)>>25;
+    if (!(bytes[0]&0x80)) return signExtend(latBits(bytes, 1), 7);
     readBytes(bytes+1, 1);
     //de -2^13 a -2^6-1 et de 2^6 a 2^13-1 : de -8192 a -65 et de 64 a 8191
-    if (!(bytes[0]&0x40)) return ((int(bytes[0]&0x3F)*256 + bytes[1])<<18)>>18;
+    if (!(bytes[0]&0x40)) return signExtend(latBits(bytes, 2), 14);
     readBytes(bytes+2, 1);
     //de -2^20 a -2^13-1 et de 2^13 a 2^20-1 : de -1048576 a -8193 et de 8192 a 1048575
-    if (!(bytes[0]&0x20)) return ((int((bytes[0]&0x1F)*256 + bytes[1])*256 + bytes[2])<<11)>>11;
+    if (!(bytes[0]&0x20)) return signExtend(latBits(bytes, 3), 21);
     readBytes(bytes+3, 1);
     //de -2^27 a -2^20-1 et de 2^20 a 2^27-1 : de -134217728 a -1048577 et de 1048576 a 134217727
-    if (!(bytes[0]&0x10)) return ((int(((bytes[0]&0x0F)*256 + bytes[1])*256 + bytes[2])*256 + bytes[3])<<4)>>4;
+    if (!(bytes[0]&0x10)) return signExtend(latBits(bytes, 4), 28);
     readBytes(bytes+4, 1);
     if (bytes[0]&0x08) throw FormatFileException(m_fileName);
     //de -2^31 a -2^27-1 et de 2^27 a 2^31-1 : de -2147483648 a -134217729 et de 134217728 a 2147483647
-    return ((bytes[1]*256 + bytes[2])*256 + bytes[3])*256 + bytes[4];
+    return signExtend(latBits(bytes, 5), 32);
 }
 ////////////////////////////////////////////////////////////
 //brief Read a string from the file
@@ -186,8 +225,19 @@ string NindFile::readString()
 //param bytesNb size of internal buffer to receive read datas */
 void NindFile::readBuffer(const unsigned int bytesNb)
 {
+    //libehre l'ancien buffer et remet les pointeurs ah zejro d'abord : en cas d'ejchec ci-dessous,
+    //ni pointeur pendant sur l'ancien buffer, ni anciennes donnejes relues comme si c'ejtaient les nouvelles
+    delete [] m_rbuffer;
+    m_rbuffer = m_rbufferAbsEnd = m_rbufferEnd = m_rPtr = 0;
+    //une longueur lue dans un fichier corrompu ne doit pas provoquer une allocation dejmesureje :
+    //au-delah d'un seuil, verifie que le fichier contient bien les octets demandejs
+    if (bytesNb > READ_SIZE_CHECK_THRESHOLD) {
+        const long int pos = ftell(m_file);
+        struct stat fileStat;
+        if (pos < 0 || fstat(fileno(m_file), &fileStat) != 0) throw ReadFileException(m_fileName);
+        if ((uint64_t)pos + bytesNb > (uint64_t)fileStat.st_size) throw EofException(m_fileName);
+    }
     //cree le buffer intermediaire de lecture
-    if (m_rbuffer != 0) delete [] m_rbuffer;
     m_rbuffer = new (nothrow) unsigned char[bytesNb];
     if (m_rbuffer == 0) throw BadAllocException("in read buffer " + m_fileName);
     m_rbufferAbsEnd = m_rbuffer + bytesNb;
@@ -201,7 +251,7 @@ void NindFile::readBuffer(const unsigned int bytesNb)
 //param bytesNb offset from current read pointer */
 void NindFile::setEndInBuffer(const unsigned int bytesNb)
 {
-    if (m_rPtr + bytesNb > m_rbufferAbsEnd) throw OutReadBufferException("in read buffer (A) " + m_fileName);
+    if (bytesNb > (size_t)(m_rbufferAbsEnd - m_rPtr)) throw OutReadBufferException("in read buffer (A) " + m_fileName);
     m_rbufferEnd = m_rPtr + bytesNb;
 }
 ////////////////////////////////////////////////////////////
@@ -209,7 +259,7 @@ void NindFile::setEndInBuffer(const unsigned int bytesNb)
 //param bytesNb offset from head of buffer */
 void NindFile::setAbsEndInBuffer(const unsigned int bytesNb)
 {
-    if (m_rbuffer + bytesNb > m_rbufferAbsEnd) throw OutReadBufferException("in read buffer (AA) " + m_fileName);
+    if (bytesNb > (size_t)(m_rbufferAbsEnd - m_rbuffer)) throw OutReadBufferException("in read buffer (AA) " + m_fileName);
     m_rbufferEnd = m_rbuffer + bytesNb;
 }
 ////////////////////////////////////////////////////////////
@@ -217,8 +267,8 @@ void NindFile::setAbsEndInBuffer(const unsigned int bytesNb)
 //return 4-bytes integer */
 unsigned int NindFile::getInt1()
 {
+    if (m_rbufferEnd - m_rPtr < 1) throw OutReadBufferException("in read buffer (B) " + m_fileName);
     m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (B) " + m_fileName);
     return m_rPtr[-1];
 }
 ////////////////////////////////////////////////////////////
@@ -227,9 +277,9 @@ unsigned int NindFile::getInt1()
 unsigned int NindFile::getInt2()
 {
     //gros-boutiste
+    if (m_rbufferEnd - m_rPtr < 2) throw OutReadBufferException("in read buffer (C) " + m_fileName);
     m_rPtr += 2;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (C) " + m_fileName);
-    return m_rPtr[-2]*256 + m_rPtr[-1];
+    return be2(m_rPtr - 2);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a 3-bytes integer from internal buffer
@@ -237,9 +287,9 @@ unsigned int NindFile::getInt2()
 unsigned int NindFile::getInt3()
 {
     //petit boutiste
+    if (m_rbufferEnd - m_rPtr < 3) throw OutReadBufferException("in read buffer (D) " + m_fileName);
     m_rPtr += 3;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (D) " + m_fileName);
-    return (m_rPtr[-1]*256 + m_rPtr[-2])*256 + m_rPtr[-3];
+    return le3(m_rPtr - 3);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a 3-bytes signed integer from internal buffer
@@ -247,9 +297,9 @@ unsigned int NindFile::getInt3()
 signed int NindFile::getSInt3()
 {
     //petit boutiste
+    if (m_rbufferEnd - m_rPtr < 3) throw OutReadBufferException("in read buffer (D2) " + m_fileName);
     m_rPtr += 3;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (D2) " + m_fileName);
-    return (int((m_rPtr[-1]*256 + m_rPtr[-2])*256 + m_rPtr[-3])<<8)>>8;
+    return signExtend(le3(m_rPtr - 3), 24);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a 4-bytes integer from internal buffer
@@ -257,9 +307,9 @@ signed int NindFile::getSInt3()
 unsigned int NindFile::getInt4()
 {
     //petit boutiste
+    if (m_rbufferEnd - m_rPtr < 4) throw OutReadBufferException("in read buffer (E) " + m_fileName);
     m_rPtr += 4;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (E) " + m_fileName);
-    return ((m_rPtr[-1]*256 + m_rPtr[-2])*256 + m_rPtr[-3])*256 + m_rPtr[-4];
+    return le4(m_rPtr - 4);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a 4-bytes integer from internal buffer
@@ -267,9 +317,9 @@ unsigned int NindFile::getInt4()
 signed int NindFile::getSInt4()
 {
     //petit boutiste
+    if (m_rbufferEnd - m_rPtr < 4) throw OutReadBufferException("in read buffer (E) " + m_fileName);
     m_rPtr += 4;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (E) " + m_fileName);
-    return ((m_rPtr[-1]*256 + m_rPtr[-2])*256 + m_rPtr[-3])*256 + m_rPtr[-4];
+    return signExtend(le4(m_rPtr - 4), 32);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a 5-bytes integer from internal buffer
@@ -277,10 +327,10 @@ signed int NindFile::getSInt4()
 uint64_t NindFile::getInt5()
 {
     //gros boutiste
+    if (m_rbufferEnd - m_rPtr < 5) throw OutReadBufferException("in read buffer (F) " + m_fileName);
     m_rPtr += 5;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (F) " + m_fileName);
     //la valeur peut depasser 32 bits : force le calcul en 64 bits des le premier terme
-    return ((((static_cast<uint64_t>(m_rPtr[-5])*256 + m_rPtr[-4])*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1]);
+    return (static_cast<uint64_t>(m_rPtr[-5]) << 32) | be4(m_rPtr - 4);
 }
 ////////////////////////////////////////////////////////////
 //brief Get an unsigned latecon integer from internal buffer
@@ -288,27 +338,25 @@ uint64_t NindFile::getInt5()
 unsigned int NindFile::getUIntLat()
 {
     //il faut que ca aille vite pour les petits nombres
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (G) " + m_fileName);
+    const unsigned char *bytes = m_rPtr;
+    const ptrdiff_t available = m_rbufferEnd - m_rPtr;
+    if (available < 1) throw OutReadBufferException("in read buffer (G) " + m_fileName);
     //0-2^7-1 : 0-127
-    if (!(m_rPtr[-1]&0x80)) return m_rPtr[-1];
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (H) " + m_fileName);
+    if (!(bytes[0]&0x80)) { m_rPtr += 1; return latBits(bytes, 1); }
+    if (available < 2) throw OutReadBufferException("in read buffer (H) " + m_fileName);
     //2^7-2^14-1 : 128-16383
-    if (!(m_rPtr[-2]&0x40)) return (m_rPtr[-2]&0x3F)*256 + m_rPtr[-1];
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (I) " + m_fileName);
+    if (!(bytes[0]&0x40)) { m_rPtr += 2; return latBits(bytes, 2); }
+    if (available < 3) throw OutReadBufferException("in read buffer (I) " + m_fileName);
     //2^14-2^21-1 : 16384-2097151
-    if (!(m_rPtr[-3]&0x20)) return ((m_rPtr[-3]&0x1F)*256 + m_rPtr[-2])*256 + m_rPtr[-1];
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (J) " + m_fileName);
+    if (!(bytes[0]&0x20)) { m_rPtr += 3; return latBits(bytes, 3); }
+    if (available < 4) throw OutReadBufferException("in read buffer (J) " + m_fileName);
     //2^21-2^28 : 2097152-268435455
-    if (!(m_rPtr[-4]&0x10)) return (((m_rPtr[-4]&0x0F)*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1];
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (K) " + m_fileName);
-    if (m_rPtr[-5]&0x08) throw OutReadBufferException("in read buffer (L) " + m_fileName);
+    if (!(bytes[0]&0x10)) { m_rPtr += 4; return latBits(bytes, 4); }
+    if (available < 5) throw OutReadBufferException("in read buffer (K) " + m_fileName);
+    if (bytes[0]&0x08) throw OutReadBufferException("in read buffer (L) " + m_fileName);
     //2^28-2^32-1 : 268435456-4294967295
-    return ((m_rPtr[-4]*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1];
+    m_rPtr += 5;
+    return latBits(bytes, 5);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a signed latecon integer from internal buffer
@@ -316,27 +364,25 @@ unsigned int NindFile::getUIntLat()
 signed int NindFile::getSIntLat()
 {
     //il faut que ca aille vite pour les petits nombres
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (M) " + m_fileName);
+    const unsigned char *bytes = m_rPtr;
+    const ptrdiff_t available = m_rbufferEnd - m_rPtr;
+    if (available < 1) throw OutReadBufferException("in read buffer (M) " + m_fileName);
     //de -2^6 a 2^6-1 : de -64 a 63
-    if (!(m_rPtr[-1]&0x80)) return ((int(m_rPtr[-1]))<<25)>>25;
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (N) " + m_fileName);
+    if (!(bytes[0]&0x80)) { m_rPtr += 1; return signExtend(latBits(bytes, 1), 7); }
+    if (available < 2) throw OutReadBufferException("in read buffer (N) " + m_fileName);
     //de -2^13 a -2^6-1 et de 2^6 a 2^13-1 : de -8192 a -65 et de 64 a 8191
-    if (!(m_rPtr[-2]&0x40)) return ((int(m_rPtr[-2]&0x3F)*256 + m_rPtr[-1])<<18)>>18;
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (O) " + m_fileName);
+    if (!(bytes[0]&0x40)) { m_rPtr += 2; return signExtend(latBits(bytes, 2), 14); }
+    if (available < 3) throw OutReadBufferException("in read buffer (O) " + m_fileName);
     //de -2^20 a -2^13-1 et de 2^13 a 2^20-1 : de -1048576 a -8193 et de 8192 a 1048575
-    if (!(m_rPtr[-3]&0x20)) return ((int((m_rPtr[-3]&0x1F)*256 + m_rPtr[-2])*256 + m_rPtr[-1])<<11)>>11;
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (P) " + m_fileName);
+    if (!(bytes[0]&0x20)) { m_rPtr += 3; return signExtend(latBits(bytes, 3), 21); }
+    if (available < 4) throw OutReadBufferException("in read buffer (P) " + m_fileName);
     //de -2^27 a -2^20-1 et de 2^20 a 2^27-1 : de -134217728 a -1048577 et de 1048576 a 134217727
-    if (!(m_rPtr[-4]&0x10)) return ((int(((m_rPtr[-4]&0x0F)*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1])<<4)>>4;
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (Q) " + m_fileName);
-    if (m_rPtr[-5]&0x08) throw OutReadBufferException("in read buffer (R) " + m_fileName);
+    if (!(bytes[0]&0x10)) { m_rPtr += 4; return signExtend(latBits(bytes, 4), 28); }
+    if (available < 5) throw OutReadBufferException("in read buffer (Q) " + m_fileName);
+    if (bytes[0]&0x08) throw OutReadBufferException("in read buffer (R) " + m_fileName);
     //de -2^31 a -2^27-1 et de 2^27 a 2^31-1 : de -2147483648 a -134217729 et de 134217728 a 2147483647
-    return ((m_rPtr[-4]*256 + m_rPtr[-3])*256 + m_rPtr[-2])*256 + m_rPtr[-1];
+    m_rPtr += 5;
+    return signExtend(latBits(bytes, 5), 32);
 }
 ////////////////////////////////////////////////////////////
 //brief Get a string from internal buffer
@@ -344,12 +390,11 @@ signed int NindFile::getSIntLat()
 string NindFile::getString()
 {
     //lit la longueur de la chaine
-    m_rPtr += 1;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (S) " + m_fileName);
-    const unsigned char length = m_rPtr[-1];
+    if (m_rbufferEnd - m_rPtr < 1) throw OutReadBufferException("in read buffer (S) " + m_fileName);
+    const unsigned char length = *m_rPtr++;
     //lit la chaine
+    if (m_rbufferEnd - m_rPtr < length) throw OutReadBufferException("in read buffer (T) " + m_fileName);
     m_rPtr += length;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (T) " + m_fileName);
     return string((char*)(m_rPtr-length), length);
 }
 ////////////////////////////////////////////////////////////
@@ -359,8 +404,8 @@ string NindFile::getString()
 string NindFile::getStringAsBytes(const unsigned char length)
 {
     //lit la chaine
+    if (m_rbufferEnd - m_rPtr < length) throw OutReadBufferException("in read buffer (U) " + m_fileName);
     m_rPtr += length;
-    if (m_rPtr > m_rbufferEnd) throw OutReadBufferException("in read buffer (U) " + m_fileName);
     return string((char*)(m_rPtr-length), length);
 }
 ////////////////////////////////////////////////////////////
@@ -379,16 +424,16 @@ void NindFile::createBuffer(const unsigned int bytesNb)
 //param bytesNb number of padding bytes to write */
 void NindFile::putPad(const unsigned int bytesNb)
 {
+    if (m_wbufferEnd - m_wPtr < bytesNb) throw OutWriteBufferException("in write buffer (A) " + m_fileName);
     m_wPtr += bytesNb;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (A) " + m_fileName);
 }
 ////////////////////////////////////////////////////////////
 //brief Put one byte into the internal buffer
 //param int1 byte value to write */
 void NindFile::putInt1(const unsigned char int1)
 {
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (B) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (B) " + m_fileName);
     m_wPtr[-1] = int1;
 }
 ////////////////////////////////////////////////////////////
@@ -397,8 +442,8 @@ void NindFile::putInt1(const unsigned char int1)
 void NindFile::putInt2(const unsigned int int4)
 {
     //gros-boutiste
+    if (m_wbufferEnd - m_wPtr < 2) throw OutWriteBufferException("in write buffer (C) " + m_fileName);
     m_wPtr += 2;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (C) " + m_fileName);
     //en big-endian quelle que soit la plate-forme
     m_wPtr[-1] = (int4)&0xFF;
     m_wPtr[-2] = (int4>>8)&0xFF;
@@ -409,8 +454,8 @@ void NindFile::putInt2(const unsigned int int4)
 void NindFile::putInt3(const unsigned int int4)
 {
     //petit boutiste
+    if (m_wbufferEnd - m_wPtr < 3) throw OutWriteBufferException("in write buffer (D) " + m_fileName);
     m_wPtr += 3;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (D) " + m_fileName);
     //en little-endian quelle que soit la plate-forme
     m_wPtr[-3] = (int4)&0xFF;
     m_wPtr[-2] = (int4>>8)&0xFF;
@@ -424,8 +469,9 @@ void NindFile::putInt3(const unsigned int int4,
                        const unsigned int offset)
 {
     //petit boutiste
+    if ((uint64_t)offset + 3 > (uint64_t)(m_wbufferEnd - m_wbuffer))
+        throw OutWriteBufferException("in write buffer (E) " + m_fileName);
     unsigned char *wPtr = m_wbuffer + offset + 3;
-    if (wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (E) " + m_fileName);
     //en little-endian quelle que soit la plate-forme
     wPtr[-3] = (int4)&0xFF;
     wPtr[-2] = (int4>>8)&0xFF;
@@ -437,8 +483,8 @@ void NindFile::putInt3(const unsigned int int4,
 void NindFile::putInt4(const unsigned int int4)
 {
     //petit boutiste
+    if (m_wbufferEnd - m_wPtr < 4) throw OutWriteBufferException("in write buffer (F) " + m_fileName);
     m_wPtr += 4;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (F) " + m_fileName);
     //en little-endian quelle que soit la plate-forme
     m_wPtr[-4] = (int4)&0xFF;
     m_wPtr[-3] = (int4>>8)&0xFF;
@@ -451,8 +497,8 @@ void NindFile::putInt4(const unsigned int int4)
 void NindFile::putInt5(const uint64_t int8)
 {
     //gros boutiste
+    if (m_wbufferEnd - m_wPtr < 5) throw OutWriteBufferException("in write buffer (G) " + m_fileName);
     m_wPtr += 5;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (G) " + m_fileName);
     //en big-endian quelle que soit la plate-forme
     m_wPtr[-1] = (int8)&0xFF;
     m_wPtr[-2] = (int8>>8)&0xFF;
@@ -466,23 +512,23 @@ void NindFile::putInt5(const uint64_t int8)
 void NindFile::putUIntLat(const unsigned int int4)
 {
     //il faut que ca aille vite pour les petits nombres
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (H) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (H) " + m_fileName);
     //0-2^7-1 : 0-127
     if (int4 < 0x80) {
         m_wPtr[-1] = int4;
         return;
     }
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (I) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (I) " + m_fileName);
     //2^7-2^14-1 : 128-16383
     if (int4 < 0x4000) {
         m_wPtr[-1] = (int4)&0xFF;
         m_wPtr[-2] = (int4>>8)|0x80;
         return;
     }
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (J) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (J) " + m_fileName);
     //2^14-2^21-1 : 16384-2097151
     if (int4 < 0x200000) {
         m_wPtr[-1] = (int4)&0xFF;
@@ -490,8 +536,8 @@ void NindFile::putUIntLat(const unsigned int int4)
         m_wPtr[-3] = (int4>>16)|0xC0;
         return;
     }
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (K) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (K) " + m_fileName);
     //2^21-2^28 : 2097152-268435455
     if (int4 < 0x010000000) {
         m_wPtr[-1] = (int4)&0xFF;
@@ -500,8 +546,8 @@ void NindFile::putUIntLat(const unsigned int int4)
         m_wPtr[-4] = (int4>>24)|0xE0;
         return;
     }
+     if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (L) " + m_fileName);
      m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (L) " + m_fileName);
     //2^28-2^32-1 : 268435456-4294967295
     m_wPtr[-1] = (int4)&0xFF;
     m_wPtr[-2] = (int4>>8)&0xFF;
@@ -515,23 +561,23 @@ void NindFile::putUIntLat(const unsigned int int4)
 void NindFile::putSIntLat(const signed int int4)
 {
     //il faut que ca aille vite pour les petits nombres
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (M) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (M) " + m_fileName);
     //de -2^6 a 2^6-1 : de -64 a 63
     if (int4 >= -0x40 && int4 < 0x40) {
         m_wPtr[-1] = int4&0x7F;
         return;
     }
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (N) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (N) " + m_fileName);
     //de -2^13 a -2^6-1 et de 2^6 a 2^13-1 : de -8192 a -65 et de 64 a 8191
     if (int4 >= -0x2000 && int4 < 0x2000) {
         m_wPtr[-1] = (int4)&0xFF;
         m_wPtr[-2] = ((int4>>8)&0x3F)|0x80;
         return;
     }
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (O) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (O) " + m_fileName);
     //de -2^20 a -2^13-1 et de 2^13 a 2^20-1 : de -1048576 a -8193 et de 8192 a 1048575
     if (int4 >= -0x100000 && int4 < 0x100000) {
         m_wPtr[-1] = (int4)&0xFF;
@@ -539,8 +585,8 @@ void NindFile::putSIntLat(const signed int int4)
         m_wPtr[-3] = ((int4>>16)&0x1F)|0xC0;
         return;
     }
+    if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (P) " + m_fileName);
     m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (P) " + m_fileName);
     //de -2^27 a -2^20-1 et de 2^20 a 2^27-1 : de -134217728 a -1048577 et de 1048576 a 134217727
     if (int4 >= -0x8000000 && int4 < 0x8000000) {
         m_wPtr[-1] = (int4)&0xFF;
@@ -549,8 +595,8 @@ void NindFile::putSIntLat(const signed int int4)
         m_wPtr[-4] = ((int4>>24)&0x0F)|0xE0;
         return;
     }
+     if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (Q) " + m_fileName);
      m_wPtr += 1;
-    if (m_wPtr > m_wbufferEnd) throw OutWriteBufferException("in write buffer (Q) " + m_fileName);
     //de -2^31 a -2^27-1 et de 2^27 a 2^31-1 : de -2147483648 a -134217729 et de 134217728 a 2147483647
     m_wPtr[-1] = (int4)&0xFF;
     m_wPtr[-2] = (int4>>8)&0xFF;
@@ -565,7 +611,7 @@ void NindFile::putString(const string &str)
 {
     if (str.length() > 254) throw OutWriteBufferException("String length " + m_fileName);
     const unsigned char stringLen = str.length();
-    if (m_wPtr + stringLen + 1 > m_wbufferEnd) throw OutWriteBufferException("in write buffer (R) " + m_fileName);
+    if (m_wbufferEnd - m_wPtr < stringLen + 1) throw OutWriteBufferException("in write buffer (R) " + m_fileName);
     //ecrit la taille de la chaine
     (*m_wPtr++) = stringLen;
     //ecrit la chaine
@@ -579,7 +625,7 @@ void NindFile::putStringAsBytes(const string &str)
 {
     if (str.length() > 255) throw OutWriteBufferException("String length " + m_fileName);
     const unsigned char stringLen = str.length();
-    if (m_wPtr + stringLen > m_wbufferEnd) throw OutWriteBufferException("in write buffer (S) " + m_fileName);
+    if (m_wbufferEnd - m_wPtr < stringLen) throw OutWriteBufferException("in write buffer (S) " + m_fileName);
     //ecrit la chaine
     memcpy(m_wPtr, (unsigned char*)str.c_str(), stringLen);
     m_wPtr += stringLen;
@@ -592,6 +638,8 @@ void NindFile::writeBuffer(const unsigned int position,
                            const unsigned int length)
 {
     const unsigned int size = (length == 0) ? (m_wPtr - m_wbuffer) : length;
+    if ((uint64_t)position + size > (uint64_t)(m_wbufferEnd - m_wbuffer))
+        throw OutWriteBufferException("in write buffer (W) " + m_fileName);
     const unsigned int writeSize =  fwrite(m_wbuffer + position, 1, size, m_file);
     fflush(m_file);
     if (writeSize != size) throw WriteFileException(m_fileName);

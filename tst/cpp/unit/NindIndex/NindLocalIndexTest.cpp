@@ -1,7 +1,7 @@
 #include "NindIndex/NindLocalIndex.h"
 #include "NindExceptions.h"
 #include "TestTempDir.h"
-#include <gtest/gtest.h>
+#include "doctest.h"
 #include <list>
 #include <set>
 #include <string>
@@ -14,7 +14,7 @@ typedef NindLocalIndex::Localisation Localisation;
 const NindIndex::Identification kNoCheck(0, 0);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, SetThenGetLocalDefRoundTrips) {
+TEST_CASE("NindLocalIndexTest.SetThenGetLocalDefRoundTrips") {
     TestTempDir tmp;
     NindLocalIndex index(tmp.file("basic"), true, kNoCheck, 8);
 
@@ -27,26 +27,26 @@ TEST(NindLocalIndexTest, SetThenGetLocalDefRoundTrips) {
     index.setLocalDef(42, written, kNoCheck);
 
     list<Term> read;
-    ASSERT_TRUE(index.getLocalDef(42, read));
-    ASSERT_EQ(2u, read.size());
+    REQUIRE(index.getLocalDef(42, read));
+    REQUIRE_EQ(2u, read.size());
     list<Term>::const_iterator termIt = read.begin();
-    EXPECT_EQ(5u, termIt->term);
-    EXPECT_EQ(1, termIt->cg);
-    ASSERT_EQ(2u, termIt->localisation.size());
+    CHECK_EQ(5u, termIt->term);
+    CHECK_EQ(1, termIt->cg);
+    REQUIRE_EQ(2u, termIt->localisation.size());
     list<Localisation>::const_iterator locIt = termIt->localisation.begin();
-    EXPECT_EQ(0u, locIt->position);
-    EXPECT_EQ(4u, locIt->length);
+    CHECK_EQ(0u, locIt->position);
+    CHECK_EQ(4u, locIt->length);
     ++locIt;
-    EXPECT_EQ(10u, locIt->position);
-    EXPECT_EQ(4u, locIt->length);
+    CHECK_EQ(10u, locIt->position);
+    CHECK_EQ(4u, locIt->length);
     ++termIt;
-    EXPECT_EQ(9u, termIt->term);
-    EXPECT_EQ(2, termIt->cg);
-    ASSERT_EQ(1u, termIt->localisation.size());
-    EXPECT_EQ(20u, termIt->localisation.front().position);
+    CHECK_EQ(9u, termIt->term);
+    CHECK_EQ(2, termIt->cg);
+    REQUIRE_EQ(1u, termIt->localisation.size());
+    CHECK_EQ(20u, termIt->localisation.front().position);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, GetLocalLengthCountsDistinctTermEntries) {
+TEST_CASE("NindLocalIndexTest.GetLocalLengthCountsDistinctTermEntries") {
     // getLocalLength counts the number of term entries in the document, not
     // the total number of localisations across them.
     TestTempDir tmp;
@@ -60,11 +60,11 @@ TEST(NindLocalIndexTest, GetLocalLengthCountsDistinctTermEntries) {
     index.setLocalDef(1, written, kNoCheck);
 
     unsigned int length = 0;
-    ASSERT_TRUE(index.getLocalLength(1, length));
-    EXPECT_EQ(2u, length);
+    REQUIRE(index.getLocalLength(1, length));
+    CHECK_EQ(2u, length);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, GetTermIdentsReturnsUniqueTermSet) {
+TEST_CASE("NindLocalIndexTest.GetTermIdentsReturnsUniqueTermSet") {
     TestTempDir tmp;
     NindLocalIndex index(tmp.file("termidents"), true, kNoCheck, 8);
     list<Term> written;
@@ -75,20 +75,20 @@ TEST(NindLocalIndexTest, GetTermIdentsReturnsUniqueTermSet) {
     index.setLocalDef(1, written, kNoCheck);
 
     set<unsigned int> idents;
-    ASSERT_TRUE(index.getTermIdents(1, idents));
-    EXPECT_EQ((set<unsigned int>{3, 7}), idents);
+    REQUIRE(index.getTermIdents(1, idents));
+    CHECK_EQ((set<unsigned int>{3, 7}), idents);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, UnknownExternalIdentReturnsFalse) {
+TEST_CASE("NindLocalIndexTest.UnknownExternalIdentReturnsFalse") {
     TestTempDir tmp;
     NindLocalIndex index(tmp.file("unknown"), true, kNoCheck, 8);
     list<Term> read;
-    EXPECT_FALSE(index.getLocalDef(999, read));
+    CHECK_FALSE(index.getLocalDef(999, read));
     unsigned int length = 123;
-    EXPECT_FALSE(index.getLocalLength(999, length));
+    CHECK_FALSE(index.getLocalLength(999, length));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, DocCountTracksDistinctExternalIdentsAndUpdatesDontDuplicate) {
+TEST_CASE("NindLocalIndexTest.DocCountTracksDistinctExternalIdentsAndUpdatesDontDuplicate") {
     TestTempDir tmp;
     NindLocalIndex index(tmp.file("doccount"), true, kNoCheck, 8);
     list<Term> term1;
@@ -98,14 +98,14 @@ TEST(NindLocalIndexTest, DocCountTracksDistinctExternalIdentsAndUpdatesDontDupli
     index.setLocalDef(100, term1, kNoCheck);
     index.setLocalDef(200, term1, kNoCheck);
     index.setLocalDef(300, term1, kNoCheck);
-    EXPECT_EQ(3u, index.getDocCount());
+    CHECK_EQ(3u, index.getDocCount());
 
     // Re-writing an existing external ident updates it in place, it is not a new doc.
     index.setLocalDef(100, term1, kNoCheck);
-    EXPECT_EQ(3u, index.getDocCount());
+    CHECK_EQ(3u, index.getDocCount());
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, EmptyLocalDefDeletesTheDocumentAndDecrementsCount) {
+TEST_CASE("NindLocalIndexTest.EmptyLocalDefDeletesTheDocumentAndDecrementsCount") {
     TestTempDir tmp;
     NindLocalIndex index(tmp.file("delete"), true, kNoCheck, 8);
     list<Term> term1;
@@ -113,15 +113,15 @@ TEST(NindLocalIndexTest, EmptyLocalDefDeletesTheDocumentAndDecrementsCount) {
     term1.back().localisation.push_back(Localisation(0, 1));
     index.setLocalDef(1, term1, kNoCheck);
     index.setLocalDef(2, term1, kNoCheck);
-    ASSERT_EQ(2u, index.getDocCount());
+    REQUIRE_EQ(2u, index.getDocCount());
 
     index.setLocalDef(1, list<Term>(), kNoCheck);
-    EXPECT_EQ(1u, index.getDocCount());
+    CHECK_EQ(1u, index.getDocCount());
     list<Term> read;
-    EXPECT_FALSE(index.getLocalDef(1, read));
+    CHECK_FALSE(index.getLocalDef(1, read));
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, TermIdentDeltaEncodingSurvivesNonMonotonicOrder) {
+TEST_CASE("NindLocalIndexTest.TermIdentDeltaEncodingSurvivesNonMonotonicOrder") {
     // Term idents inside one document are stored as signed deltas from the
     // previous one; make sure a non-trivial ordering round-trips correctly.
     TestTempDir tmp;
@@ -135,14 +135,14 @@ TEST(NindLocalIndexTest, TermIdentDeltaEncodingSurvivesNonMonotonicOrder) {
     index.setLocalDef(1, written, kNoCheck);
 
     list<Term> read;
-    ASSERT_TRUE(index.getLocalDef(1, read));
-    ASSERT_EQ(4u, read.size());
+    REQUIRE(index.getLocalDef(1, read));
+    REQUIRE_EQ(4u, read.size());
     int i = 0;
     for (list<Term>::const_iterator it = read.begin(); it != read.end(); ++it, ++i)
-        EXPECT_EQ(termIdents[i], it->term);
+        CHECK_EQ(termIdents[i], it->term);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, GrowsPastInitialBlocSizeAndStaysReadable) {
+TEST_CASE("NindLocalIndexTest.GrowsPastInitialBlocSizeAndStaysReadable") {
     TestTempDir tmp;
     NindLocalIndex index(tmp.file("grow"), true, kNoCheck, 2);
     for (unsigned int externalId = 0; externalId < 6; externalId++) {
@@ -151,15 +151,15 @@ TEST(NindLocalIndexTest, GrowsPastInitialBlocSizeAndStaysReadable) {
         written.back().localisation.push_back(Localisation(0, 1));
         index.setLocalDef(externalId, written, kNoCheck);
     }
-    EXPECT_EQ(6u, index.getDocCount());
+    CHECK_EQ(6u, index.getDocCount());
     for (unsigned int externalId = 0; externalId < 6; externalId++) {
         list<Term> read;
-        ASSERT_TRUE(index.getLocalDef(externalId, read)) << "externalId=" << externalId;
-        EXPECT_EQ(externalId, read.front().term);
+        { INFO("externalId=" << externalId); REQUIRE(index.getLocalDef(externalId, read)); }
+        CHECK_EQ(externalId, read.front().term);
     }
 }
 ////////////////////////////////////////////////////////////
-TEST(NindLocalIndexTest, PersistsAcrossReopenAsReaderWithMatchingIdentification) {
+TEST_CASE("NindLocalIndexTest.PersistsAcrossReopenAsReaderWithMatchingIdentification") {
     TestTempDir tmp;
     const string path = tmp.file("persist");
     const NindIndex::Identification identification(1, 111);
@@ -172,7 +172,7 @@ TEST(NindLocalIndexTest, PersistsAcrossReopenAsReaderWithMatchingIdentification)
     }
     NindLocalIndex reader(path, false, identification, 8);
     list<Term> read;
-    ASSERT_TRUE(reader.getLocalDef(42, read));
-    EXPECT_EQ(4u, read.front().term);
-    EXPECT_EQ(1u, reader.getDocCount());
+    REQUIRE(reader.getLocalDef(42, read));
+    CHECK_EQ(4u, read.front().term);
+    CHECK_EQ(1u, reader.getDocCount());
 }

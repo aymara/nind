@@ -179,11 +179,24 @@ protected:
     std::list<std::pair<uint64_t, unsigned int> > m_entriesBlocksMap;  //gestion des blocs d'entrejes
 
 private:
+    //non copiable (contient un NindFile)
+    NindPadFile(const NindPadFile &);
+    NindPadFile &operator=(const NindPadFile &);
+
     //retourne la position d'une entreje sans synchronisation
     uint64_t getJustEntryPos(const unsigned int ident);
 
     //ejtablit la carte des blocs d'entrejes
     void mapEntriesBlocks();
+
+    //vejrifie la cohejrence de l'en-teste fixe avec la taille du fichier
+    void checkHeader();
+
+    //vejrifie qu'un bloc d'entrejes et le chaînage vers le suivant restent dans le fichier
+    //(le bloc suivant est toujours aprehs le bloc courant : pas de bouclage possible)
+    void checkEntriesBlock(const uint64_t blockAddr,
+                           const unsigned int entriesNb,
+                           const uint64_t nextBlockAddr);
 
     //vejrifie la structure des spejcifiques
     void checkSpejcifiques();

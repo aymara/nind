@@ -20,31 +20,40 @@
 ////////////////////////////////////////////////////////////
 using namespace latecon::nindex;
 ////////////////////////////////////////////////////////////
-bool NindSignalCatcher::m_isUp = false;
-bool NindSignalCatcher::m_ctrlC = false;
+unsigned int NindSignalCatcher::m_depth = 0;
+volatile std::sig_atomic_t NindSignalCatcher::m_ctrlC = 0;
+void (*NindSignalCatcher::m_previousHandler)(int) = SIG_DFL;
 NindSignalCatcher* NindSignalCatcher::m_instance = 0;
 ////////////////////////////////////////////////////////////
-NindSignalCatcher::NindSignalCatcher() { 
-    signal(SIGINT, attrapeCtrlC); 
+NindSignalCatcher::NindSignalCatcher() {
 }
-// Return a pointer to the singleton class 
+// Return a pointer to the singleton class
 NindSignalCatcher* NindSignalCatcher::Instance() {
     if (m_instance == 0) m_instance = new NindSignalCatcher;
     return m_instance;
 }
-// Turn on the control-C catcher  
-void NindSignalCatcher::setCatcher() { 
-    m_isUp = true; 
+// Turn on the control-C catcher
+void NindSignalCatcher::setCatcher() {
+    if (m_depth++ != 0) return;
+    m_ctrlC = 0;
+    m_previousHandler = signal(SIGINT, attrapeCtrlC);
+    if (m_previousHandler == SIG_ERR) m_previousHandler = SIG_DFL;
 }
-// Turn off the control-C catcher, exit if control-C yet striked    
+// Turn off the control-C catcher, re-raise control-C if striked meanwhile
 void NindSignalCatcher::resetCatcher() {
-    if (m_ctrlC) exit(SIGINT);
-    m_isUp = false; 
+    if (m_depth == 0) return;
+    if (--m_depth != 0) return;
+    signal(SIGINT, m_previousHandler);
+    if (m_ctrlC) {
+        m_ctrlC = 0;
+        raise(SIGINT);
+    }
 }
-void NindSignalCatcher::attrapeCtrlC (int signum) {
-    if (signum == SIGINT) {
-        if (m_isUp) m_ctrlC = true;
-        else exit(SIGINT); }
-    else exit(signum); 
+bool NindSignalCatcher::isUp() {
+    return m_depth != 0;
+}
+// only async-signal-safe operations here
+void NindSignalCatcher::attrapeCtrlC (int) {
+    m_ctrlC = 1;
 }
 ////////////////////////////////////////////////////////////

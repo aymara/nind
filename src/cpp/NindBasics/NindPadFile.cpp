@@ -95,6 +95,7 @@ NindPadFile::NindPadFile(const string &fileName,
             m_specificsSize = m_file.getInt3();
             if (m_specificsSize != specificsSize)
                 throw NindPadFileException("NindPadFile::NindPadFile bad specifics size " + m_fileName);
+            checkHeader();
             //ejtablit la carte des blocs d'entrejes
             mapEntriesBlocks();
             //vejrifie la structure des spejcifiques
@@ -133,6 +134,7 @@ NindPadFile::NindPadFile(const string &fileName,
         m_file.readBuffer(TAILLE_ENTETE_FIXE);
         m_dataEntrySize = m_file.getInt1();
         m_specificsSize = m_file.getInt3();
+        checkHeader();
         //ejtablit la carte des blocs d'entrejes
         mapEntriesBlocks();
         //vejrifie la structure des spejcifiques
@@ -311,12 +313,41 @@ void NindPadFile::mapEntriesBlocks()
         const uint64_t addrBlocSuivant = m_file.getInt5();
         const unsigned int nombreIndex = m_file.getInt3();
         const uint64_t pos = m_file.getPos();
+        checkEntriesBlock(pos - TAILLE_TETE_INDEX, nombreIndex, addrBlocSuivant);
         const pair<uint64_t, unsigned int> entrejes(pos, nombreIndex);
         m_entriesBlocksMap.push_back(entrejes);
         if (addrBlocSuivant == 0) break;        //si pas d'extension, termine
         //saute au bloc d'indirection suivant
         m_file.setPos(addrBlocSuivant, SEEK_SET);    //pour aller au suivant
     }
+}
+////////////////////////////////////////////////////////////
+//vejrifie la cohejrence de l'en-teste fixe avec la taille du fichier
+void NindPadFile::checkHeader()
+{
+    if (m_dataEntrySize == 0)
+        throw NindPadFileException("NindPadFile::checkHeader null data entry size " + m_fileName);
+    //<enTeste> <blocIndirection>... <spejcifiques> <identification> : sinon, les positionnements
+    //relatifs ah la fin du fichier (SEEK_END) seraient avant le dejbut du fichier
+    const uint64_t minimumSize = (uint64_t)TAILLE_ENTETE_FIXE + TAILLE_TETE_INDEX + getSpecificsAndIdentificationSize();
+    if (m_file.getCurrentFileSize() < minimumSize)
+        throw NindPadFileException("NindPadFile::checkHeader file too small for its header " + m_fileName);
+}
+////////////////////////////////////////////////////////////
+//vejrifie qu'un bloc d'entrejes et le chaînage vers le suivant restent dans le fichier
+void NindPadFile::checkEntriesBlock(const uint64_t blockAddr,
+                                    const unsigned int entriesNb,
+                                    const uint64_t nextBlockAddr)
+{
+    const uint64_t fileSize = m_file.getCurrentFileSize();
+    const uint64_t queue = getSpecificsAndIdentificationSize();
+    const uint64_t blockEnd = blockAddr + TAILLE_TETE_INDEX + (uint64_t)entriesNb * m_dataEntrySize;
+    if (blockEnd + queue > fileSize)
+        throw NindPadFileException("NindPadFile::checkEntriesBlock block beyond end of file " + m_fileName);
+    if (nextBlockAddr == 0) return;
+    //un nouveau bloc est toujours ajoutej en fin de fichier, donc aprehs le bloc courant
+    if (nextBlockAddr < blockEnd || nextBlockAddr + TAILLE_TETE_INDEX + queue > fileSize)
+        throw NindPadFileException("NindPadFile::checkEntriesBlock bad next block address " + m_fileName);
 }
 ////////////////////////////////////////////////////////////
 //vejrifie la structure des spejcifiques
@@ -426,6 +457,7 @@ NindPadFile::PadFileStats NindPadFile::analysePadFile()
             throw NindPadFileException("NindPadFile::analysePadFile : pas FLAG_INDEXEJ " + m_fileName);
         const uint64_t addrBlocSuivant = m_file.getInt5();
         const unsigned int nombreIndex = m_file.getInt3();
+        checkEntriesBlock(addrIndex, nombreIndex, addrBlocSuivant);
         blocNum++;
         BlockStats block;
         block.blockAddr = addrIndex;

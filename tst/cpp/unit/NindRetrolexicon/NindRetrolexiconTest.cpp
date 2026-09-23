@@ -2,7 +2,7 @@
 #include "NindBasics/NindPadFile.h"
 #include "NindExceptions.h"
 #include "TestTempDir.h"
-#include <gtest/gtest.h>
+#include "doctest.h"
 #include <list>
 #include <string>
 using namespace latecon::nindex;
@@ -19,18 +19,18 @@ list<RetroWord> oneWord(const RetroWord &w) {
 }
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, SimpleWordRoundTrip) {
+TEST_CASE("NindRetrolexiconTest.SimpleWordRoundTrip") {
     TestTempDir tmp;
     NindRetrolexicon retro(tmp.file("simple"), true, kNoCheck, 8);
     retro.addRetroWords(oneWord(RetroWord(1, "alpha")), kNoCheck);
 
     list<string> components;
-    ASSERT_TRUE(retro.getComponents(1, components));
-    ASSERT_EQ(1u, components.size());
-    EXPECT_EQ("alpha", components.front());
+    REQUIRE(retro.getComponents(1, components));
+    REQUIRE_EQ(1u, components.size());
+    CHECK_EQ("alpha", components.front());
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, TwoComponentCompoundRoundTrip) {
+TEST_CASE("NindRetrolexiconTest.TwoComponentCompoundRoundTrip") {
     TestTempDir tmp;
     NindRetrolexicon retro(tmp.file("compound2"), true, kNoCheck, 8);
     retro.addRetroWords(oneWord(RetroWord(1, "alpha")), kNoCheck);
@@ -41,14 +41,14 @@ TEST(NindRetrolexiconTest, TwoComponentCompoundRoundTrip) {
     retro.addRetroWords(oneWord(RetroWord(3, /*identA=*/1, /*identS=*/2)), kNoCheck);
 
     list<string> components;
-    ASSERT_TRUE(retro.getComponents(3, components));
-    ASSERT_EQ(2u, components.size());
+    REQUIRE(retro.getComponents(3, components));
+    REQUIRE_EQ(2u, components.size());
     list<string>::const_iterator it = components.begin();
-    EXPECT_EQ("alpha", *it++);
-    EXPECT_EQ("beta", *it++);
+    CHECK_EQ("alpha", *it++);
+    CHECK_EQ("beta", *it++);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, ThreeComponentCompoundRoundTrip) {
+TEST_CASE("NindRetrolexiconTest.ThreeComponentCompoundRoundTrip") {
     TestTempDir tmp;
     NindRetrolexicon retro(tmp.file("compound3"), true, kNoCheck, 8);
     retro.addRetroWords(oneWord(RetroWord(1, "alpha")), kNoCheck);
@@ -58,37 +58,37 @@ TEST(NindRetrolexiconTest, ThreeComponentCompoundRoundTrip) {
     retro.addRetroWords(oneWord(RetroWord(5, /*identA=*/4, /*identS=*/3)), kNoCheck);  // alpha_beta_gamma
 
     list<string> components;
-    ASSERT_TRUE(retro.getComponents(5, components));
-    ASSERT_EQ(3u, components.size());
+    REQUIRE(retro.getComponents(5, components));
+    REQUIRE_EQ(3u, components.size());
     list<string>::const_iterator it = components.begin();
-    EXPECT_EQ("alpha", *it++);
-    EXPECT_EQ("beta", *it++);
-    EXPECT_EQ("gamma", *it++);
+    CHECK_EQ("alpha", *it++);
+    CHECK_EQ("beta", *it++);
+    CHECK_EQ("gamma", *it++);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, UnknownIdentReturnsFalse) {
+TEST_CASE("NindRetrolexiconTest.UnknownIdentReturnsFalse") {
     TestTempDir tmp;
     NindRetrolexicon retro(tmp.file("unknown"), true, kNoCheck, 8);
     retro.addRetroWords(oneWord(RetroWord(1, "alpha")), kNoCheck);
 
     list<string> components;
-    EXPECT_FALSE(retro.getComponents(999, components));
-    EXPECT_TRUE(components.empty());
+    CHECK_FALSE(retro.getComponents(999, components));
+    CHECK(components.empty());
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, ReAddingSameIdentOverwritesIt) {
+TEST_CASE("NindRetrolexiconTest.ReAddingSameIdentOverwritesIt") {
     TestTempDir tmp;
     NindRetrolexicon retro(tmp.file("overwrite"), true, kNoCheck, 8);
     retro.addRetroWords(oneWord(RetroWord(1, "alpha")), kNoCheck);
     retro.addRetroWords(oneWord(RetroWord(1, "omega")), kNoCheck);
 
     list<string> components;
-    ASSERT_TRUE(retro.getComponents(1, components));
-    ASSERT_EQ(1u, components.size());
-    EXPECT_EQ("omega", components.front());
+    REQUIRE(retro.getComponents(1, components));
+    REQUIRE_EQ(1u, components.size());
+    CHECK_EQ("omega", components.front());
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, GrowsPastInitialBlocSizeAndStaysReadable) {
+TEST_CASE("NindRetrolexiconTest.GrowsPastInitialBlocSizeAndStaysReadable") {
     TestTempDir tmp;
     // A definitions block of only 2 entries forces several block extensions
     // while adding 6 words, exercising NindPadFile's block-chaining.
@@ -99,13 +99,13 @@ TEST(NindRetrolexiconTest, GrowsPastInitialBlocSizeAndStaysReadable) {
     }
     for (unsigned int ident = 1; ident <= 6; ident++) {
         list<string> components;
-        ASSERT_TRUE(retro.getComponents(ident, components)) << "ident=" << ident;
-        ASSERT_EQ(1u, components.size());
-        EXPECT_EQ(string(lemmas[ident - 1]), components.front());
+        { INFO("ident=" << ident); REQUIRE(retro.getComponents(ident, components)); }
+        REQUIRE_EQ(1u, components.size());
+        CHECK_EQ(string(lemmas[ident - 1]), components.front());
     }
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, PersistsAcrossReopenAsReader) {
+TEST_CASE("NindRetrolexiconTest.PersistsAcrossReopenAsReader") {
     TestTempDir tmp;
     const string path = tmp.file("persist");
     {
@@ -116,17 +116,17 @@ TEST(NindRetrolexiconTest, PersistsAcrossReopenAsReader) {
     }
     NindRetrolexicon reader(path, false, kNoCheck, 8);
     list<string> components;
-    ASSERT_TRUE(reader.getComponents(3, components));
-    ASSERT_EQ(2u, components.size());
+    REQUIRE(reader.getComponents(3, components));
+    REQUIRE_EQ(2u, components.size());
     list<string>::const_iterator it = components.begin();
-    EXPECT_EQ("alpha", *it++);
-    EXPECT_EQ("beta", *it++);
+    CHECK_EQ("alpha", *it++);
+    CHECK_EQ("beta", *it++);
 }
 ////////////////////////////////////////////////////////////
-TEST(NindRetrolexiconTest, WritingOnAReaderThrows) {
+TEST_CASE("NindRetrolexiconTest.WritingOnAReaderThrows") {
     TestTempDir tmp;
     const string path = tmp.file("readonly");
     { NindRetrolexicon writer(path, true, kNoCheck, 8); }
     NindRetrolexicon reader(path, false, kNoCheck, 8);
-    EXPECT_THROW(reader.addRetroWords(oneWord(RetroWord(1, "alpha")), kNoCheck), NindRetrolexiconException);
+    CHECK_THROWS_AS(reader.addRetroWords(oneWord(RetroWord(1, "alpha")), kNoCheck), NindRetrolexiconException);
 }

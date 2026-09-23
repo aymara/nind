@@ -29,15 +29,23 @@ class DLLExportLexicon NindSignalCatcher {
 public:
     /**\brief Return a pointer to the singleton class */
     static NindSignalCatcher* Instance();
-    /**\brief Turn on the control-C catcher */    
+    /**\brief Turn on the control-C catcher (calls may be nested) */
     void setCatcher();
-    /**\brief Turn off the control-C catcher, exit if control-C yet striked */    
+    /**\brief Turn off the control-C catcher. When the outermost critical section ends, the
+     * SIGINT handler that was in place before is restored and, if control-C was striked
+     * meanwhile, SIGINT is raised again so that this handler (by default: terminate) sees it.
+     * An unbalanced call (no critical section open) does nothing. */
     void resetCatcher();
+    /**\brief True while a critical section is open (for tests) */
+    static bool isUp();
 protected:
-    NindSignalCatcher(); 
+    NindSignalCatcher();
 private:
-    static bool m_isUp;
-    static bool m_ctrlC;
+    //le gestionnaire n'est installej que pendant les sections critiques : hors de celles-ci,
+    //le traitement de SIGINT du processus (p. ex. KeyboardInterrupt de Python) n'est pas modifiej
+    static unsigned int m_depth;
+    static volatile std::sig_atomic_t m_ctrlC;
+    static void (*m_previousHandler)(int);
     static void attrapeCtrlC (int signum);
     static NindSignalCatcher* m_instance;
 };

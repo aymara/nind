@@ -75,7 +75,10 @@ NindLexiconIndex::NindLexiconIndex(const string &fileNameExtensionLess,
 {
     //la taille du bloc d'indirection du fichier reel est structurante
     //(indirectionBlocSize ne sert que pour la crejation du fichier lexique)
-    m_modulo = getFirstEntriesBlockSize(); 
+    m_modulo = getFirstEntriesBlockSize();
+    //c'est le modulo du hachage des mots : nul, il provoquerait une division par zejro
+    if (m_modulo == 0)
+        throw NindLexiconIndexException("NindLexiconIndex::NindLexiconIndex empty first indirection block : " + m_fileName);
     //l'identifiant de mot le plus eleve (pour l'ecrivain)
     getFileIdentification(m_identification);
     //initialisation du retro lexique, eventuellement
@@ -89,6 +92,8 @@ NindLexiconIndex::NindLexiconIndex(const string &fileNameExtensionLess,
 ////////////////////////////////////////////////////////////
 NindLexiconIndex::~NindLexiconIndex()
 {
+    //le retro lexique est allouej par le constructeur
+    delete m_nindRetrolexicon;
 }
 ////////////////////////////////////////////////////////////
 //brief add specified word in lexicon it doesn't still exist in,
@@ -99,8 +104,8 @@ NindLexiconIndex::~NindLexiconIndex()
 unsigned int NindLexiconIndex::addWord(const list<string> &components)
 {
     if (!m_isWriter) throw NindLexiconIndexException("NindLexiconIndex::addWord lexicon is not writable" + m_fileName);
-    //dejbut section critique ah protejger des control-C
-    m_file.beginCriticalSection();
+    //section critique ah protejger des control-C (refermeje sur tout chemin de sortie, exceptions comprises)
+    NindCriticalSection criticalSection(m_file);
     //identifiant du mot (simple ou composej) sous ensemble du mot examine
     unsigned int sousMotId = 0;
     //le compteur courant des identifiants du lexique
@@ -141,8 +146,6 @@ unsigned int NindLexiconIndex::addWord(const list<string> &components)
         if (m_withRetrolexicon && retroWords.size() != 0)
             m_nindRetrolexicon->addRetroWords(retroWords, m_identification);
     }
-    //fin section critique ah protejger des control-C
-    m_file.endCriticalSection();
     //retourne l'id du mot specifie
     return sousMotId;
 }

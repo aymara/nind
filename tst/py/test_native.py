@@ -2,6 +2,10 @@
 round-tripped writer->reader in-process, confirming the wheel's compiled
 C++ index stack is usable from Python.
 """
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 native = pytest.importorskip("nind._native")
@@ -83,3 +87,29 @@ def test_in_memory_lexicon(tmp_path):
 def test_errors_are_translated_to_nind_error(tmp_path):
     with pytest.raises(native.NindError):
         native.NindLexiconIndex(str(tmp_path / "does-not-exist"), False)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_ctrl_c_still_raises_keyboard_interrupt_after_using_indexes(tmp_path):
+    # Opening any nind file used to install a process-wide SIGINT handler that
+    # called exit(): Ctrl-C then killed the interpreter instead of raising
+    # KeyboardInterrupt. Run in a child process so a regression cannot kill pytest.
+    script = textwrap.dedent("""
+        import os, signal, sys
+        from nind import _native as native
+        lexicon = native.NindLexiconIndex(sys.argv[1], True, with_retrolexicon=True,
+                                           indirection_bloc_size=8, retro_indirection_bloc_size=8)
+        lexicon.add_word(["chat"])          # writes go through a critical section
+        try:
+            os.kill(os.getpid(), signal.SIGINT)
+            for _ in range(1000000):        # Python delivers KeyboardInterrupt between bytecodes
+                pass
+        except KeyboardInterrupt:
+            print("KeyboardInterrupt")
+            sys.exit(0)
+        sys.exit(3)
+    """)
+    result = subprocess.run([sys.executable, "-c", script, str(tmp_path / "corpus")],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert result.stdout.strip() == "KeyboardInterrupt"

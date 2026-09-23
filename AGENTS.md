@@ -12,8 +12,9 @@ Requires `NIND_DIST` environment variable to be set.
 - Change CMake generator: `./gbuild.sh -G Unix` (default is `Ninja`)
 
 ### Verification
-- Build and test (via `gbuild.sh` if generator supports it): `./gbuild.sh`
-- Manual test execution: `ctest` within the build directory (`build/<branch>/<mode>/nind`)
+- Build and run the unit tests (fails if a test fails): `./gbuild.sh -t ON`; under ASan/UBSan/LSan: `./gbuild.sh -a ON -t ON`
+- Manual test execution: `ctest --output-on-failure` within the build directory (`build/<branch>/<mode>-<asan>/nind`)
+- C++ unit tests (`tst/cpp/unit/`) use the vendored single-header doctest (`tst/cpp/unit/doctest.h`): no external test dependency.
 
 ## Architecture & Conventions
 

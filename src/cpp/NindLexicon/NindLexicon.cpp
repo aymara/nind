@@ -215,7 +215,11 @@ bool NindLexicon::integrityAndCounts(struct LexiconChar &lexiconChar)
         //verification
         map<unsigned int, std::pair<unsigned int, unsigned int> >::const_iterator idCWIt = retrolexiconCW.find(id);
         if (idCWIt == retrolexiconCW.end()) return false;
+        //une chaîne de composants ne peut pas estre plus longue que le nombre de mots composejs :
+        //au-delah, c'est un bouclage (lexique corrompu), sinon boucle infinie et liste sans limite
+        size_t chainLength = 0;
         while (true) {
+            if (++chainLength > retrolexiconCW.size()) return false;   //bouclage, erreur integrite
             const pair<unsigned int, unsigned int> &compoundWord = idCWIt->second;
             map<unsigned int, string>::const_iterator idSWIt = retrolexiconSW.find(compoundWord.second);
             if (idSWIt == retrolexiconSW.end()) return false;   //mot simple inconnu, erreur integrite

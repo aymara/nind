@@ -18,7 +18,8 @@ The `nind` wheel additionally bundles a compiled extension, `nind._native` (pybi
 Requires the `NIND_DIST` env var (install prefix). Build via the wrapper script, not raw `cmake`/`make` directly:
 
 ```
-NIND_DIST=/path/to/dist ./gbuild.sh              # Debug build (default), builds + runs ctest + installs
+NIND_DIST=/path/to/dist ./gbuild.sh              # Debug build (default), builds + installs
+./gbuild.sh -t ON                                 # also run ctest (unit tests) before installing; fails on test failure
 ./gbuild.sh -m Release                            # Release or RelWithDebInfo
 ./gbuild.sh -a ON                                 # with AddressSanitizer (+ UB/leak sanitizers where supported)
 ./gbuild.sh -n native                             # -march=native instead of generic tuning
@@ -26,9 +27,13 @@ NIND_DIST=/path/to/dist ./gbuild.sh              # Debug build (default), builds
 ./gbuild.sh -G Unix                               # use Unix Makefiles instead of Ninja
 ```
 
-Build artifacts land in `build/<git-branch>/<mode>/<project>` (isolated per branch/mode, so switching branches doesn't require a clean).
+Build artifacts land in `build/<git-branch>/<mode>-<asan>/<project>` (isolated per branch/mode, so switching branches doesn't require a clean).
 
-To run tests manually instead of via the full `gbuild.sh` cycle: `ctest` from inside that build directory (only applies to generators that produce a `make test`/ctest target, e.g. `Unix Makefiles`; Ninja builds skip the automatic test step in `gbuild.sh`).
+To run tests manually instead of via the full `gbuild.sh` cycle: `ctest --output-on-failure` from inside that build directory.
+
+C++ unit tests live in `tst/cpp/unit/<Module>/` (one executable per library, one ctest entry each) and use **doctest**, vendored as the single header `tst/cpp/unit/doctest.h` (v2.4.12) — no system package or download needed, so they are always built. Each executable accepts doctest options, e.g. `NindIndexUnitTests -tc='NindIndexRobustness*' -s`. Corrupt/hostile-input tests live in the `*RobustnessTest.cpp` files: they patch or byte-by-byte corrupt files produced by the writers and require every read to either succeed or throw a `FileException` — run them under `-a ON` so ASan/UBSan/LSan turn any memory error, UB or leak into a failure. (`-a ON` needs the GCC sanitizer runtimes — `libasan`, `libubsan`, `liblsan` packages on RHEL-like systems.)
+
+Memory-safety conventions in the C++ core (keep them when touching it): readers must never trust a length/offset/count read from a file — bound it against the buffer (`NindFile::get*` check before advancing) or the real file size (`NindFile::getCurrentFileSize()`); byte assembly is done in `uint32_t`/`uint64_t` (never `int`, which overflows); chains read from files (indirection blocks, compound words) must be provably finite; `NindFile`/`NindPadFile` are non-copyable; critical sections use the RAII `NindCriticalSection`, never raw `beginCriticalSection`/`endCriticalSection`.
 
 `-DDEBUG_NIND` is added automatically in `Debug` and `RelWithDebInfo` modes (and in `Release` if configured with `-DWITH_DEBUG_MESSAGES=ON`) to enable conditional debug output.
 
@@ -89,7 +94,9 @@ Design docs are referenced by internal report codes in file header comments (e.g
 
 Linker flags (`-Wl,-z,defs,--no-as-needed`) are set project-wide because these libraries are loaded dynamically via a plugin/factory mechanism, so symbols must stay visible even when not directly referenced by the linking binary — don't "clean up" apparently-unused exports without checking for this.
 
-`tst/cpp/` mirrors the module structure for test binaries, but note `tst/cpp/CMakeLists.txt` currently only builds `NindIndex`, `NindSearch`, and `NindAmose` tests — the `NindLexicon`, `NindTests`, and `NindBasics` test subdirectories are commented out.
+`tst/cpp/` mirrors the module structure for test binaries, but note `tst/cpp/CMakeLists.txt` currently only builds the legacy `NindIndex`, `NindSearch`, and `NindAmose` test programs (not registered with ctest) — the `NindLexicon`, `NindTests`, and `NindBasics` legacy subdirectories are commented out. The ctest-registered unit tests are in `tst/cpp/unit/` (always built, see above).
+
+`src/cpp/NindIndex/NindLexiconIndexK.{h,cpp}` is dead code: not in any CMake target, and it no longer compiles against the current `NindPadFile` API.
 
 ### Python package (`src/py/nind/`)
 
