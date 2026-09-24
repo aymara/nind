@@ -5,3 +5,5 @@ build/
 Dist*/
 docs/_build/
 bench/results/
+bench/msmarco/*
+!bench/msmarco/*.py
