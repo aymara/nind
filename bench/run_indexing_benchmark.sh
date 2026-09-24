@@ -45,12 +45,16 @@ IFS=',' read -ra SIZES <<< "$SIZES_CSV"
 for size in "${SIZES[@]}"; do
     echo "=== size=$size ===" >&2
     run_dir="$RESULTS_DIR/msmarco_${size}"
-    rm -rf "$run_dir"
     mkdir -p "$run_dir"
     docs_file="$run_dir/docs.txt"
-
     conversion_log="$run_dir/convert.log"
-    python3 "$SCRIPT_DIR/msmarco/convert_to_nind.py" "$COLLECTION_TSV" "$docs_file" --limit "$size" 2> "$conversion_log"
+
+    # the run dir is shared with run_bulk_indexing_benchmark.sh: only remove
+    # this benchmark's own index files, and reuse an existing conversion
+    rm -f "$run_dir"/docs.nind*
+    if [[ ! -s "$docs_file" || ! -s "$conversion_log" ]]; then
+        python3 "$SCRIPT_DIR/msmarco/convert_to_nind.py" "$COLLECTION_TSV" "$docs_file" --limit "$size" 2> "$conversion_log"
+    fi
     stats_line="$(cat "$conversion_log")"
     docs=$(grep -oP 'docs=\K[0-9]+' <<< "$stats_line")
     tokens=$(grep -oP 'tokens=\K[0-9]+' <<< "$stats_line")
