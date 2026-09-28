@@ -26,6 +26,7 @@
 #include "NindExceptions.h"
 #include <string>
 #include <list>
+#include <vector>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
@@ -78,6 +79,26 @@ public:
     bool getComponents(const unsigned int ident,
                        std::list<std::string> &components);
     
+    /**\brief One word of the lexicon as stored : a simple word (prefixIdent = 0),
+    * or a compound word made of the word prefixIdent followed by the simple word lastComponent */
+    struct Entry {
+        unsigned int ident;
+        unsigned int prefixIdent;
+        std::string lastComponent;
+        Entry(): ident(0), prefixIdent(0), lastComponent() {}
+        Entry(const unsigned int id, const unsigned int prefixId, const std::string &last):
+            ident(id), prefixIdent(prefixId), lastComponent(last) {}
+        ~Entry() {}
+    };
+
+    /**\brief List every word of the lexicon by walking the whole file (no retro lexicon needed).
+    * The prefix of a compound word always has a smaller ident than the compound itself,
+    * so the components of every word can be rebuilt in a single pass over the result.
+    *\param entries receives all words, in increasing ident order
+    *\throws NindLexiconIndexException if an ident is out of range or duplicated,
+    * or a prefix doesn't precede its compound word */
+    void getEntries(std::vector<Entry> &entries);
+
     /**\brief get retrolexicon file name
     * \return file name of retrolexicon */
     std::string getRetrolexiconFileName();

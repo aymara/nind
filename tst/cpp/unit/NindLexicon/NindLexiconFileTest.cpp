@@ -109,3 +109,14 @@ TEST_CASE("NindLexiconFileTest.OpeningMissingFileAsReaderThrows") {
     TestTempDir tmp;
     CHECK_THROWS_AS(NindLexiconFile(tmp.file("missing.nindlexicon"), false), NindLexiconException);
 }
+////////////////////////////////////////////////////////////
+TEST_CASE("NindLexiconFileTest.SecondWriterOnTheSameFileIsRefused") {
+    TestTempDir tmp;
+    const string path = tmp.file("locked.nindlexicon");
+    {
+        NindLexiconFile writer(path, true);
+        CHECK_THROWS_AS(NindLexiconFile(path, true), NindLexiconException);
+        NindLexiconFile reader(path, false);         //readers are never blocked
+    }
+    NindLexiconFile writer(path, true);              //free again once the writer is closed
+}

@@ -271,3 +271,71 @@ def test_local_index_set_local_defs_arrays_rejects_bad_offsets(tmp_path):
         with pytest.raises(ValueError):
             local_index.set_local_defs_arrays(array("I", [5, 6]), array("I", ends), occ, occ, occ, identification)
     assert local_index.get_doc_count() == 0
+
+
+def build_shard(base, docs, identification_holder=None):
+    """docs: {doc_id: [word, ...]}, written like NindIndexer does."""
+    words = sorted({w for ws in docs.values() for w in ws})
+    lexicon = native.NindLexiconIndex(base, True, indirection_bloc_size=max(1, len(words)))
+    ids = {w: lexicon.add_word([w]) for w in words}
+    identification = lexicon.get_identification()
+    postings = {}
+    for doc_id in sorted(docs):
+        for w in docs[doc_id]:
+            postings.setdefault(ids[w], {}).setdefault(doc_id, 0)
+            postings[ids[w]][doc_id] += 1
+    term_index = native.NindTermIndex(base, True, identification, 0, indirection_bloc_size=len(words) + 1)
+    for tid in sorted(postings):
+        docs_of_term = sorted(postings[tid].items())
+        term_index.set_term_def_arrays(tid, array("I", [d for d, _ in docs_of_term]),
+                                       array("I", [f for _, f in docs_of_term]), identification)
+    local_index = native.NindLocalIndex(base, True, identification, indirection_bloc_size=len(docs) + 1)
+    for doc_id in sorted(docs):
+        term_ids = [ids[w] for w in docs[doc_id]]
+        local_index.set_local_def_arrays(doc_id, array("I", term_ids), array("I", range(len(term_ids))),
+                                         array("I", [1]) * len(term_ids), identification)
+    del lexicon, term_index, local_index
+
+
+def test_lexicon_index_get_entries_and_local_index_get_doc_idents(tmp_path):
+    base = str(tmp_path / "corpus")
+    lexicon = native.NindLexiconIndex(base, True, indirection_bloc_size=8)
+    lexicon.add_word(["alpha", "beta"])
+    lexicon.add_word(["gamma"])
+    assert lexicon.get_entries() == [(1, 0, "alpha"), (2, 0, "beta"), (3, 1, "beta"), (4, 0, "gamma")]
+    local_index = native.NindLocalIndex(base, True, lexicon.get_identification(), indirection_bloc_size=8)
+    for doc_id in (30, 10, 20):
+        local_index.set_local_def_arrays(doc_id, array("I", [4]), array("I", [0]), array("I", [1]),
+                                         lexicon.get_identification())
+    assert local_index.get_doc_idents() == [10, 20, 30]
+
+
+def test_merge_indexes(tmp_path):
+    build_shard(str(tmp_path / "shard0"), {0: ["cat", "dog"], 2: ["cat"]})
+    build_shard(str(tmp_path / "shard1"), {1: ["dog", "eel", "dog"]})
+    stats = native.merge_indexes([str(tmp_path / "shard0"), str(tmp_path / "shard1")], str(tmp_path / "merged"))
+    assert (stats.shards_nb, stats.words_nb, stats.terms_nb, stats.docs_nb) == (2, 3, 3, 3)
+
+    base = str(tmp_path / "merged")
+    lexicon = native.NindLexiconIndex(base, False)
+    identification = lexicon.get_identification()
+    assert identification == stats.identification
+    term_index = native.NindTermIndex(base, False, identification, 0)
+    dog = term_index.get_term_def(lexicon.get_word_id(["dog"]))
+    assert [(d.ident, d.frequency) for d in dog[0].documents] == [(0, 1), (1, 2)]
+    assert dog[0].frequency == 3
+    local_index = native.NindLocalIndex(base, False, identification)
+    assert local_index.get_doc_idents() == [0, 1, 2]
+    doc1 = local_index.get_local_def(1)
+    assert sorted((t.term, [l.position for l in t.localisation]) for t in doc1) == \
+        sorted([(lexicon.get_word_id(["dog"]), [0, 2]), (lexicon.get_word_id(["eel"]), [1])])
+
+
+def test_merge_indexes_rejects_overlapping_shards_and_existing_target(tmp_path):
+    build_shard(str(tmp_path / "shard0"), {0: ["cat"]})
+    build_shard(str(tmp_path / "shard1"), {0: ["dog"]})
+    with pytest.raises(native.NindError):
+        native.merge_indexes([str(tmp_path / "shard0"), str(tmp_path / "shard1")], str(tmp_path / "merged"))
+    assert not list(tmp_path.glob("merged.*"))      # nothing written, no partial index left
+    with pytest.raises(native.NindError):
+        native.merge_indexes([str(tmp_path / "shard0")], str(tmp_path / "shard1"))

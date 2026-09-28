@@ -301,6 +301,21 @@ unsigned int NindLocalIndex::getDocCount()
     return m_file.getInt4();
 }
 ////////////////////////////////////////////////////////////
+//brief List the (external) idents of all documents of the collection
+//param docIdents receives the idents, in increasing order */
+void NindLocalIndex::getDocIdents(vector<unsigned int> &docIdents)
+{
+    docIdents.clear();
+    //un lecteur prend en compte les documents ajoutejs depuis son ouverture
+    if (!m_isWriter) {
+        getSpecifics();
+        fillDocIdTradExtInt(m_currIdent + 1, m_file.getInt4());
+    }
+    docIdents.reserve(m_docIdTradExtInt.size());
+    for (map<unsigned int, unsigned int>::const_iterator it = m_docIdTradExtInt.begin(); it != m_docIdTradExtInt.end(); it++)
+        docIdents.push_back((*it).first);
+}
+////////////////////////////////////////////////////////////
 //brief write specifics footer and identification into write buffer
 //param fileIdentification unique identification of file */
 void NindLocalIndex::writeSpecificsAndIdentification(const Identification &fileIdentification)

@@ -204,6 +204,23 @@ void NindTermIndex::setTermDef(const unsigned int ident,
     setDefinition(ident);
 }
 ////////////////////////////////////////////////////////////
+//brief Rewrite only the specifics (and identification), leaving every term definition unchanged
+//param specifics list of specific unsigned int
+//param fileIdentification unique identification of lexicon */
+void NindTermIndex::setSpecificWords(const list<unsigned int> &specifics,
+                                     const Identification &fileIdentification)
+{
+    if (!m_isWriter)
+        throw NindTermIndexException("NindTermIndex::setSpecificWords termindex is not writable " + m_fileName);
+    //section critique ah protejger des control-C (refermeje sur tout chemin de sortie, exceptions comprises)
+    NindCriticalSection criticalSection(m_file);
+    m_file.createBuffer(getSpecificsAndIdentificationSize());
+    writeSpecificsAndIdentification(specifics, fileIdentification);
+    //les spejcifiques et l'identification sont toujours en queue de fichier
+    m_file.setPos(-(long int)getSpecificsAndIdentificationSize(), SEEK_END);
+    m_file.writeBuffer();
+}
+////////////////////////////////////////////////////////////
 //brief write specifics footer and identification into write buffer
 //param specifics list of specific unsigned int
 //param fileIdentification unique identification of file */

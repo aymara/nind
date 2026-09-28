@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string>
 #include <list>
+#include <vector>
 #include <map>
 #include <set>
 ////////////////////////////////////////////////////////////
@@ -94,6 +95,10 @@ public:
                      const std::list<struct Term> &localDef,
                      const Identification &fileIdentification);
     
+    /**\brief List the (external) idents of all documents of the collection
+    *\param docIdents receives the idents, in increasing order */
+    void getDocIdents(std::vector<unsigned int> &docIdents);
+
     /**\brief number of documents in the collection 
      * \return number of documents in the collection */
     unsigned int getDocCount() ; 

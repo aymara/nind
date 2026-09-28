@@ -46,6 +46,12 @@ public:
     *\return true if success, false otherwise */
     bool open(const std::string &accessMode);
 
+    /**\brief Take an advisory exclusive lock on the open file, without waiting: a second
+    * writer on the same file (in any process) is refused instead of silently corrupting it.
+    * The lock is released when the file is closed. No-op (always true) on Windows.
+    *\return true if the lock was taken, false if another open of the file holds it */
+    bool lockExclusive();
+
     /**\brief Close file associated with. Success in any case. */
     void close();
 

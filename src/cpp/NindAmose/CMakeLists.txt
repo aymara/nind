@@ -8,6 +8,8 @@ SET(NindAmose_LIB_SRCS
   NindTermAmose.cpp
   NindLocalAmose.h
   NindLocalAmose.cpp
+  NindAmoseMerge.h
+  NindAmoseMerge.cpp
 )
 
 add_library(NindAmose SHARED ${NindAmose_LIB_SRCS})
@@ -22,4 +24,5 @@ install(FILES
     NindTermAmose.h 
     NindLocalAmose.h 
     NindLexiconAmose.h
+    NindAmoseMerge.h
   DESTINATION include/NindAmose)

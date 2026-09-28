@@ -21,6 +21,7 @@
 #include "NindLexiconIndex.h"
 #include "NindRetrolexicon/NindRetrolexicon.h"
 #include <iostream>
+#include <algorithm>
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
@@ -51,6 +52,10 @@ using namespace std;
 #define TAILLE_SPEJCIFIQUES 0
 ////////////////////////////////////////////////////////////
 static unsigned int clef(const string &mot);
+static bool entryIdentInfejrieur(const NindLexiconIndex::Entry &entry1, const NindLexiconIndex::Entry &entry2)
+{
+    return entry1.ident < entry2.ident;
+}
 ////////////////////////////////////////////////////////////
 //brief Creates NindLexiconIndex.
 //param fileNameExtensionLess absolute path file name without extension
@@ -318,6 +323,56 @@ void NindLexiconIndex::setDefinitionWords(const list<Mot> &dejfinition,
     writeIdentification(lexiconIdentification);
     //4) ecrit la dejfinition du mot et gere le fichier
     setDefinition(ident);   
+}
+////////////////////////////////////////////////////////////
+//brief List every word of the lexicon by walking the whole file (no retro lexicon needed).
+//param entries receives all words, in increasing ident order
+//throws NindLexiconIndexException if an ident is out of range or duplicated,
+//or a prefix doesn't precede its compound word */
+void NindLexiconIndex::getEntries(vector<Entry> &entries)
+{
+    entries.clear();
+    //un lecteur prend en compte les mots ajoutejs depuis son ouverture
+    if (!m_isWriter) getFileIdentification(m_identification);
+    const unsigned int wordsNb = m_identification.lexiconWordsNb;
+    //tous les mots sont dans le premier bloc d'indirection (clef modulo sa taille)
+    for (unsigned int ident = 0; ident < m_modulo; ident++) {
+        const bool existe = getDefinition(ident);
+        if (!existe) continue;
+        //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
+        if (m_file.getInt1() != FLAG_DEJFINITION)
+            throw NindLexiconIndexException("NindLexiconIndex::getEntries A : " + m_fileName);
+        if (m_file.getInt3() != ident)
+            throw NindLexiconIndexException("NindLexiconIndex::getEntries B : " + m_fileName);
+        const unsigned int longueurDonnejes = m_file.getInt3();
+        m_file.setEndInBuffer(longueurDonnejes);
+        while (!m_file.endOfInBuffer()) {
+            //<motSimple> <identifiantS> <nbreComposejs> <composejs>
+            const string motSimple = m_file.getString();
+            const unsigned int identifiantS = m_file.getInt4();
+            if (identifiantS == 0 || identifiantS > wordsNb)
+                throw NindLexiconIndexException("NindLexiconIndex::getEntries ident out of range : " + m_fileName);
+            entries.push_back(Entry(identifiantS, 0, motSimple));
+            const unsigned int nbreComposejs = m_file.getUIntLat();
+            unsigned int identifiantC = identifiantS;
+            for (unsigned int i = 0; i != nbreComposejs; i++) {
+                //<identifiantA> <identifiantRelC>
+                const unsigned int identifiantA = m_file.getInt4();
+                identifiantC += m_file.getSIntLat();
+                if (identifiantC == 0 || identifiantC > wordsNb)
+                    throw NindLexiconIndexException("NindLexiconIndex::getEntries ident out of range : " + m_fileName);
+                //le prejfixe est toujours crejej avant le mot composej
+                if (identifiantA == 0 || identifiantA >= identifiantC)
+                    throw NindLexiconIndexException("NindLexiconIndex::getEntries bad prefix : " + m_fileName);
+                entries.push_back(Entry(identifiantC, identifiantA, motSimple));
+            }
+        }
+    }
+    sort(entries.begin(), entries.end(), entryIdentInfejrieur);
+    for (size_t i = 1; i < entries.size(); i++) {
+        if (entries[i].ident == entries[i - 1].ident)
+            throw NindLexiconIndexException("NindLexiconIndex::getEntries duplicated ident : " + m_fileName);
+    }
 }
 ////////////////////////////////////////////////////////////
 //calcule la clef de hachage

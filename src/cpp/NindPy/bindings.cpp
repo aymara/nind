@@ -28,6 +28,7 @@
 #include "NindIndex/NindLexiconIndex.h"
 #include "NindIndex/NindTermIndex.h"
 #include "NindIndex/NindLocalIndex.h"
+#include "NindIndex/NindIndexMerge.h"
 #include "NindExceptions.h"
 ////////////////////////////////////////////////////////////
 namespace py = pybind11;
@@ -195,6 +196,16 @@ PYBIND11_MODULE(_native, m) {
             return py::cast(components);
         }, py::arg("ident"))
         .def("get_retrolexicon_file_name", &NindLexiconIndex::getRetrolexiconFileName)
+        // every word as (ident, prefix_ident, last_component), in increasing ident order:
+        // prefix_ident is 0 for a simple word, else the ident of the compound word's prefix
+        .def("get_entries", [](NindLexiconIndex &self) {
+            std::vector<NindLexiconIndex::Entry> entries;
+            self.getEntries(entries);
+            py::list result;
+            for (size_t i = 0; i < entries.size(); i++)
+                result.append(py::make_tuple(entries[i].ident, entries[i].prefixIdent, entries[i].lastComponent));
+            return result;
+        })
         .def("get_file_name", &NindPadFile::getFileName)
         .def("analyse_pad_file", &NindPadFile::analysePadFile)
         .def("analyse_index", &NindIndex::analyseIndex);
@@ -375,9 +386,44 @@ PYBIND11_MODULE(_native, m) {
         }, py::arg("idents"), py::arg("ends"), py::arg("term_ids"), py::arg("positions"),
            py::arg("lengths"), py::arg("file_identification"), py::arg("cg") = 0)
         .def("get_doc_count", &NindLocalIndex::getDocCount)
+        .def("get_doc_idents", [](NindLocalIndex &self) {
+            std::vector<unsigned int> docIdents;
+            self.getDocIdents(docIdents);
+            return docIdents;
+        })
         .def("get_file_name", &NindPadFile::getFileName)
         .def("analyse_pad_file", &NindPadFile::analysePadFile)
         .def("analyse_index", &NindIndex::analyseIndex);
+
+    // ---- NindIndexMerge -------------------------------------------------
+    py::class_<NindIndexMerge::Stats>(m, "MergeStats")
+        .def_readonly("shards_nb", &NindIndexMerge::Stats::shardsNb)
+        .def_readonly("words_nb", &NindIndexMerge::Stats::wordsNb)
+        .def_readonly("terms_nb", &NindIndexMerge::Stats::termsNb)
+        .def_readonly("docs_nb", &NindIndexMerge::Stats::docsNb)
+        .def_readonly("identification", &NindIndexMerge::Stats::identification)
+        .def("__repr__", [](const NindIndexMerge::Stats &stats) {
+            return "MergeStats(shards_nb=" + std::to_string(stats.shardsNb) + ", words_nb=" + std::to_string(stats.wordsNb) +
+                   ", terms_nb=" + std::to_string(stats.termsNb) + ", docs_nb=" + std::to_string(stats.docsNb) + ")";
+        });
+
+    // Offline merge of index shards (disjoint sets of documents, no term specifics) into
+    // a new index. Indirection block sizes of 0 are sized to fit. Releases the GIL.
+    m.def("merge_indexes", [](const std::vector<std::string> &shards, const std::string &target,
+                              const bool withRetrolexicon, const unsigned int lexiconIndirectionBlocSize,
+                              const unsigned int retroIndirectionBlocSize, const unsigned int termIndirectionBlocSize,
+                              const unsigned int localIndirectionBlocSize) {
+        NindIndexMerge::Options options;
+        options.withRetrolexicon = withRetrolexicon;
+        options.lexiconIndirectionBlocSize = lexiconIndirectionBlocSize;
+        options.retroIndirectionBlocSize = retroIndirectionBlocSize;
+        options.termIndirectionBlocSize = termIndirectionBlocSize;
+        options.localIndirectionBlocSize = localIndirectionBlocSize;
+        py::gil_scoped_release release;
+        return NindIndexMerge(shards, options).merge(target);
+    }, py::arg("shards"), py::arg("target"), py::arg("with_retrolexicon") = false,
+       py::arg("lexicon_indirection_bloc_size") = 0, py::arg("retro_indirection_bloc_size") = 0,
+       py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0);
 
     // ---- NindRetrolexicon -----------------------------------------------
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")

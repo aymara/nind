@@ -16,7 +16,7 @@ IDENTIFICATION = native.Identification(lexicon_words_nb=1, lexicon_time=1)
 
 def write_term_index(index_dir, inverted_index):
     indexer = NindIndexer(str(index_dir), prefix="corpus")
-    indexer._write_term_index(inverted_index, IDENTIFICATION)
+    indexer._write_term_index(inverted_index, IDENTIFICATION, str(index_dir / "corpus"))
     return str(index_dir / "corpus.nindtermindex")
 
 

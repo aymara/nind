@@ -19,7 +19,7 @@ IDENTIFICATION = native.Identification(lexicon_words_nb=1, lexicon_time=1)
 
 def write_local_index(index_dir, corpus_tokens, term_to_id):
     indexer = NindIndexer(str(index_dir), prefix="corpus")
-    indexer._write_local_index(corpus_tokens, term_to_id, IDENTIFICATION)
+    indexer._write_local_index(corpus_tokens, term_to_id, IDENTIFICATION, 0, str(index_dir / "corpus"))
     return str(index_dir / "corpus.nindlocalindex")
 
 

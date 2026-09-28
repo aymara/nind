@@ -169,6 +169,10 @@ public:
     /**\brief get file name
     * \return file name */
     std::string getFileName();
+
+    /**\brief get size of specific datas, as read from the file (or given to a neo writer)
+    * \return size in bytes of specific datas */
+    unsigned int getSpecificsSize() const;
     NindFile m_file;                //pour l'ecrivain ou le lecteur
 
 protected:

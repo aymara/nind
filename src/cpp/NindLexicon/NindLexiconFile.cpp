@@ -64,10 +64,16 @@ NindLexiconFile::NindLexiconFile(const std::string &fileName,
             m_file.createBuffer(BUFFER_SIZE);
             //si lexique memoire ecrivain, ouvre en lecture + ecriture
             bool isOpened = m_file.open("r+b");
+            //un seul ejcrivain par fichier : un 2e (de ce processus ou d'un autre) est refusej
+            if (isOpened && !m_file.lockExclusive())
+                throw NindLexiconException("NindLexiconFile already opened by another writer " + m_fileName);
             //si fichier absent, cree un fichier vide en ecriture + lecture
             if (!isOpened) {
-                isOpened = m_file.open("w+b");
+                //crejation exclusive : un ejcrivain concurrent n'est pas tronquej
+                isOpened = m_file.open("w+bx");
                 if (!isOpened) throw OpenFileException(m_fileName);
+                if (!m_file.lockExclusive())
+                    throw NindLexiconException("NindLexiconFile already opened by another writer " + m_fileName);
                 //lui colle une identification bidon pour uniformiser les cas
                 m_file.putInt1(IDENTIFICATION_FLAG);
                 m_file.putInt3(0);

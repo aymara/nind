@@ -18,6 +18,9 @@
 #include "NindFile.h"
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/file.h>
+#endif
 //#include <iostream>
 using namespace latecon::nindex;
 using namespace std;
@@ -122,6 +125,18 @@ bool NindFile::open(const string &accessMode)
     fseek(m_file, 0, SEEK_END);
     m_fileSize = ftell(m_file);
     return true;
+}
+////////////////////////////////////////////////////////////
+//brief Take an advisory exclusive lock on the open file, without waiting
+//return true if the lock was taken, false if another open of the file holds it */
+bool NindFile::lockExclusive()
+{
+#ifdef _WIN32
+    return true;
+#else
+    //flock est par description de fichier ouvert : refuse aussi un 2e ejcrivain du mesme processus
+    return flock(fileno(m_file), LOCK_EX | LOCK_NB) == 0;
+#endif
 }
 ////////////////////////////////////////////////////////////
 //brief Close file associated with. Success in any case. */

@@ -84,6 +84,9 @@ NindPadFile::NindPadFile(const string &fileName,
     if (m_isWriter) {
         //si fichier ejcrivain, ouvre en ecriture + lecture
         bool isOpened = m_file.open("r+b");
+        //un seul ejcrivain par fichier : un 2e (de ce processus ou d'un autre) est refusej
+        if (isOpened && !m_file.lockExclusive())
+            throw NindPadFileException("NindPadFile::NindPadFile already opened by another writer " + m_fileName);
         if (isOpened) {
             //si le fichier existe, l'analyse pour trouver le mapping des blocs et l'identification
             //lit la taille d'une donneje indexeje at la taille des spejcifiques
@@ -112,8 +115,12 @@ NindPadFile::NindPadFile(const string &fileName,
             //la taille du bloc de dejfinitions doit estre spejcifieje diffejrente de 0
             if (dataEntriesBlocSize == 0)
                 throw NindPadFileException("NindPadFile::NindPadFile null dataEntriesBlocSize " + m_fileName);
-            isOpened = m_file.open("w+b");
+            //crejation exclusive ("x") : un autre ejcrivain qui crejerait le mesme fichier au mesme
+            //moment n'est pas tronquej, c'est cette ouverture-ci qui ejchoue
+            isOpened = m_file.open("w+bx");
             if (!isOpened) throw OpenFileException("NindPadFile::NindPadFile open error " + m_fileName);
+            if (!m_file.lockExclusive())
+                throw NindPadFileException("NindPadFile::NindPadFile already opened by another writer " + m_fileName);
             //taille d'une donneje indexeje et taille des spejcifiques en teste de fichier
             m_file.createBuffer(TAILLE_ENTETE_FIXE);
             m_file.putInt1(m_dataEntrySize);
@@ -265,6 +272,13 @@ unsigned int NindPadFile::getSpecificsAndIdentificationSize() const
 string NindPadFile::getFileName()
 {
     return m_fileName;
+}
+////////////////////////////////////////////////////////////
+//brief get size of specific datas, as read from the file (or given to a neo writer)
+//return size in bytes of specific datas */
+unsigned int NindPadFile::getSpecificsSize() const
+{
+    return m_specificsSize;
 }
 ////////////////////////////////////////////////////////////
 //brief write specifics header into write buffer */
