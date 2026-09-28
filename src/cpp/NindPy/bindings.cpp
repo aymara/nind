@@ -95,22 +95,25 @@ std::list<NindTermIndex::TermCG> buildTermDef(const uint32_t *docIds, const uint
     return termDef;
 }
 // one local definition from its [begin, end) slice of occurrences: one Term
-// per term id (ascending), localisations kept in occurrence order
+// per term id (ascending), localisations kept in occurrence order.
+// <nbreLocalisations> is one byte, so a term occurring more than 255 times
+// is split into several consecutive Terms with the same id (readers sum them)
 std::list<NindLocalIndex::Term> buildLocalDef(const uint32_t *termIds, const uint32_t *positions,
                                                const uint32_t *lengths,
                                                const size_t begin, const size_t end,
                                                const unsigned char cg)
 {
-    std::map<unsigned int, NindLocalIndex::Term> byTerm;
-    for (size_t i = begin; i < end; i++) {
-        std::map<unsigned int, NindLocalIndex::Term>::iterator it = byTerm.find(termIds[i]);
-        if (it == byTerm.end())
-            it = byTerm.insert(std::make_pair(termIds[i], NindLocalIndex::Term(termIds[i], cg))).first;
-        it->second.localisation.push_back(NindLocalIndex::Localisation(positions[i], lengths[i]));
-    }
+    std::map<unsigned int, std::vector<size_t> > byTerm;     //term id -> its occurrences
+    for (size_t i = begin; i < end; i++) byTerm[termIds[i]].push_back(i);
     std::list<NindLocalIndex::Term> localDef;
-    for (std::map<unsigned int, NindLocalIndex::Term>::iterator it = byTerm.begin(); it != byTerm.end(); it++)
-        localDef.push_back(std::move(it->second));
+    for (std::map<unsigned int, std::vector<size_t> >::const_iterator it = byTerm.begin(); it != byTerm.end(); it++) {
+        const std::vector<size_t> &occurrences = it->second;
+        for (size_t j = 0; j < occurrences.size(); j++) {
+            if (j % 255 == 0) localDef.push_back(NindLocalIndex::Term(it->first, cg));
+            localDef.back().localisation.push_back(
+                NindLocalIndex::Localisation(positions[occurrences[j]], lengths[occurrences[j]]));
+        }
+    }
     return localDef;
 }
 }
@@ -230,7 +233,8 @@ PYBIND11_MODULE(_native, m) {
             return specifics;
         })
         .def("set_term_def", &NindTermIndex::setTermDef,
-             py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"))
+             py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"),
+             py::call_guard<py::gil_scoped_release>())
         // Bulk form of set_term_def for a single-category term: documents
         // given as two parallel uint32 buffers; sorted by document id here
         // if they aren't already (duplicates are rejected), frequency is
@@ -317,7 +321,8 @@ PYBIND11_MODULE(_native, m) {
             return py::cast(termIdents);
         }, py::arg("ident"))
         .def("set_local_def", &NindLocalIndex::setLocalDef,
-             py::arg("ident"), py::arg("local_def"), py::arg("file_identification"))
+             py::arg("ident"), py::arg("local_def"), py::arg("file_identification"),
+             py::call_guard<py::gil_scoped_release>())
         // Bulk form of set_local_def: one entry per occurrence, as three
         // parallel uint32 buffers in document order; grouped here into one
         // Term per term id (ascending, all with category cg), each keeping

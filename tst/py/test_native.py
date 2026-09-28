@@ -182,6 +182,19 @@ def test_local_index_set_local_def_arrays(tmp_path):
     assert (tmp_path / "objects.nindlocalindex").read_bytes() == (tmp_path / "arrays.nindlocalindex").read_bytes()
 
 
+def test_local_index_set_local_def_arrays_splits_terms_over_255_occurrences(tmp_path):
+    # <nbreLocalisations> is one byte: 600 occurrences of term 9 go into entries of 255, 255, 90
+    identification = native.Identification(1, 12345)
+    local_index = native.NindLocalIndex(str(tmp_path / "corpus"), True, identification, indirection_bloc_size=64)
+    term_ids = [9] * 600 + [3]
+    local_index.set_local_def_arrays(7, array("I", term_ids), array("I", range(len(term_ids))),
+                                     array("I", [1]) * len(term_ids), identification)
+
+    got = local_index.get_local_def(7)
+    assert [(t.term, len(t.localisation)) for t in got] == [(3, 1), (9, 255), (9, 255), (9, 90)]
+    assert [l.position for t in got if t.term == 9 for l in t.localisation] == list(range(600))
+
+
 def test_local_index_set_local_def_arrays_rejects_mismatched_lengths(tmp_path):
     identification = native.Identification(1, 12345)
     local_index = native.NindLocalIndex(str(tmp_path / "corpus"), True, identification, indirection_bloc_size=64)

@@ -21,7 +21,9 @@ Typical usage::
 import math
 import os
 import re
+from array import array
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
@@ -219,36 +221,63 @@ class NindIndexer:
         # Do not initialize engine here; files may not exist yet
         self.engine = None
 
-    def index_files(self, file_paths):
+    def index_files(self, file_paths, workers=None):
         """Tokenize ``file_paths`` and write the resulting corpus as a nind index.
 
         Each file becomes one document, identified externally by its
         0-based position in ``file_paths``. Overwrites any existing index
         files with the same prefix in ``index_dir``.
 
+        Files are tokenized in parallel worker processes, then the term and
+        local index files (independent of each other once the lexicon is
+        written) are written concurrently, each by its own single writer.
+
         :param file_paths: list of paths to UTF-8 (or UTF-8-decodable, with
             errors ignored) text files to index.
+        :param workers: number of processes tokenizing the files (default:
+            ``os.cpu_count()``). ``1``, or a corpus of fewer than
+            ``PARALLEL_MIN_FILES`` files, tokenizes in this process instead,
+            since starting worker processes would then cost more than it saves.
         """
-        corpus_tokens = []
+        tokenized = self._tokenize_files(file_paths, workers)
+
         global_lexicon = Counter()
-
-        for path in file_paths:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                tokens = self._default_tokenize(f.read())
-                corpus_tokens.append(tokens)
-                global_lexicon.update(tokens)
-
+        for _, counts in tokenized:
+            global_lexicon.update(counts)
         term_to_id, lexicon_identification = self._write_lexicon(sorted(global_lexicon.keys()))
 
         inverted_index = defaultdict(list)
-        for doc_id, tokens in enumerate(corpus_tokens):
-            doc_counts = Counter(tokens)
-            for term, freq in doc_counts.items():
-                term_id = term_to_id[term]
-                inverted_index[term_id].append((doc_id, freq))
+        for doc_id, (_, counts) in enumerate(tokenized):
+            for term, freq in counts.items():
+                inverted_index[term_to_id[term]].append((doc_id, freq))
 
-        self._write_term_index(inverted_index, lexicon_identification)
-        self._write_local_index(corpus_tokens, term_to_id, lexicon_identification)
+        # One writer per file: the native writers release the GIL while they build and write.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            term_future = pool.submit(self._write_term_index, inverted_index, lexicon_identification)
+            local_future = pool.submit(self._write_local_index, [tokens for tokens, _ in tokenized],
+                                       term_to_id, lexicon_identification)
+            term_future.result()
+            local_future.result()
+
+    #: Below this many files, :meth:`index_files` tokenizes in-process.
+    PARALLEL_MIN_FILES = 64
+
+    def _tokenize_files(self, file_paths, workers):
+        if workers is None:
+            workers = os.cpu_count() or 1
+        workers = min(workers, len(file_paths))
+        if workers <= 1 or len(file_paths) < self.PARALLEL_MIN_FILES:
+            return [self._tokenize_file(path) for path in file_paths]
+        # Chunks amortize the inter-process round trips; results keep file_paths order.
+        chunksize = max(1, len(file_paths) // (workers * 4))
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(self._tokenize_file, file_paths, chunksize=chunksize))
+
+    def _tokenize_file(self, path):
+        # Runs in a worker process: also counts there, so the parent doesn't have to.
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            tokens = self._default_tokenize(f.read())
+        return tokens, Counter(tokens)
 
     def _default_tokenize(self, text):
         tokens = re.split(r'[^a-zA-Z0-9_]', text)
@@ -285,11 +314,16 @@ class NindIndexer:
                                             lexicon_identification=lexicon_identification,
                                             specifics_number=0,
                                             indirection_bloc_size=max_term_id + 1)
+        # flat buffers: term i's postings are doc_ids/freqs[ends[i-1]:ends[i]], already in
+        # increasing doc_id order (built by iterating documents in order)
+        idents, ends, doc_ids, freqs = array('I'), array('I'), array('I'), array('I')
         for tid in sorted(inverted_index):
-            postings = sorted(inverted_index[tid])   # tri croissant par doc_id pour le delta
-            term_cg = native.TermCG(cg=0, frequency=sum(freq for _, freq in postings))
-            term_cg.documents = [native.Document(ident=doc_id, frequency=freq) for doc_id, freq in postings]
-            term_writer.set_term_def(tid, [term_cg], lexicon_identification, [])
+            postings = inverted_index[tid]
+            idents.append(tid)
+            doc_ids.extend(doc_id for doc_id, _ in postings)
+            freqs.extend(freq for _, freq in postings)
+            ends.append(len(doc_ids))
+        term_writer.set_term_defs_arrays(idents, ends, doc_ids, freqs, lexicon_identification)
 
     ########################################################################
     # .nindlocalindex : directly indexed by identifiant document externe
@@ -299,15 +333,19 @@ class NindIndexer:
         local_writer = native.NindLocalIndex(self._base_path(), is_writer=True,
                                               lexicon_identification=lexicon_identification,
                                               indirection_bloc_size=len(corpus_tokens) + 1)
-        for doc_id, tokens in enumerate(corpus_tokens):
-            positions_par_terme = defaultdict(list)
-            for position, token in enumerate(tokens):
-                positions_par_terme[term_to_id[token]].append(position)
+        # one call per chunk of documents: the native writer builds and writes a chunk with
+        # the GIL released while this thread is flattening the next one
+        for first in range(0, len(corpus_tokens), self.LOCAL_CHUNK_DOCS):
+            idents, ends, term_ids, positions = array('I'), array('I'), array('I'), array('I')
+            for doc_id in range(first, min(first + self.LOCAL_CHUNK_DOCS, len(corpus_tokens))):
+                tokens = corpus_tokens[doc_id]
+                idents.append(doc_id)
+                term_ids.extend(term_to_id[token] for token in tokens)
+                positions.extend(range(len(tokens)))
+                ends.append(len(term_ids))
+            lengths = array('I', [1]) * len(term_ids)
+            local_writer.set_local_defs_arrays(idents, ends, term_ids, positions, lengths,
+                                               lexicon_identification)
 
-            terms = []
-            for tid in sorted(positions_par_terme):
-                term = native.Term(term=tid, cg=0)
-                term.localisation = [native.Localisation(position=p, length=1)
-                                      for p in positions_par_terme[tid]]
-                terms.append(term)
-            local_writer.set_local_def(doc_id, terms, lexicon_identification)
+    #: Number of documents per native call in :meth:`_write_local_index`.
+    LOCAL_CHUNK_DOCS = 1024

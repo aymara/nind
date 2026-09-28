@@ -128,3 +128,15 @@ def test_tokenize_splits_identifiers_like_source_code(text, expected_tokens):
     # without a real index directory.
     engine = NindEngine.__new__(NindEngine)
     assert engine.tokenize(text) == expected_tokens
+
+
+def test_indexer_handles_term_repeated_over_255_times(tmp_path):
+    # the local index stores at most 255 positions per entry: longer runs are split, not rejected
+    index_dir = tmp_path / "indices"
+    index_dir.mkdir()
+    doc = tmp_path / "doc.txt"
+    doc.write_text("self " * 600 + "other", encoding="utf-8")
+    NindIndexer(index_dir=str(index_dir), prefix="corpus").index_files([str(doc)])
+    engine = NindEngine(str(index_dir))
+    assert engine.get_tf("self", 0) == 600
+    assert engine.get_doc_len(0) == 601
