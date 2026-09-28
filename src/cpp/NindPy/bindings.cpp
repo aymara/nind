@@ -17,6 +17,9 @@
 #include <pybind11/stl.h>
 #include <pybind11/operators.h>
 #include <sstream>
+#include <map>
+#include <vector>
+#include <utility>
 #include "NindBasics/NindPadFile.h"
 #include "NindRetrolexicon/NindRetrolexicon.h"
 #include "NindLexicon/NindLexicon.h"
@@ -143,7 +146,30 @@ PYBIND11_MODULE(_native, m) {
             return specifics;
         })
         .def("set_term_def", &NindTermIndex::setTermDef,
-             py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"))
+             py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"),
+             py::call_guard<py::gil_scoped_release>())
+        // Bulk writer taking plain ints instead of Document/TermCG objects (building
+        // millions of those in Python costs far more than the write itself): one
+        // single-TermCG definition per term, frequency = sum of its postings.
+        // The GIL is released for the whole loop, so another thread can keep working.
+        .def("set_postings", [](NindTermIndex &self,
+                                const std::vector<std::pair<unsigned int, std::vector<std::pair<unsigned int, unsigned int> > > > &termPostings,
+                                const NindPadFile::Identification &fileIdentification,
+                                const std::list<unsigned int> &specifics,
+                                const unsigned char cg) {
+            py::gil_scoped_release release;
+            for (size_t i = 0; i < termPostings.size(); i++) {
+                const std::vector<std::pair<unsigned int, unsigned int> > &postings = termPostings[i].second;
+                std::list<NindTermIndex::TermCG> termDef;
+                termDef.push_back(NindTermIndex::TermCG(cg, 0));
+                NindTermIndex::TermCG &termCG = termDef.back();
+                for (size_t j = 0; j < postings.size(); j++) {
+                    termCG.documents.push_back(NindTermIndex::Document(postings[j].first, postings[j].second));
+                    termCG.frequency += postings[j].second;
+                }
+                self.setTermDef(termPostings[i].first, termDef, fileIdentification, specifics);
+            }
+        }, py::arg("term_postings"), py::arg("file_identification"), py::arg("specifics"), py::arg("cg") = 0)
         .def("get_file_name", &NindPadFile::getFileName)
         .def("analyse_pad_file", &NindPadFile::analysePadFile)
         .def("analyse_index", &NindIndex::analyseIndex);
@@ -182,7 +208,33 @@ PYBIND11_MODULE(_native, m) {
             return py::cast(termIdents);
         }, py::arg("ident"))
         .def("set_local_def", &NindLocalIndex::setLocalDef,
-             py::arg("ident"), py::arg("local_def"), py::arg("file_identification"))
+             py::arg("ident"), py::arg("local_def"), py::arg("file_identification"),
+             py::call_guard<py::gil_scoped_release>())
+        // Writer taking a document as its term ids in token order (position = token
+        // index, length = 1) instead of Term/Localisation objects, grouped per term in
+        // increasing term id order. <nbreLocalisations> is one byte, so a term occurring
+        // more than 255 times is written as several consecutive entries for the same id
+        // (readers sum them). The GIL is released while building and writing.
+        .def("set_local_def_from_term_ids", [](NindLocalIndex &self,
+                                               const unsigned int ident,
+                                               const std::vector<unsigned int> &termIds,
+                                               const NindPadFile::Identification &fileIdentification,
+                                               const unsigned char cg) {
+            py::gil_scoped_release release;
+            std::map<unsigned int, std::vector<unsigned int> > positionsById;
+            for (size_t position = 0; position < termIds.size(); position++)
+                positionsById[termIds[position]].push_back((unsigned int)position);
+            std::list<NindLocalIndex::Term> localDef;
+            for (std::map<unsigned int, std::vector<unsigned int> >::const_iterator it = positionsById.begin();
+                 it != positionsById.end(); it++) {
+                const std::vector<unsigned int> &positions = it->second;
+                for (size_t i = 0; i < positions.size(); i++) {
+                    if (i % 255 == 0) localDef.push_back(NindLocalIndex::Term(it->first, cg));
+                    localDef.back().localisation.push_back(NindLocalIndex::Localisation(positions[i], 1));
+                }
+            }
+            self.setLocalDef(ident, localDef, fileIdentification);
+        }, py::arg("ident"), py::arg("term_ids"), py::arg("file_identification"), py::arg("cg") = 0)
         .def("get_doc_count", &NindLocalIndex::getDocCount)
         .def("get_file_name", &NindPadFile::getFileName)
         .def("analyse_pad_file", &NindPadFile::analysePadFile)
