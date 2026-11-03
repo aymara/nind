@@ -123,16 +123,38 @@ def _legacy_tokenize(text):
     return refined
 
 
+def _encodable(text):
+    """``text``, its characters not encodable in UTF-8 (lone surrogates, which
+    ``json.loads`` accepts as escapes) replaced with ``?``."""
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def _tokenize_text(options, text):
     """Tokens of ``text`` with tokenizer ``options`` (a dict, or LEGACY_TOKENIZER)."""
     if options == LEGACY_TOKENIZER:
         return _legacy_tokenize(text)
-    return _native_tokenizer(options).tokenize(text)
+    return _native_tokenizer(options).tokenize(_encodable(text))
+
+
+def _tokenize_batch(options, texts):
+    tokenizer = _native_tokenizer(options)
+    try:
+        return tokenizer.tokenize_batch(texts)
+    except (TypeError, UnicodeEncodeError):
+        # a text not encodable in UTF-8: only then are the texts checked one by one
+        return tokenizer.tokenize_batch([_encodable(text) for text in texts])
 
 
 def _storable(token):
-    # a lexicon word is 1 to 254 bytes long
-    return 0 < len(token) and len(token.encode("utf-8")) <= 254
+    # a lexicon word is 1 to 254 bytes long, in UTF-8
+    try:
+        return 0 < len(token) and len(token.encode("utf-8")) <= 254
+    except UnicodeEncodeError:
+        return False
 
 
 def _chunk_from_token_lists(token_lists):
@@ -1090,7 +1112,7 @@ class NindIndexer:
         # one chunk (see _write_chunks): natively, unless _default_tokenize is overridden
         if type(self)._default_tokenize is NindIndexer._default_tokenize and \
                 self.tokenizer_options != LEGACY_TOKENIZER:
-            return _native_tokenizer(self.tokenizer_options).tokenize_batch(texts)
+            return _tokenize_batch(self.tokenizer_options, texts)
         return _chunk_from_token_lists([self._default_tokenize(text) for text in texts])
 
     def _tokenize_files(self, file_paths, workers):

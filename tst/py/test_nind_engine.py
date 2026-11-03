@@ -755,3 +755,21 @@ def test_empty_corpus(tmp_path):
     NindIndexer(str(tmp_path / "empty"), prefix="corpus").index_files([])
     engine = NindEngine(str(tmp_path / "empty"))
     assert engine.total_docs == 0 and engine.search("cat") == []
+
+
+def test_text_not_encodable_in_utf8_is_indexed(tmp_path):
+    # json.loads accepts lone surrogates ("\ud800" escapes): they must not abort indexing
+    path = tmp_path / "corpus.jsonl"
+    path.write_text('{"id": "a", "contents": "a\\ud800b cat"}\n{"id": "b", "contents": "dog"}\n', encoding="utf-8")
+    (tmp_path / "native").mkdir()
+    assert NindIndexer(str(tmp_path / "native")).index_jsonl(str(path)) == ["a", "b"]
+    engine = NindEngine(str(tmp_path / "native"))
+    assert engine.total_docs == 2 and engine.get_df("cat") == 1
+    assert engine.tokenize("x\ud800y") == ["x", "y"]
+    (tmp_path / "python").mkdir()
+    SplitOnSpaces(str(tmp_path / "python")).index_jsonl(str(path))
+    engine = NindEngine(str(tmp_path / "python"))
+    assert engine.get_df("cat") == 1 and engine.get_doc_len(0) == 1     # "a\ud800b" can't be stored
+    with NindIndexer(str(tmp_path / "native")).update() as update:
+        update.add_text("fish\udfff")
+    assert NindEngine(str(tmp_path / "native")).get_df("fish") == 1
