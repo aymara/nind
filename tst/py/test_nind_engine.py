@@ -843,6 +843,27 @@ def test_search_with_several_categories_per_term(tmp_path):
     assert [doc_id for doc_id, _ in engine.search("cat")] == [1, 3, 0]   # tf 3; tf 2 in 1 token; tf 2 in 2
 
 
+def test_search_with_sparse_document_ids(tmp_path):
+    # ids far above the number of documents: the scorer finds positions by binary search
+    # instead of a dense table; its scratch arrays are reused (and reset) from one search to the next
+    rng = random.Random(7)
+    words = ["s%d" % i for i in range(15)]
+    texts = [" ".join(rng.choice(words) for _ in range(rng.randint(1, 12))) for _ in range(30)]
+    indexer, engine = build_with(tmp_path, "sparse", texts)
+    with indexer.update() as update:
+        for i, doc_id in enumerate((3_000_000, 4_000_000_000, 123_456_789)):
+            update.add_text(texts[i] + " s0 rare" + "abc"[i], doc_id=doc_id)
+    engine = NindEngine(str(tmp_path / "sparse"))
+    assert engine.total_docs == 33
+    queries = ["s0", "s0 s1", "rareb", "rarec s3 s3", "s14 unknown", " ".join(words)]
+    expected = {query: full_scan_search(engine, query, None) for query in queries}
+    assert [doc_id for doc_id, _ in expected["rareb"]] == [4_000_000_000]
+    for _ in range(3):
+        for query in queries:
+            assert engine.search(query, top_k=None) == expected[query], query
+            assert engine.search(query, top_k=5) == expected[query][:5], query
+
+
 def test_search_scales_with_the_postings_not_the_corpus(tmp_path):
     # a corpus where the query term is in one document out of 10000: answered without
     # scoring the others (the full scan took minutes at this size)

@@ -33,6 +33,7 @@
 #include "NindIndex/NindDocNames.h"
 #include <unordered_map>
 #include <cmath>
+#include <mutex>
 #include "NindExceptions.h"
 ////////////////////////////////////////////////////////////
 namespace py = pybind11;
@@ -261,16 +262,44 @@ private:
 };
 
 // Okapi BM25 over the postings of a term index: see the Bm25Scorer binding below.
+// Flat arrays only: documents are numbered by their position in the corpus order (dense table
+// from document id, or binary search when ids are too sparse for one), scores are accumulated
+// in an array indexed by position (reset only where touched), postings are read with
+// NindTermIndex::getTermPostings into reused vectors - no allocation nor hashing per posting.
+const uint32_t NO_POSITION = 0xFFFFFFFFu;       // a document id without position: not in the corpus
+const uint64_t DENSE_SLACK = 1u << 20;          // a dense table up to 2 N + 1M entries
 class Bm25Scorer {
 public:
     // the documents of the corpus, in the order that breaks score ties
     Bm25Scorer(const UIntView &docIds, const UIntView &lengths, const double avgDocLength):
-        m_documents(), m_docsNb(docIds.size), m_avgDocLength(avgDocLength)
+        m_docIds(), m_lengths(), m_dense(), m_sparse(), m_docsNb(docIds.size), m_avgDocLength(avgDocLength),
+        m_mutex(), m_scores(), m_stamps(), m_stamp(0)
     {
         if (docIds.size != lengths.size) throw py::value_error("doc_ids and lengths must have the same length");
-        m_documents.reserve(docIds.size);
-        for (size_t i = 0; i < docIds.size; i++)
-            m_documents[docIds.data[i]] = std::make_pair(i, lengths.data[i]);
+        if (docIds.size >= NO_POSITION) throw py::value_error("too many documents");
+        uint32_t maxId = 0;
+        for (size_t i = 0; i < docIds.size; i++) maxId = std::max(maxId, docIds.data[i]);
+        // a document id given twice: its last position counts (and only it is scored)
+        if (docIds.size != 0 && (uint64_t)maxId < 2 * (uint64_t)docIds.size + DENSE_SLACK) {
+            m_dense.assign((size_t)maxId + 1, NO_POSITION);
+            for (size_t i = 0; i < docIds.size; i++) m_dense[docIds.data[i]] = (uint32_t)i;
+        }
+        else {
+            m_sparse.reserve(docIds.size);
+            for (size_t i = 0; i < docIds.size; i++) m_sparse.push_back(std::make_pair(docIds.data[i], (uint32_t)i));
+            std::stable_sort(m_sparse.begin(), m_sparse.end(),
+                             [](const std::pair<uint32_t, uint32_t> &a, const std::pair<uint32_t, uint32_t> &b)
+                             { return a.first < b.first; });
+            std::vector<std::pair<uint32_t, uint32_t> > unique;
+            unique.reserve(m_sparse.size());
+            for (size_t i = 0; i < m_sparse.size(); i++) {
+                if (!unique.empty() && unique.back().first == m_sparse[i].first) unique.back() = m_sparse[i];
+                else unique.push_back(m_sparse[i]);
+            }
+            m_sparse.swap(unique);
+        }
+        m_docIds.assign(docIds.data, docIds.data + docIds.size);
+        m_lengths.assign(lengths.data, lengths.data + lengths.size);
     }
 
     // the documents with a positive score for the query terms (in query order, repeats
@@ -281,64 +310,108 @@ public:
                                                      const long topK) const
     {
         py::gil_scoped_release release;
-        std::unordered_map<uint32_t, double> scores;
-        //the postings of each distinct term, read once: (document, frequency)
-        std::unordered_map<unsigned int, std::pair<uint64_t, std::vector<std::pair<uint32_t, uint32_t> > > > postings;
+        // the scratch arrays of this scorer, or private ones if another search holds them
+        std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
+        std::vector<double> localScores;
+        std::vector<uint32_t> localStamps;
+        uint32_t localStamp = 0;
+        std::vector<double> &scores = lock.owns_lock() ? m_scores : localScores;
+        std::vector<uint32_t> &stamps = lock.owns_lock() ? m_stamps : localStamps;
+        uint32_t &stamp = lock.owns_lock() ? m_stamp : localStamp;
+        if (scores.size() != m_docsNb) scores.assign(m_docsNb, 0.0);
+        std::vector<uint32_t> touched;          // positions whose score isn't 0 any more
+
+        // the postings of each distinct term, read once: df, then (position, frequency)
+        // of the documents of the corpus, first category a document is in only
+        std::unordered_map<unsigned int, size_t> distinct;      //term id -> index in dfs, postings
+        std::vector<uint64_t> dfs;
+        std::vector<std::vector<std::pair<uint32_t, uint32_t> > > postings;
+        std::vector<NindTermIndex::Document> read;
+        std::vector<size_t> categoryEnds;
         for (size_t t = 0; t < termIds.size(); t++) {
             if (termIds[t] == 0) continue;
-            auto it = postings.find(termIds[t]);
-            if (it == postings.end()) {
-                it = postings.insert(std::make_pair(termIds[t],
-                    std::make_pair(uint64_t(0), std::vector<std::pair<uint32_t, uint32_t> >()))).first;
-                std::list<NindTermIndex::TermCG> termDef;
-                termIndex.getTermDef(termIds[t], termDef);
-                //df counts the documents of every category; a document's frequency is the
-                //one of the first category it is in
-                std::unordered_map<uint32_t, bool> seen;
-                for (std::list<NindTermIndex::TermCG>::const_iterator cg = termDef.begin(); cg != termDef.end(); cg++) {
-                    (*it).second.first += cg->documents.size();
-                    for (std::list<NindTermIndex::Document>::const_iterator doc = cg->documents.begin(); doc != cg->documents.end(); doc++) {
-                        if (seen.insert(std::make_pair(doc->ident, true)).second)
-                            (*it).second.second.push_back(std::make_pair(doc->ident, doc->frequency));
+            const auto found = distinct.insert(std::make_pair(termIds[t], postings.size()));
+            const size_t index = found.first->second;
+            if (found.second) {
+                postings.push_back(std::vector<std::pair<uint32_t, uint32_t> >());
+                termIndex.getTermPostings(termIds[t], read, categoryEnds);
+                // df counts the documents of every category
+                dfs.push_back((uint64_t)read.size());
+                std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings.back();
+                termPostings.reserve(read.size());
+                const bool severalCategories = categoryEnds.size() > 1;
+                if (severalCategories) {
+                    if (stamps.size() != m_docsNb) stamps.assign(m_docsNb, 0);
+                    if (++stamp == 0) {         // wrapped: forget every mark
+                        std::fill(stamps.begin(), stamps.end(), 0);
+                        stamp = 1;
                     }
                 }
+                for (size_t i = 0; i < read.size(); i++) {
+                    const uint32_t position = positionOf(read[i].ident);
+                    if (position == NO_POSITION) continue;
+                    if (severalCategories) {
+                        if (stamps[position] == stamp) continue;    // already in a previous category
+                        stamps[position] = stamp;
+                    }
+                    termPostings.push_back(std::make_pair(position, (uint32_t)read[i].frequency));
+                }
             }
-            const double df = (double)(*it).second.first;
+            const double df = (double)dfs[index];
             //same operations, in the same order, as NindEngine._bm25_score
-            const double idf = std::log(((double)((int64_t)m_docsNb - (int64_t)(*it).second.first) + 0.5) / (df + 0.5) + 1.0);
-            const std::vector<std::pair<uint32_t, uint32_t> > &termPostings = (*it).second.second;
+            const double idf = std::log(((double)((int64_t)m_docsNb - (int64_t)dfs[index]) + 0.5) / (df + 0.5) + 1.0);
+            const std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[index];
             for (size_t i = 0; i < termPostings.size(); i++) {
-                const double tf = termPostings[i].second;
                 if (termPostings[i].second == 0) continue;
-                const auto doc = m_documents.find(termPostings[i].first);
-                if (doc == m_documents.end()) continue;
-                const double docLength = (*doc).second.second;
+                const double tf = termPostings[i].second;
+                const uint32_t position = termPostings[i].first;
+                const double docLength = m_lengths[position];
                 const double numerator = tf * (k1 + 1);
                 const double denominator = tf + k1 * (1 - b + b * (docLength / m_avgDocLength));
-                scores[termPostings[i].first] += idf * (numerator / denominator);
+                double &score = scores[position];
+                if (score == 0.0) touched.push_back(position);
+                score += idf * (numerator / denominator);
             }
         }
-        //(position, document, score) of the documents with a positive score
-        std::vector<std::pair<std::pair<double, size_t>, uint32_t> > ranked;
-        ranked.reserve(scores.size());
-        for (auto it = scores.begin(); it != scores.end(); it++) {
-            if ((*it).second > 0)
-                ranked.push_back(std::make_pair(std::make_pair(-(*it).second, m_documents.at((*it).first).first), (*it).first));
+        //(score, position) of the documents with a positive score; scores reset for the next search
+        std::vector<std::pair<double, uint32_t> > ranked;
+        ranked.reserve(touched.size());
+        for (size_t i = 0; i < touched.size(); i++) {
+            const uint32_t position = touched[i];
+            if (scores[position] > 0) ranked.push_back(std::make_pair(-scores[position], position));
+            scores[position] = 0.0;
         }
         //decreasing score, then the order of the corpus
         const size_t kept = (topK >= 0 && (size_t)topK < ranked.size()) ? (size_t)topK : ranked.size();
         std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
         std::vector<std::pair<uint32_t, double> > result(kept);
-        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(ranked[i].second, -ranked[i].first.first);
+        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
         return result;
     }
 
     size_t docsNb() const { return m_docsNb; }
 
 private:
-    std::unordered_map<uint32_t, std::pair<size_t, uint32_t> > m_documents;   //id -> (position, length)
+    uint32_t positionOf(const uint32_t docId) const {
+        if (!m_dense.empty() || m_sparse.empty())
+            return docId < m_dense.size() ? m_dense[docId] : NO_POSITION;
+        const auto it = std::lower_bound(m_sparse.begin(), m_sparse.end(), docId,
+                                         [](const std::pair<uint32_t, uint32_t> &a, const uint32_t id)
+                                         { return a.first < id; });
+        return (it != m_sparse.end() && it->first == docId) ? it->second : NO_POSITION;
+    }
+
+    std::vector<uint32_t> m_docIds;     //position -> document id
+    std::vector<uint32_t> m_lengths;    //position -> length
+    std::vector<uint32_t> m_dense;      //document id -> position (NO_POSITION: none), or empty
+    std::vector<std::pair<uint32_t, uint32_t> > m_sparse;   //(document id, position), by id, when not dense
     size_t m_docsNb;
     double m_avgDocLength;
+    // scratch arrays reused by successive searches (all zero / unmarked between searches)
+    mutable std::mutex m_mutex;
+    mutable std::vector<double> m_scores;
+    mutable std::vector<uint32_t> m_stamps;
+    mutable uint32_t m_stamp;
 };
 }
 ////////////////////////////////////////////////////////////
