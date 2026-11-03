@@ -7,9 +7,10 @@ check that they agree, the rankings (not a quality claim: the analysis isn't
 theirs).
 
     system = SYSTEMS[name](threads, k1, b)
+    system.prepare()                         # untimed: e.g. start the JVM
     system.build(corpus_jsonl, index_dir)
     searcher = system.open(index_dir)        # .search(tokens, k) -> [(doc_id, score)], .stats()
-    system.update(index_dir, add_jsonl, corpus_jsonl)
+    system.update(index_dir, add_jsonl, corpus_jsonl)   # sets system.update_mode
 
 Known scoring differences, none changing the ranking much: Lucene and tantivy
 leave out BM25's constant (k1 + 1) factor and store document lengths in one
@@ -39,11 +40,14 @@ def dir_size(path):
 
 
 class System:
-    #: True when update() really updates the index in place (else: it rebuilds)
-    incremental = True
+    #: how the last update() went: "in place", or how it rebuilt the index
+    update_mode = "in place"
 
     def __init__(self, threads, k1, b):
         self.threads, self.k1, self.b = threads, k1, b
+
+    def prepare(self):
+        """Load what open() and update() need, outside of their timing."""
 
     def index_path(self, index_dir):
         """What index size is measured on."""
@@ -68,11 +72,25 @@ class Nind(System):
         from nind.nind_engine import NindEngine
         return _NindSearcher(NindEngine(index_dir, self.prefix), self.k1, self.b)
 
+    def prepare(self):
+        import nind.nind_engine  # noqa: F401
+
     def update(self, index_dir, add, corpus):
-        from nind.nind_engine import NindIndexer
-        with NindIndexer(index_dir, self.prefix).update() as update:
-            for doc in read_jsonl(add):
-                update.add_tokens(doc["contents"].split(), name=doc["id"])
+        from nind import nind_engine
+        # past LEXICON_MAX_LOAD words per lexicon bucket, an update rebuilds the whole index
+        # with merge_indexes: record it
+        merge_indexes = nind_engine.native.merge_indexes
+
+        def recording_merge(*args, **kwargs):
+            self.update_mode = "rebuilt (lexicon full)"
+            return merge_indexes(*args, **kwargs)
+        nind_engine.native.merge_indexes = recording_merge
+        try:
+            with nind_engine.NindIndexer(index_dir, self.prefix).update() as update:
+                for doc in read_jsonl(add):
+                    update.add_tokens(doc["contents"].split(), name=doc["id"])
+        finally:
+            nind_engine.native.merge_indexes = merge_indexes
 
     def index_path(self, index_dir):
         with open(os.path.join(index_dir, self.prefix + ".CURRENT")) as f:
@@ -164,6 +182,12 @@ class Lucene(System):
         finally:
             shutil.rmtree(parts_dir, ignore_errors=True)
 
+    def prepare(self):
+        j = jnius()             # starts the JVM
+        for name in ("io.anserini.search.SimpleSearcher", "io.anserini.index.SimpleIndexer",
+                     "io.anserini.index.IndexReaderUtils", "org.apache.lucene.analysis.core.WhitespaceAnalyzer"):
+            j.autoclass(name)
+
     def open(self, index_dir):
         j = jnius()
         searcher = j.autoclass("io.anserini.search.SimpleSearcher")(index_dir)
@@ -204,7 +228,10 @@ class _LuceneSearcher:
 class Bm25s(System):
     """bm25s ("lucene" BM25): a static, in-memory sparse matrix of precomputed scores;
     k1 and b are baked in at indexing; an update is a full rebuild."""
-    incremental = False
+    update_mode = "full rebuild"
+
+    def prepare(self):
+        import bm25s  # noqa: F401
 
     def build(self, corpus, index_dir):
         import bm25s
@@ -262,6 +289,9 @@ class Tantivy(System):
         if (k1, b) != (1.2, 0.75):
             raise ValueError("tantivy's BM25 is fixed at k1=1.2, b=0.75")
         super().__init__(threads, k1, b)
+
+    def prepare(self):
+        import tantivy  # noqa: F401
 
     @staticmethod
     def _schema():

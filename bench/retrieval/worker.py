@@ -67,7 +67,8 @@ def main():
     parser.add_argument("--k1", type=float, default=1.2)
     parser.add_argument("--b", type=float, default=0.75)
     parser.add_argument("--depth", type=int, default=1000, help="hits per query in the run file")
-    parser.add_argument("--max-queries", type=int, default=None)
+    parser.add_argument("--max-queries", type=int, default=None, help="only the first N queries")
+    parser.add_argument("--warmup", type=int, default=200, help="queries of the warm-up pass")
     args = parser.parse_args()
 
     system = SYSTEMS[args.system](args.threads, args.k1, args.b)
@@ -75,6 +76,7 @@ def main():
     corpus = os.path.join(args.data_dir, "corpus.jsonl")
     full_index = os.path.join(args.work_dir, "index")
     out = {"phase": args.phase, "system": args.system, "threads": args.threads, "k1": args.k1, "b": args.b}
+    system.prepare()
 
     if args.phase == "build":
         shutil.rmtree(full_index, ignore_errors=True)
@@ -86,7 +88,7 @@ def main():
         out.update(searcher.stats())
         queries = read_queries(args.data_dir, args.max_queries)
         out["queries"] = len(queries)
-        latencies(searcher, queries, 10)                     # warm-up (JIT, page cache)
+        latencies(searcher, queries[:args.warmup], 10)       # warm-up (JIT, page cache)
         out["k10"], _ = latencies(searcher, queries, 10)
         out["k%d" % args.depth], results = latencies(searcher, queries, args.depth)
         write_run(os.path.join(args.work_dir, "run.txt"), args.system, results)
@@ -98,13 +100,13 @@ def main():
         add = os.path.join(args.data_dir, "add.jsonl")
         with open(add, encoding="utf-8") as f:
             out["added_documents"] = sum(1 for line in f if line.strip())
-        out["incremental"] = system.incremental
         out["update_s"], _ = timed(system.update, index, add, corpus)
+        out["update_mode"] = system.update_mode
         out["index_bytes"] = dir_size(system.index_path(index))
         searcher = system.open(index)
         out.update(searcher.stats())
         # the updated index must answer like the one built at once (see driver.py's report)
-        _, results = latencies(searcher, read_queries(args.data_dir, args.max_queries), 100)
+        _, results = latencies(searcher, read_queries(args.data_dir, args.max_queries), 10)
         write_run(os.path.join(args.work_dir, "run-update.txt"), args.system, results)
         del searcher
         shutil.rmtree(index, ignore_errors=True)
