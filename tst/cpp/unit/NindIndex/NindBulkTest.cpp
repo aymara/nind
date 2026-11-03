@@ -100,6 +100,38 @@ TEST_CASE("NindBulkTest.LocalIndexBytesIdenticalToNormalMode") {
     CHECK_EQ(10u, reader.getDocCount());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindBulkTest.RewritesAndErasuresBytesIdenticalToNormalMode") {
+    TestTempDir tmp;
+    const list<unsigned int> noSpecifics;
+    for (int bulk = 0; bulk < 2; bulk++) {
+        const string base = tmp.file(bulk ? "bulk" : "normal");
+        {
+            NindTermIndex index(base, true, kIdent, 0, 4);
+            if (bulk) index.beginBulk();
+            for (unsigned int i = 1; i < 8; i++) index.setTermDef(i, termDef(i, 1 + i % 4), kIdent, noSpecifics);
+            index.setTermDef(2, list<TermCG>(), kIdent, noSpecifics);       // hole
+            index.setTermDef(5, termDef(5, 9), kIdent, noSpecifics);        // moved: another hole
+            index.setTermDef(3, termDef(30, 1), kIdent, noSpecifics);       // in place
+            index.setTermDef(2, termDef(20, 1), kIdent, noSpecifics);       // into a hole
+            index.setTermDef(1, termDef(10, 2), kIdent, noSpecifics);
+            if (bulk) index.endBulk();
+        }
+        {
+            // an existing file, reopened: holes found by mapEmptySpaces are reused the same way
+            NindTermIndex index(base, true, kIdent, 0, 4);
+            if (bulk) index.beginBulk();
+            index.setTermDef(6, termDef(60, 1), kIdent, noSpecifics);
+            index.setTermDef(4, termDef(40, 12), kIdent, noSpecifics);
+            index.setTermDef(7, list<TermCG>(), kIdent, noSpecifics);
+            index.setTermDef(9, termDef(90, 2), kIdent, noSpecifics);
+            if (bulk) index.endBulk();
+        }
+    }
+    const vector<unsigned char> normal = readFileBytes(tmp.file("normal") + ".nindtermindex");
+    REQUIRE(!normal.empty());
+    CHECK(normal == readFileBytes(tmp.file("bulk") + ".nindtermindex"));
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindBulkTest.RewritesErasuresAndReadsDuringBulk") {
     TestTempDir tmp;
     const string base = tmp.file("rewrite");

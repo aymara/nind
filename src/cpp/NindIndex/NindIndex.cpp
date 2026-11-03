@@ -102,8 +102,7 @@ void NindIndex::beginBulk()
     m_file.readBuffer(tailleQueue);
     m_bulkTail.resize(tailleQueue);
     for (unsigned int i = 0; i < tailleQueue; i++) m_bulkTail[i] = m_file.getInt1();
-    //les nouvelles dejfinitions vont toutes ah la fin : les vides seront recalculejs en sortie
-    m_emptyAreas.clear();
+    //les vides (m_emptyAreas) sont gejrejs comme en mode normal
     m_bulkPos = UINT64_MAX;
     m_isBulk = true;
     m_file.setBulk(true);
@@ -136,14 +135,7 @@ void NindIndex::endBulk()
     bulkWrite(m_bulkEnd, 0, m_bulkTail.size());
     m_isBulk = false;
     m_file.setBulk(false);         //vidange, taille du fichier
-    //3) les vides, pour le mode normal
-    list<pair<uint64_t, unsigned int> > nonVidesList;
-    for (size_t i = 0; i < m_bulkIndirections.size(); i++) {
-        if (m_bulkIndirections[i].first != 0) nonVidesList.push_back(m_bulkIndirections[i]);
-    }
-    nonVidesList.push_back(pair<uint64_t, unsigned int>(m_bulkEnd, m_bulkTail.size()));
     vector<pair<uint64_t, unsigned int> >().swap(m_bulkIndirections);
-    fillEmptyAreas(nonVidesList);
 }
 ////////////////////////////////////////////////////////////
 //brief Read from file datas of a specified definition and leave result into read buffer 
@@ -270,8 +262,10 @@ void NindIndex::setDefinitionBulk(const unsigned int ident,
     const unsigned int dataSize = m_file.getOutBufferSize() - tailleQueue;
     //la queue est toujours en fin de buffer
     m_file.copyOutBuffer(dataSize, tailleQueue, m_bulkTail);
+    //les places choisies sont celles du mode normal (mesmes vides, mesme fin)
     if (dataSize == 0) {
         //EFFACEMENT
+        if (entry.second != 0) vacateOldArea(entry.first, entry.second);
         entry = pair<uint64_t, unsigned int>(0, 0);
         return;
     }
@@ -280,11 +274,14 @@ void NindIndex::setDefinitionBulk(const unsigned int ident,
         bulkWrite(entry.first, 0, dataSize);
         return;
     }
-    //ah la fin
-    const uint64_t offsetDejfinition = m_bulkEnd;
+    //INSERTION ou REMPLACEMENT NOUVEL ENDROIT : un vide ou la fin
+    uint64_t offsetDejfinition = 0;
+    unsigned int longueurDejfinition = 0;
+    const bool aLaFin = findNewArea(dataSize, offsetDejfinition, longueurDejfinition);
     bulkWrite(offsetDejfinition, 0, dataSize);
-    m_bulkEnd += dataSize;
-    entry = pair<uint64_t, unsigned int>(offsetDejfinition, dataSize);
+    if (aLaFin) m_bulkEnd += dataSize;
+    if (entry.second != 0) vacateOldArea(entry.first, entry.second);
+    entry = pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition);
 }
 ////////////////////////////////////////////////////////////
 //brief verifie que l'indirection existe et cree un bloc supplementaire si c'est pertinent
@@ -459,7 +456,7 @@ bool NindIndex::findNewArea(const unsigned int dataSize,
         return false;                            //pas ah la fin
     }
     //ejcrit a la fin 
-    offsetDejfinition = m_file.getFileSize() - getSpecificsAndIdentificationSize();       //ecrit a la fin 
+    offsetDejfinition = m_isBulk ? m_bulkEnd : m_file.getFileSize() - getSpecificsAndIdentificationSize();       //ecrit a la fin 
     longueurDejfinition = (dataSize > m_definitionMinimumSize)? dataSize : m_definitionMinimumSize;  //avec la taille 
     return true;                                //ah la fin
 }

@@ -56,7 +56,8 @@ public:
     * (specifics + identification) stay in memory and writes aren't flushed one by one:
     * the file is invalid for readers until endBulk(), and a crash leaves it unusable.
     * For a file that no reader opens before it is complete (e.g. a new index generation).
-    * Holes left by rewritten definitions are reused again once back in normal mode. */
+    * Definitions are placed exactly as in normal mode (same holes reused), so the file
+    * ends up byte-identical to the same writes in normal mode. */
     void beginBulk();
 
     /**\brief Leave bulk mode: write the indirections and the tail, then flush.
