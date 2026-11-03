@@ -69,7 +69,12 @@ public:
     /**\brief get identification of lexicon
      * \return unique identification of lexicon */
     Identification getIdentification();
-    
+
+    /**\brief get the number of hash buckets of the lexicon (fixed when the file is created:
+     * beyond a few words per bucket, lookups slow down and the lexicon should be rebuilt larger)
+     * \return number of hash buckets */
+    unsigned int getModulo() const { return m_modulo; }
+
     /**\brief get word components from the specified ident
     * if retro lexicon is not implanted, an exception is raised
     * \param ident ident of word

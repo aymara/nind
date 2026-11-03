@@ -23,3 +23,10 @@ See {doc}`../quickstart` for a walk-through.
    :members:
    :show-inheritance:
 ```
+
+## IndexUpdate
+
+```{eval-rst}
+.. autoclass:: nind.nind_engine.IndexUpdate
+   :members: add_file, add_text, add_tokens, remove, LEXICON_MIN_BUCKETS, LEXICON_MAX_LOAD, INDIRECTION_BLOC_MIN
+```

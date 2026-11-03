@@ -190,6 +190,7 @@ PYBIND11_MODULE(_native, m) {
         .def("add_word", &NindLexiconIndex::addWord, py::arg("components"))
         .def("get_word_id", &NindLexiconIndex::getWordId, py::arg("components"))
         .def("get_identification", &NindLexiconIndex::getIdentification)
+        .def("get_modulo", &NindLexiconIndex::getModulo)
         .def("get_components", [](NindLexiconIndex &self, unsigned int ident) -> py::object {
             std::list<std::string> components;
             if (!self.getComponents(ident, components)) return py::none();

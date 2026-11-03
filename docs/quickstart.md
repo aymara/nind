@@ -24,6 +24,26 @@ This writes three files into `indices/`:
 becomes one document, identified externally by its position in the list
 (`0`, `1`, `2`, ...).
 
+## Index incrementally
+
+`index_files` rebuilds the whole index. To add, replace or remove documents
+in an existing index instead - or to build one file by file - group the
+changes in an update; they are published together when the `with` block
+ends (nothing changes if it raises):
+
+```python
+with indexer.update() as update:
+    for path in new_files:
+        doc_id = update.add_file(path)     # new id: one more than the highest
+    update.add_file("changed.py", doc_id=1) # replaces document 1
+    update.remove(2)
+```
+
+`add_file(path)`, `add_files(paths)` and `remove_documents(ids)` on the
+indexer are one-update shortcuts. Each update copies the index and reopens
+its files, so on a large index group many documents per update rather than
+calling `add_file` once per file.
+
 ## Search it
 
 ```python

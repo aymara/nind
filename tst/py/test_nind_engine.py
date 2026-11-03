@@ -380,3 +380,131 @@ def test_a_killed_writer_never_leaves_its_index_locked(tmp_path):
     assert time.monotonic() - started < 10       # didn't wait for the orphan
     assert NindEngine(str(index_dir)).get_df("bird") == 1
     assert len(generations(index_dir)) == 1      # the killed build's leftover was deleted
+
+
+# ---- incremental indexing ------------------------------------------------------
+
+def assert_same_index(engine, expected, terms, doc_ids):
+    assert engine.total_docs == expected.total_docs
+    assert engine.avg_doc_len == pytest.approx(expected.avg_doc_len)
+    for term in terms:
+        assert engine.get_df(term) == expected.get_df(term), term
+        for doc_id in doc_ids:
+            assert engine.get_tf(term, doc_id) == expected.get_tf(term, doc_id), (term, doc_id)
+    for doc_id in doc_ids:
+        assert engine.get_doc_len(doc_id) == expected.get_doc_len(doc_id)
+    for query in ["cat", "dog fish", "eel bird", "unknown"]:
+        assert engine.search(query) == pytest.approx(expected.search(query))
+
+
+INCREMENTAL_TERMS = ["cat", "dog", "bird", "fish", "eel", "unknown"]
+
+
+def test_files_indexed_one_by_one_equal_a_full_build(tmp_path):
+    expected = build_engine(tmp_path, "direct", SHARDED_TEXTS)
+    index_dir = tmp_path / "incremental"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    paths = write_texts(tmp_path / "docs", SHARDED_TEXTS)
+    # starts without any index: the first file creates it
+    assert [indexer.add_file(path) for path in paths] == list(range(len(paths)))
+    assert_same_index(NindEngine(str(index_dir)), expected, INCREMENTAL_TERMS, range(len(paths)))
+    assert index_files_of(index_dir) == ["corpus.nindlexiconindex", "corpus.nindlocalindex",
+                                         "corpus.nindtermindex", "generation.lock"]
+
+
+def test_files_added_to_an_index_built_by_index_files(tmp_path):
+    expected = build_engine(tmp_path, "direct", SHARDED_TEXTS)
+    index_dir = tmp_path / "incremental"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    paths = write_texts(tmp_path / "docs", SHARDED_TEXTS)
+    indexer.index_files(paths[:3])
+    engine = NindEngine(str(index_dir))
+    assert engine.total_docs == 3
+    assert indexer.add_files(paths[3:5]) == [3, 4]
+    with indexer.update() as update:
+        for path in paths[5:]:
+            update.add_file(path)
+        # nothing is visible before the update ends
+        assert engine.total_docs == 5
+    # the engine switches to the update by itself
+    assert_same_index(engine, expected, INCREMENTAL_TERMS, range(len(paths)))
+
+
+def test_documents_are_replaced_and_removed(tmp_path):
+    index_dir = tmp_path / "incremental"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    with indexer.update() as update:
+        assert update.add_text("cat cat dog") == 0
+        assert update.add_text("dog fish") == 1
+        assert update.add_text("bird", doc_id=10) == 10
+        assert update.add_text("eel") == 11
+    engine = NindEngine(str(index_dir))
+    assert engine.total_docs == 4
+    # replace document 0, remove 1 and 10
+    with indexer.update() as update:
+        update.add_text("fish fish fish", doc_id=0)
+        assert update.remove(1)
+        assert update.remove(10)
+        assert not update.remove(10)
+        assert not update.remove(5)
+        # added then removed in the same update: never stored
+        assert update.add_text("whale") == 12
+        assert update.remove(12)
+    assert engine.total_docs == 2
+    assert engine.get_df("cat") == 0 and engine.get_df("dog") == 0 and engine.get_df("bird") == 0
+    assert engine.get_df("whale") == 0
+    assert engine.get_tf("fish", 0) == 3 and engine.get_df("fish") == 1
+    assert engine.get_tf("eel", 11) == 1
+    assert engine.get_doc_len(0) == 3
+    assert [doc_id for doc_id, _ in engine.search("fish eel")] == [0, 11]
+    assert indexer.remove_documents([0, 0, 3]) == [True, False, False]
+    assert engine.total_docs == 1
+    # new ids follow the highest one still in the index
+    assert indexer.add_file(write_texts(tmp_path / "more", ["cat"])[0]) == 12
+
+
+def test_failed_or_empty_update_publishes_nothing(tmp_path):
+    index_dir = tmp_path / "incremental"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    with indexer.update():
+        pass
+    assert list(index_dir.iterdir()) == [index_dir / "corpus.lock"]
+    indexer.add_files(write_texts(tmp_path / "docs", ["cat dog", "dog"]))
+    published = (index_dir / "corpus.CURRENT").read_text()
+    with pytest.raises(ZeroDivisionError):
+        with indexer.update() as update:
+            update.add_text("bird")
+            1 / 0
+    with indexer.update() as update:
+        assert not update.remove(7)
+    assert (index_dir / "corpus.CURRENT").read_text() == published
+    engine = NindEngine(str(index_dir))
+    assert engine.total_docs == 2 and engine.get_df("bird") == 0
+    assert len(generations(index_dir)) == 1
+    with pytest.raises(RuntimeError):
+        update.add_text("outside")
+
+
+def test_growing_lexicon_is_rebuilt_with_more_buckets(tmp_path, monkeypatch):
+    from nind import _native
+    from nind.nind_engine import IndexUpdate
+    monkeypatch.setattr(IndexUpdate, "LEXICON_MIN_BUCKETS", 2)
+    monkeypatch.setattr(IndexUpdate, "LEXICON_MAX_LOAD", 2)
+    index_dir = tmp_path / "incremental"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    words = ["w%c%c" % (a, b) for a in "abcdefgh" for b in "abcdefgh"]
+    texts = [" ".join(words[i:i + 5]) for i in range(0, len(words), 4)]
+    for text in texts:
+        with indexer.update() as update:
+            update.add_text(text)
+    [generation] = generations(index_dir)
+    lexicon = _native.NindLexiconIndex(str(generation / "corpus"), is_writer=False)
+    assert lexicon.get_identification().lexicon_words_nb == len(words)
+    assert lexicon.get_modulo() >= len(words) / 2
+    expected = build_engine(tmp_path, "direct", texts)
+    assert_same_index(NindEngine(str(index_dir)), expected, words[:3] + words[-3:] + ["unknown"], range(len(texts)))

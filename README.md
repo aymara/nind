@@ -77,6 +77,16 @@ for doc_id, score in engine.search("ejcrit nombre", top_k=5):
 
 `index_dir` must already exist; each input file becomes one document,
 identified externally by its position in the list (`0`, `1`, `2`, ...).
+To add, replace or remove documents in an existing index (or build one
+file by file), use an incremental update instead of rebuilding:
+
+```python
+with indexer.update() as update:
+    for path in more_files:
+        update.add_file(path)       # returns the new document's id
+    update.remove(1)
+```
+
 `NindEngine` also exposes the building blocks it uses internally
 (`get_term_id`, `get_df`, `get_tf`, `get_doc_len`) for inspecting relevance
 or a specific document directly.

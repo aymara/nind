@@ -207,6 +207,22 @@ class IndexStore:
         raise RuntimeError("Could not open a stable generation of %s" % os.path.join(self.index_dir, self.prefix))
 
     # -- writer -----------------------------------------------------------
+    def published_base(self):
+        """Base path of the published index (``None`` if there is none), for a writer.
+
+        Only meaningful inside :meth:`new_generation`: the writer lock it holds
+        is what keeps that generation from being replaced or deleted meanwhile
+        (only writers publish and collect). An index written before
+        generations existed is found as its flat files.
+        """
+        name = self._read_current()
+        if name is not None:
+            return os.path.join(self.index_dir, name, self.prefix)
+        flat = os.path.join(self.index_dir, self.prefix)
+        if os.path.exists(flat + ".nindlexiconindex"):
+            return flat
+        return None
+
     @contextlib.contextmanager
     def new_generation(self):
         """Build a new generation and publish it if the block succeeds.

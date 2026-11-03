@@ -14,6 +14,8 @@ Typical usage::
     from nind.nind_engine import NindIndexer, NindEngine
 
     NindIndexer("indices", prefix="corpus").index_files(["a.py", "b.py"])
+    with NindIndexer("indices", prefix="corpus").update() as update:
+        update.add_file("c.py")             # incremental: add, replace, remove
     engine = NindEngine("indices")
     for doc_id, score in engine.search("def foo"):
         print(doc_id, score)
@@ -32,7 +34,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
-from ._index_store import IndexStore
+from ._index_store import IndexStore, INDEX_EXTENSIONS
 try:
     from . import _native as native
 except ImportError:
@@ -277,12 +279,264 @@ class NindEngine:
         scores.sort(key=lambda x: x[1], reverse=True)
         return scores[:top_k]
 
+class _CancelUpdate(Exception):
+    """Raised into the generation of an update that changes nothing, so that it isn't published."""
+
+
+def _check_doc_id(doc_id):
+    import operator
+    doc_id = operator.index(doc_id)
+    if not 0 <= doc_id <= 0xFFFFFFFF:
+        raise ValueError("document id out of range (0 .. 2**32-1): %d" % doc_id)
+    return doc_id
+
+
+class IndexUpdate:
+    """One batch of incremental changes to an index, published at once when it ends.
+
+    Obtained from :meth:`NindIndexer.update` and used as a context manager::
+
+        with indexer.update() as update:
+            for path in paths:
+                doc_id = update.add_file(path)
+            update.remove(3)
+
+    Documents can be added (or replaced: adding an id the index already has
+    replaces that document) and removed; the index may not exist yet. Nothing
+    is visible until the ``with`` block ends without an exception: the
+    changes are then published in one step, :class:`NindEngine` instances
+    switching to them by themselves. If the block raises, the index is left
+    as it was. An update holds the index's writer lock from start to end:
+    other updates and :meth:`NindIndexer.index_files` on the same index wait.
+
+    The published index is copied when the update starts, so an update costs
+    at least a copy of the index files: group many documents in one update
+    rather than making one update per document on a large index.
+
+    Not thread-safe: use an update from one thread at a time.
+    """
+
+    #: Hash buckets of the lexicon of a new index (at least).
+    LEXICON_MIN_BUCKETS = 4096
+    #: Above this many words per hash bucket, the lexicon is rebuilt with twice
+    #: as many buckets as words (the bucket count is fixed in the file).
+    LEXICON_MAX_LOAD = 4
+    #: Entries in each new indirection block of the term and local files (at least).
+    INDIRECTION_BLOC_MIN = 4096
+
+    def __init__(self, indexer):
+        self._indexer = indexer
+        self._stack = None
+        self._writers = None
+
+    # -- context ------------------------------------------------------------
+    def __enter__(self):
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
+        if self._stack is not None:
+            raise RuntimeError("this update is already in progress")
+        store = IndexStore(self._indexer.index_dir, self._indexer.prefix)
+        with contextlib.ExitStack() as stack:
+            self._base = stack.enter_context(store.new_generation())
+            self._existing = set()
+            self._with_retrolexicon = False
+            self._is_new = True
+            source = store.published_base()
+            if source is not None:
+                # the published generation is never modified: work on a copy of it
+                for extension in INDEX_EXTENSIONS:
+                    if os.path.exists(source + extension):
+                        shutil.copyfile(source + extension, self._base + extension)
+                self._with_retrolexicon = os.path.exists(self._base + ".nindretrolexicon")
+                self._is_new = False
+                lexicon = native.NindLexiconIndex(self._base, is_writer=False)
+                local_index = native.NindLocalIndex(self._base, is_writer=False,
+                                                    lexicon_identification=lexicon.get_identification())
+                self._existing = set(local_index.get_doc_idents())
+                del local_index, lexicon
+            self._stack = stack.pop_all()
+        self._pending = {}      # doc id -> its tokens, or None to remove it
+        self._next_id = max(self._existing) + 1 if self._existing else 0
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        stack, self._stack = self._stack, None
+        if exc_type is not None:
+            self._close_writers()
+            return stack.__exit__(exc_type, exc, tb)
+        try:
+            if not self._pending:
+                raise _CancelUpdate()       # nothing changes: nothing to publish
+            self._commit()
+            self._close_writers()
+            self._compact_lexicon()
+        except BaseException as error:
+            self._close_writers()
+            try:
+                if not stack.__exit__(type(error), error, error.__traceback__):
+                    raise
+            except _CancelUpdate:
+                pass
+            return False
+        stack.close()
+        return False
+
+    # -- changes ------------------------------------------------------------
+    def add_file(self, path, doc_id=None):
+        """Index the text file ``path`` as one document.
+
+        :param path: path to a UTF-8 (or UTF-8-decodable, with errors
+            ignored) text file.
+        :param doc_id: the document's identifier; replaces the document with
+            this id if there is one. Default: one more than the highest id
+            in the index or in this update (``0`` for the first document).
+        :return: the document's identifier.
+        """
+        tokens, _ = self._indexer._tokenize_file(path)
+        return self.add_tokens(tokens, doc_id)
+
+    def add_text(self, text, doc_id=None):
+        """Index ``text`` as one document; see :meth:`add_file`."""
+        return self.add_tokens(self._indexer._default_tokenize(text), doc_id)
+
+    def add_tokens(self, tokens, doc_id=None):
+        """Index an already tokenized document; see :meth:`add_file`.
+
+        A document without any token isn't stored (an existing document with
+        that id is removed).
+        """
+        self._check_active()
+        doc_id = self._next_id if doc_id is None else _check_doc_id(doc_id)
+        self._pending[doc_id] = list(tokens)
+        self._next_id = max(self._next_id, doc_id + 1)
+        return doc_id
+
+    def remove(self, doc_id):
+        """Remove the document ``doc_id`` from the index.
+
+        :return: ``True`` if there was such a document (in the index or
+            added earlier in this update), ``False`` otherwise.
+        """
+        self._check_active()
+        doc_id = _check_doc_id(doc_id)
+        if doc_id in self._existing:
+            found = self._pending.get(doc_id, True) is not None
+            self._pending[doc_id] = None
+            return found
+        return self._pending.pop(doc_id, None) is not None
+
+    def _check_active(self):
+        if self._stack is None:
+            raise RuntimeError("an IndexUpdate must be used inside a 'with' block")
+
+    # -- writing ------------------------------------------------------------
+    def _commit(self):
+        pending = self._pending
+        vocabulary = sorted({token for tokens in pending.values() if tokens for token in tokens})
+        lexicon, term_index, local_index = self._open_writers(len(vocabulary), len(pending))
+        # the previous postings of every replaced or removed document go
+        removed = defaultdict(set)
+        for doc_id in pending:
+            if doc_id in self._existing:
+                for term_id in local_index.get_term_idents(doc_id) or ():
+                    removed[term_id].add(doc_id)
+        # term/local files are opened with the lexicon's identification: they're written after it
+        term_to_id = {term: lexicon.add_word([term]) for term in vocabulary}
+        identification = lexicon.get_identification()
+        added = defaultdict(dict)
+        for doc_id, tokens in pending.items():
+            for term, freq in Counter(tokens or ()).items():
+                added[term_to_id[term]][doc_id] = freq
+        doc_ids = sorted(pending)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            term_future = pool.submit(self._update_term_index, term_index, removed, added, identification)
+            local_future = pool.submit(self._update_local_index, local_index, doc_ids, pending,
+                                       term_to_id, identification)
+            term_future.result()
+            local_future.result()
+        self._modulo = lexicon.get_modulo()
+        self._words_nb = identification.lexicon_words_nb
+
+    def _open_writers(self, vocabulary_size, docs_nb):
+        lexicon = native.NindLexiconIndex(
+            self._base, is_writer=True, with_retrolexicon=self._with_retrolexicon,
+            indirection_bloc_size=max(self.LEXICON_MIN_BUCKETS, 2 * vocabulary_size),
+            retro_indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, vocabulary_size + 1))
+        self._writers = [lexicon]
+        identification = lexicon.get_identification()
+        # an existing file keeps its blocks; these sizes are for the blocks added from now on
+        term_index = native.NindTermIndex(self._base, is_writer=True, lexicon_identification=identification,
+                                          specifics_number=0,
+                                          indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, vocabulary_size + 1))
+        self._writers.append(term_index)
+        local_index = native.NindLocalIndex(self._base, is_writer=True, lexicon_identification=identification,
+                                            indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, docs_nb + 1))
+        self._writers.append(local_index)
+        return lexicon, term_index, local_index
+
+    def _close_writers(self):
+        # the native writers close their files when destroyed
+        self._writers = None
+
+    @staticmethod
+    def _update_term_index(term_index, removed, added, identification):
+        # every touched term is rewritten whole: previous postings, minus removed documents, plus added ones
+        idents, ends, doc_ids, freqs = array('I'), array('I'), array('I'), array('I')
+        for term_id in sorted(removed.keys() | added.keys()):
+            postings = {}
+            for term_cg in term_index.get_term_def(term_id) or ():
+                for document in term_cg.documents:
+                    postings[document.ident] = postings.get(document.ident, 0) + document.frequency
+            for doc_id in removed.get(term_id, ()):
+                postings.pop(doc_id, None)
+            postings.update(added.get(term_id, {}))
+            idents.append(term_id)
+            for doc_id in sorted(postings):         # no postings left: the term is erased
+                doc_ids.append(doc_id)
+                freqs.append(postings[doc_id])
+            ends.append(len(doc_ids))
+        term_index.set_term_defs_arrays(idents, ends, doc_ids, freqs, identification)
+
+    @staticmethod
+    def _update_local_index(local_index, doc_ids, pending, term_to_id, identification):
+        idents, ends, term_ids, positions = array('I'), array('I'), array('I'), array('I')
+        for doc_id in doc_ids:
+            tokens = pending[doc_id] or ()          # no tokens: the document is erased
+            idents.append(doc_id)
+            term_ids.extend(term_to_id[token] for token in tokens)
+            positions.extend(range(len(tokens)))
+            ends.append(len(term_ids))
+        lengths = array('I', [1]) * len(term_ids)
+        local_index.set_local_defs_arrays(idents, ends, term_ids, positions, lengths, identification)
+
+    def _compact_lexicon(self):
+        # the hash bucket count is fixed in the file: past LEXICON_MAX_LOAD words per bucket, the
+        # index is rebuilt (term ids change, document ids don't) with twice as many buckets as words
+        if self._words_nb <= self.LEXICON_MAX_LOAD * self._modulo:
+            return
+        rebuild_dir = tempfile.mkdtemp(prefix=".rebuild-", dir=os.path.dirname(self._base))
+        try:
+            rebuilt = os.path.join(rebuild_dir, os.path.basename(self._base))
+            native.merge_indexes([self._base], rebuilt, with_retrolexicon=self._with_retrolexicon,
+                                 lexicon_indirection_bloc_size=2 * self._words_nb)
+            for extension in INDEX_EXTENSIONS:
+                if os.path.exists(rebuilt + extension):
+                    os.replace(rebuilt + extension, self._base + extension)
+        finally:
+            shutil.rmtree(rebuild_dir, ignore_errors=True)
+
+
 class NindIndexer:
-    """Builds a nind binary index (lexicon + term + local files) from a list of text files.
+    """Builds a nind binary index (lexicon + term + local files) from text files.
 
     The only Python *writer* for the nind index-family formats (see the
     module docstring): it builds them via ``nind._native``'s
     ``is_writer=True`` constructors.
+
+    Two ways of indexing: :meth:`index_files` (re)builds the whole index from
+    a list of files, in parallel; :meth:`update` (and its shortcuts
+    :meth:`add_file`, :meth:`add_files`, :meth:`remove_documents`) changes an
+    existing index - or creates one - incrementally.
     """
 
     def __init__(self, index_dir, prefix="corpus"):
@@ -336,6 +590,50 @@ class NindIndexer:
                 self._index_sharded(file_paths, workers, shards, base)
             else:
                 self._write_index(self._tokenize_files(file_paths, workers), 0, base)
+
+    def update(self):
+        """Start an incremental update of the index (created if there is none yet).
+
+        :return: an :class:`IndexUpdate`, to use as a context manager; its
+            changes are published together when the ``with`` block ends.
+        """
+        return IndexUpdate(self)
+
+    def add_files(self, file_paths, doc_ids=None, workers=None):
+        """Add (or replace) documents incrementally: one :meth:`update` for all of ``file_paths``.
+
+        :param file_paths: paths of the text files to index, one document each.
+        :param doc_ids: their identifiers (an existing document with the same
+            id is replaced); default: new ids following the highest one.
+        :param workers: processes tokenizing the files, as in :meth:`index_files`.
+        :return: the documents' identifiers, in ``file_paths`` order.
+        """
+        if doc_ids is not None and len(doc_ids) != len(file_paths):
+            raise ValueError("doc_ids and file_paths must have the same length")
+        tokenized = self._tokenize_files(list(file_paths), workers)
+        with self.update() as update:
+            return [update.add_tokens(tokens, None if doc_ids is None else doc_ids[i])
+                    for i, (tokens, _) in enumerate(tokenized)]
+
+    def add_file(self, path, doc_id=None):
+        """Add (or replace) one document incrementally; see :meth:`add_files`.
+
+        Each call publishes a new version of the index, which costs a copy
+        of the index: to add many files, use :meth:`add_files` or one
+        :meth:`update` for all of them.
+
+        :return: the document's identifier.
+        """
+        with self.update() as update:
+            return update.add_file(path, doc_id)
+
+    def remove_documents(self, doc_ids):
+        """Remove documents from the index, in one :meth:`update`.
+
+        :return: for each id, whether there was such a document.
+        """
+        with self.update() as update:
+            return [update.remove(doc_id) for doc_id in doc_ids]
 
     def _write_index(self, tokenized, first_doc_id, base):
         # writes the index files at base (a path without extension)
