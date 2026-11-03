@@ -21,6 +21,7 @@ Typical usage::
         print(doc_id, score)
 """
 import contextlib
+import json
 import math
 import os
 import re
@@ -590,6 +591,109 @@ class NindIndexer:
                 self._index_sharded(file_paths, workers, shards, base)
             else:
                 self._write_index(self._tokenize_files(file_paths, workers), 0, base)
+
+    def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None):
+        """Index a JSON Lines corpus (one document per line) as a nind index.
+
+        The format read by pyserini's ``JsonCollection``: each non-blank line
+        is a JSON object such as ``{"id": "d49309", "contents": "..."}``.
+        The ``n``-th record becomes document ``n`` (0-based), as the ``n``-th
+        file does in :meth:`index_files`; the records' own identifiers are
+        returned, in document order, for the caller to map results back.
+        Replaces any existing index, with the same safety guarantees as
+        :meth:`index_files`.
+
+        The file is parsed and tokenized in parallel worker processes, each
+        reading its own line-aligned part of it.
+
+        :param path: path to the UTF-8 ``.jsonl`` file.
+        :param id_field: name of the field holding a record's identifier.
+        :param text_field: name of the field holding the text to index.
+        :param limit: index only the first ``limit`` records (default: all).
+        :param workers: number of processes parsing and tokenizing the file
+            (default: ``os.cpu_count()``); ``1``, or a file smaller than
+            ``JSONL_PARALLEL_MIN_BYTES``, works in this process.
+        :return: the ``id_field`` value of every indexed record: element
+            ``n`` is the identifier of document ``n``.
+        :raises ValueError: if a line isn't a JSON object with both fields.
+        """
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be positive or None")
+        end = self._jsonl_end(path, limit)
+        if workers is None:
+            workers = os.cpu_count() or 1
+        if workers <= 1 or end < self.JSONL_PARALLEL_MIN_BYTES:
+            parts = [self._tokenize_jsonl_range(path, 0, end, id_field, text_field)]
+        else:
+            ranges = self._jsonl_ranges(path, end, workers * 4)
+            with ProcessPoolExecutor(max_workers=min(workers, len(ranges)), initializer=_pool_worker_init) as pool:
+                parts = list(pool.map(self._tokenize_jsonl_range, [path] * len(ranges),
+                                      [start for start, _ in ranges], [stop for _, stop in ranges],
+                                      [id_field] * len(ranges), [text_field] * len(ranges)))
+        ids = [doc_ident for part in parts for doc_ident, _ in part]
+        tokenized = [document for part in parts for _, document in part]
+        with IndexStore(self.index_dir, self.prefix).new_generation() as base:
+            self._write_index(tokenized, 0, base)
+        return ids
+
+    #: Below this many bytes of JSON Lines, :meth:`index_jsonl` works in-process.
+    JSONL_PARALLEL_MIN_BYTES = 1 << 20
+
+    @staticmethod
+    def _jsonl_end(path, limit):
+        # offset just past the limit-th non-blank line (the whole file without a limit)
+        if limit is None:
+            return os.path.getsize(path)
+        records = 0
+        with open(path, 'rb') as f:
+            while records < limit:
+                line = f.readline()
+                if not line:
+                    break
+                if line.strip():
+                    records += 1
+            return f.tell()
+
+    @staticmethod
+    def _jsonl_ranges(path, end, pieces):
+        # [start, stop) byte ranges covering [0, end), each starting at the beginning of a line
+        bounds = [0]
+        with open(path, 'rb') as f:
+            for i in range(1, pieces):
+                target = end * i // pieces
+                if target <= bounds[-1]:
+                    continue
+                f.seek(target - 1)
+                f.readline()            # finish the line target - 1 is in: the next one starts a range
+                if f.tell() >= end:
+                    break
+                bounds.append(f.tell())
+        bounds.append(end)
+        return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+    def _tokenize_jsonl_range(self, path, start, stop, id_field, text_field):
+        # Runs in a worker process: [(record id, (tokens, counts))] of the lines in [start, stop).
+        with open(path, 'rb') as f:
+            f.seek(start)
+            data = f.read(stop - start)
+        documents = []
+        for line_number, line in enumerate(data.split(b'\n')):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                doc_ident, text = record[id_field], record[text_field]
+            except (ValueError, KeyError, TypeError) as error:
+                raise ValueError("%s, at byte %d (+%d lines): not a JSON object with fields %r and %r: %s"
+                                 % (path, start, line_number, id_field, text_field, error)) from None
+            if not isinstance(text, str):
+                raise ValueError("%s, at byte %d (+%d lines): field %r is not a string"
+                                 % (path, start, line_number, text_field))
+            tokens = self._default_tokenize(text)
+            documents.append((doc_ident, (tokens, Counter(tokens))))
+        return documents
 
     def update(self):
         """Start an incremental update of the index (created if there is none yet).

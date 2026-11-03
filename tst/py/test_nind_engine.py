@@ -508,3 +508,93 @@ def test_growing_lexicon_is_rebuilt_with_more_buckets(tmp_path, monkeypatch):
     assert lexicon.get_modulo() >= len(words) / 2
     expected = build_engine(tmp_path, "direct", texts)
     assert_same_index(NindEngine(str(index_dir)), expected, words[:3] + words[-3:] + ["unknown"], range(len(texts)))
+
+
+# -- JSON Lines input -----------------------------------------------------------
+
+def write_jsonl(path, records, blank_lines=False):
+    import json
+    with open(path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+            if blank_lines:
+                f.write("\n")
+    return str(path)
+
+
+def assert_same_corpus(engine, direct, n_docs, terms):
+    assert engine.total_docs == direct.total_docs == n_docs
+    assert engine.avg_doc_len == pytest.approx(direct.avg_doc_len)
+    for term in terms:
+        assert engine.get_df(term) == direct.get_df(term)
+        for doc_id in range(n_docs):
+            assert engine.get_tf(term, doc_id) == direct.get_tf(term, doc_id)
+
+
+def test_index_jsonl_equals_index_files(tmp_path):
+    direct = build_engine(tmp_path, "direct", SHARDED_TEXTS)
+    records = [{"id": "d%d" % (100 + i), "contents": text} for i, text in enumerate(SHARDED_TEXTS)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records, blank_lines=True)
+    index_dir = tmp_path / "jsonl"
+    index_dir.mkdir()
+    ids = NindIndexer(str(index_dir), prefix="corpus").index_jsonl(path)
+    assert ids == [record["id"] for record in records]
+    assert_same_corpus(NindEngine(str(index_dir)), direct, len(SHARDED_TEXTS),
+                      ["cat", "dog", "bird", "fish", "eel", "unknown"])
+
+
+def test_index_jsonl_limit_and_custom_fields(tmp_path):
+    records = [{"docid": i, "text": text} for i, text in enumerate(SHARDED_TEXTS)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records, blank_lines=True)
+    index_dir = tmp_path / "jsonl"
+    index_dir.mkdir()
+    ids = NindIndexer(str(index_dir)).index_jsonl(path, id_field="docid", text_field="text", limit=3)
+    assert ids == [0, 1, 2]
+    engine = NindEngine(str(index_dir))
+    assert engine.total_docs == 3
+    assert engine.get_df("fish") == 0          # only in records past the limit
+    assert engine.get_df("dog") == 2
+
+
+def test_index_jsonl_in_parallel_parts(tmp_path, monkeypatch):
+    # many parts, some lines longer than a part: every record is read exactly once, in order
+    def tag(i):     # one distinct, letters-only word per record (the tokenizer splits digits off)
+        return "tag" + "".join("abcdefghij"[int(c)] for c in str(i))
+    texts = ["%s common %s" % (tag(i), "pad " * (i % 50)) for i in range(400)]
+    records = [{"id": "d%d" % i, "contents": text} for i, text in enumerate(texts)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    monkeypatch.setattr(NindIndexer, "JSONL_PARALLEL_MIN_BYTES", 0)
+    index_dir = tmp_path / "jsonl"
+    index_dir.mkdir()
+    ids = NindIndexer(str(index_dir)).index_jsonl(path, workers=8, limit=399)
+    assert ids == ["d%d" % i for i in range(399)]
+    engine = NindEngine(str(index_dir))
+    assert engine.get_df("common") == 399
+    for i in (0, 1, 57, 398):
+        assert engine.get_tf(tag(i), i) == 1
+    assert engine.get_df(tag(399)) == 0
+
+
+def test_jsonl_ranges_are_line_aligned(tmp_path):
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": i, "contents": "x" * (i * 7)} for i in range(30)])
+    data = open(path, "rb").read()
+    for pieces in (1, 2, 7, 64, 1000):
+        ranges = NindIndexer._jsonl_ranges(path, len(data), pieces)
+        assert ranges[0][0] == 0 and ranges[-1][1] == len(data)
+        for (_, stop), (start, _) in zip(ranges, ranges[1:]):
+            assert stop == start and data[start - 1:start] == b"\n"
+
+
+def test_index_jsonl_rejects_bad_records_and_keeps_previous_index(tmp_path):
+    index_dir = tmp_path / "jsonl"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    indexer.index_jsonl(write_jsonl(tmp_path / "good.jsonl", [{"id": "a", "contents": "cat"}]))
+    before = index_files_of(index_dir)
+    for bad in ('{"id": "b"}\n', 'not json\n', '{"id": "c", "contents": 3}\n'):
+        path = tmp_path / "bad.jsonl"
+        path.write_text('{"id": "a", "contents": "dog"}\n' + bad, encoding="utf-8")
+        with pytest.raises(ValueError):
+            indexer.index_jsonl(str(path))
+    assert index_files_of(index_dir) == before
+    assert NindEngine(str(index_dir)).get_df("cat") == 1
