@@ -14,8 +14,10 @@ the design discussion this came out of for why. Three things are measured:
    Python reader classes real callers use.
 
 Retrieval effectiveness (nDCG/MAP vs. qrels) is out of scope: `NindEngine`
-would first need stable external document ids and real inverted-list-driven
-candidate generation instead of its current O(N·|Q|) full scan.
+would first need stable external document ids (`index_jsonl` returns the
+records' ids but doesn't store them). Its search is driven by the postings
+lists (`nind._native.Bm25Scorer`), so it scales with the query terms'
+document frequencies, not the corpus size.
 
 ## Corpus: MS MARCO Passage Ranking
 

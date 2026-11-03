@@ -47,6 +47,11 @@ pybind11_add_module(_native
 
 target_include_directories(_native PRIVATE ${NIND_CPP_ROOT})
 
+# Bm25Scorer reproduces NindEngine's Python scoring bit for bit: no fused multiply-adds
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(_native PRIVATE -ffp-contract=off)
+endif()
+
 if(MSVC)
   # NindCommonExport.h's DLLExportLexicon macro expands to dllimport unless
   # this is defined, which fails to link since these classes are defined
