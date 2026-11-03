@@ -62,12 +62,16 @@ LAT2016.JYS.463) states principles this proposal keeps:
    *without compression* (`Entier1`..`Entier5`, varints `EntierULat`/`SLat`).
    So v2 widens a field only where a function needs it, field by field (see
    1 below), not wholesale.
-2. **The EBNF grammar is the specification**, so that programs independent
-   of the C++ can check the files it writes ("the tests are simpler and above
-   all more complete"). That grammar has drifted: the code writes 4-byte word
-   ids in the lexicon and retrolexicon (`putInt4`) where the grammar still
-   says `Entier3`. v2 starts by reconciling grammar and code, then writes the
-   v2 grammar **before** the code.
+2. **The EBNF grammar is the specification.** The original design also had
+   Python programs check the files from the grammar alone, independently of
+   the C++. That isn't kept: Amose reads the files through the same C++
+   libraries, so no second implementation of the format exists to conform
+   to, and a parallel decoder would have to follow every format change. The
+   grammar is enforced instead by golden files (byte-exact fixtures) and a
+   native `verify` tool (see Testing). The grammar has drifted: the code
+   writes 4-byte word ids in the lexicon and retrolexicon (`putInt4`) where
+   the grammar still says `Entier3`. v2 starts by reconciling grammar and
+   code, then writes the v2 grammar **before** the code.
 3. **The lexicon and the local index are the source of truth; the term index
    and the retrolexicon can be rebuilt from them** (LAT2017.JYS.475, §11). So
    migrating to v2, or recovering a damaged term index, can be a rebuild of
@@ -94,7 +98,7 @@ LAT2016.JYS.463) states principles this proposal keeps:
    refusing bad input at write time (still open from LAT2017.JYS.475: make
    `NindLexiconIndex::addWord` refuse non-UTF-8 words, or have every tool stop
    assuming UTF-8), never writing a corrupt file (commit `2c0bc0a`), and tools
-   to verify and rebuild (3).
+   to verify (a native `verify`, see Testing) and rebuild (3).
 
 ## Proposal
 
@@ -225,11 +229,14 @@ two formats.
    (principle 3); for indexes without a local index, `NindIndexMerge`
    reading v1 and writing v2 (`nind._native.merge_indexes([old], new)`).
    The same rebuild is the recovery tool for a damaged term index.
-3. **Python diagnostics** (`dumpeFichier`, `afficheTerme`, ...): the low-level
-   API stays a thin wrapper over `nind._native`, but **one verifier stays
-   independent of the C++**, following the v2 grammar. It's the offline tool
-   the original design relied on to tell, without any C++, whether a fault
-   comes from indexing or from search (LAT2016.JYS.463, §8.3).
+3. **Diagnostics** (`dumpeFichier`, `afficheTerme`, ...) move to
+   `nind._native` like the rest of the low-level API (see "Planned follow-up
+   work" in CLAUDE.md), with a native **`verify`**: it walks every structure
+   of an index and checks its invariants (flags, bounds, counts matching
+   their lists, increasing document ids in a list, holes accounted for,
+   files paired by their identification). That's the offline tool the
+   original design used to tell whether a fault comes from indexing or from
+   search (LAT2016.JYS.463, §8.3), without a second decoder.
 
 ## Testing and measuring
 
@@ -241,8 +248,12 @@ two formats.
   be bounded against the file size and the buffer, as v1 fields are.
 - A term over 16 MiB (`NindTermIndexTest.DefinitionOver16MiBIsRefused` today)
   must round-trip in v2.
-- The independent grammar-driven verifier accepts every file the C++ writes
-  and rejects every corrupted one from the sweeps.
+- **Golden files**: a few small v1 and v2 files, written once and checked
+  into `tst/` byte for byte. A writer must reproduce them exactly (an
+  accidental format change, or a writer and reader sharing a bug, breaks
+  the test), and v2 readers must read the v1 ones.
+- `verify` accepts every file the writers produce and rejects every
+  corrupted one from the sweeps.
 - **Idempotent incremental indexing** (LAT2016.JYS.463, §4.7, as a test):
   indexing a corpus as overlapping parts, in any order, gives the same index
   as indexing it at once. Sparse external ids too (CLEF-like numbering).
