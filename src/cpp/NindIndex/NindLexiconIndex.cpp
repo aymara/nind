@@ -22,6 +22,7 @@
 #include "NindRetrolexicon/NindRetrolexicon.h"
 #include <iostream>
 #include <algorithm>
+#include <map>
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
@@ -153,6 +154,113 @@ unsigned int NindLexiconIndex::addWord(const list<string> &components)
     }
     //retourne l'id du mot specifie
     return sousMotId;
+}
+////////////////////////////////////////////////////////////
+//brief add many words at once (same idents as addWord on each word in turn)
+//param words the words, each a list of components
+//param idents receives the ident of each word, in the order of words */
+void NindLexiconIndex::addWords(const vector<list<string> > &words,
+                                vector<unsigned int> &idents)
+{
+    if (!m_isWriter) throw NindLexiconIndexException("NindLexiconIndex::addWords lexicon is not writable" + m_fileName);
+    //un mot trop long rendrait le fichier illisible : vejrifiej avant toute modification
+    for (size_t i = 0; i < words.size(); i++) {
+        if (words[i].empty()) throw NindLexiconIndexException("NindLexiconIndex::addWords empty word " + m_fileName);
+        for (list<string>::const_iterator swIt = words[i].begin(); swIt != words[i].end(); swIt++)
+            if ((*swIt).length() > 254)
+                throw NindLexiconIndexException("NindLexiconIndex::addWords word longer than 254 bytes " + m_fileName);
+    }
+    NindCriticalSection criticalSection(m_file);
+    idents.clear();
+    idents.reserve(words.size());
+    //les seaux lus, et s'ils sont modifiejs
+    map<unsigned int, pair<list<Mot>, bool> > seaux;
+    list<struct NindRetrolexicon::RetroWord> retroWords;
+    unsigned int &currentId = m_identification.lexiconWordsNb;
+    for (size_t i = 0; i < words.size(); i++) {
+        unsigned int sousMotId = 0;
+        for (list<string>::const_iterator swIt = words[i].begin(); swIt != words[i].end(); swIt++) {
+            const string &motSimple = *swIt;
+            const unsigned int ident = clef(motSimple) % m_modulo;
+            map<unsigned int, pair<list<Mot>, bool> >::iterator seauIt = seaux.find(ident);
+            if (seauIt == seaux.end()) {
+                seauIt = seaux.insert(make_pair(ident, make_pair(list<Mot>(), false))).first;
+                readBucket(ident, (*seauIt).second.first);
+            }
+            list<Mot> &mots = (*seauIt).second.first;
+            list<Mot>::iterator motIt = mots.begin();
+            while (motIt != mots.end() && (*motIt).motSimple != motSimple) motIt++;
+            if (motIt == mots.end()) motIt = mots.insert(mots.end(), Mot(motSimple, 0));
+            //mot simple
+            if (sousMotId == 0) {
+                if ((*motIt).identifiantS == 0) {
+                    (*motIt).identifiantS = ++currentId;
+                    retroWords.push_back(NindRetrolexicon::RetroWord(currentId, motSimple));
+                    (*seauIt).second.second = true;
+                }
+                sousMotId = (*motIt).identifiantS;
+                continue;
+            }
+            //mot composej : sousMotId suivi de ce mot simple
+            unsigned int motId = 0;
+            for (list<Composej>::const_iterator compIt = (*motIt).composejs.begin(); compIt != (*motIt).composejs.end(); compIt++) {
+                if ((*compIt).identA == sousMotId) {
+                    motId = (*compIt).identComp;
+                    break;
+                }
+            }
+            if (motId == 0) {
+                //le mot simple est crejej avant le composej, comme addWord
+                if ((*motIt).identifiantS == 0) {
+                    (*motIt).identifiantS = ++currentId;
+                    retroWords.push_back(NindRetrolexicon::RetroWord(currentId, motSimple));
+                }
+                motId = ++currentId;
+                (*motIt).composejs.push_back(Composej(sousMotId, motId));
+                retroWords.push_back(NindRetrolexicon::RetroWord(motId, sousMotId, (*motIt).identifiantS));
+                (*seauIt).second.second = true;
+            }
+            sousMotId = motId;
+        }
+        idents.push_back(sousMotId);
+    }
+    if (retroWords.empty()) return;
+    //ejcrit chaque seau modifiej, une seule fois
+    m_identification.lexiconTime = (time_t)time(NULL);
+    for (map<unsigned int, pair<list<Mot>, bool> >::const_iterator seauIt = seaux.begin(); seauIt != seaux.end(); seauIt++) {
+        if ((*seauIt).second.second) setDefinitionWords((*seauIt).second.first, m_identification);
+    }
+    if (m_withRetrolexicon) m_nindRetrolexicon->addRetroWords(retroWords, m_identification);
+}
+////////////////////////////////////////////////////////////
+//lit tous les mots d'un seau de hachage
+void NindLexiconIndex::readBucket(const unsigned int ident,
+                                  list<Mot> &mots)
+{
+    mots.clear();
+    if (!getDefinition(ident)) return;
+    //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
+    if (m_file.getInt1() != FLAG_DEJFINITION)
+        throw NindLexiconIndexException("NindLexiconIndex::readBucket A : " + m_fileName);
+    if (m_file.getInt3() != ident)
+        throw NindLexiconIndexException("NindLexiconIndex::readBucket B : " + m_fileName);
+    const unsigned int longueurDonnejes = m_file.getInt3();
+    m_file.setEndInBuffer(longueurDonnejes);
+    while (!m_file.endOfInBuffer()) {
+        //<motSimple> <identifiantS> <nbreComposejs> <composejs>
+        mots.push_back(Mot());
+        Mot &mot = mots.back();
+        mot.motSimple = m_file.getString();
+        mot.identifiantS = m_file.getInt4();
+        const unsigned int nbreComposejs = m_file.getUIntLat();
+        unsigned int identifiantC = mot.identifiantS;
+        for (unsigned int i = 0; i != nbreComposejs; i++) {
+            //<identifiantA> <identifiantRelC>
+            const unsigned int identifiantA = m_file.getInt4();
+            identifiantC += m_file.getSIntLat();
+            mot.composejs.push_back(Composej(identifiantA, identifiantC));
+        }
+    }
 }
 ////////////////////////////////////////////////////////////
 //brief get ident of the specified word

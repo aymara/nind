@@ -58,6 +58,14 @@ public:
      * \return ident of word */
     unsigned int addWord(const std::list<std::string> &components);
 
+    /**\brief add many words at once: same result as addWord on each word in turn
+     * (same idents), but each hash bucket is read and written only once.
+     * \param words the words, each a list of components
+     * (1 component = simple word, more components = compound word)
+     * \param idents receives the ident of each word, in the order of words */
+    void addWords(const std::vector<std::list<std::string> > &words,
+                  std::vector<unsigned int> &idents);
+
     /**\brief get ident of the specified word
      * if word exists in lexicon, its ident is returned
      * else, return 0 (0 is not a valid ident !)
@@ -140,6 +148,10 @@ private:
                             std::list<Mot>::iterator &motIt);
         
     //Ecrit les donnees de tous les mots qui ont la meme clef modulo 
+    //lit tous les mots d'un seau de hachage (liste vide si le seau est vide)
+    void readBucket(const unsigned int ident,
+                    std::list<Mot> &mots);
+
     void setDefinitionWords(const std::list<Mot> &definition,
                              const Identification &lexiconIdentification);
 

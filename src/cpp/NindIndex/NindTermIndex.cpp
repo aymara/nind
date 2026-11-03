@@ -217,8 +217,7 @@ void NindTermIndex::setSpecificWords(const list<unsigned int> &specifics,
     m_file.createBuffer(getSpecificsAndIdentificationSize());
     writeSpecificsAndIdentification(specifics, fileIdentification);
     //les spejcifiques et l'identification sont toujours en queue de fichier
-    m_file.setPos(-(long int)getSpecificsAndIdentificationSize(), SEEK_END);
-    m_file.writeBuffer();
+    writeTail(0, getSpecificsAndIdentificationSize());
 }
 ////////////////////////////////////////////////////////////
 //brief write specifics footer and identification into write buffer

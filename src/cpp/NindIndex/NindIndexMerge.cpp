@@ -131,10 +131,19 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
     unionIdents.clear();
     const unsigned int unionWordsNb = m_unionWords.size() - 1;
 
+    //les index locaux sont facultatifs, mais tous les shards en ont ou aucun
+    unsigned int localIndexesNb = 0;
+    for (unsigned int shard = 0; shard < shardsNb; shard++)
+        if (fileExists(m_shardNames[shard] + ".nindlocalindex")) localIndexesNb++;
+    if (localIndexesNb != 0 && localIndexesNb != shardsNb)
+        throw NindIndexException("NindIndexMerge::merge some shards have a local index, some don't");
+    const bool withLocalIndex = (localIndexesNb != 0);
+
     //les documents de tous les shards, vejrifiejs disjoints avant toute ejcriture
+    //(sans index local, un document dans deux shards est vu dans le fichier inverse)
     vector<unique_ptr<NindLocalIndex> > shardLocalIndexes;
     vector<pair<unsigned int, unsigned int> > documents;       //(identifiant externe, shard)
-    for (unsigned int shard = 0; shard < shardsNb; shard++) {
+    for (unsigned int shard = 0; shard < shardsNb && withLocalIndex; shard++) {
         shardLocalIndexes.push_back(unique_ptr<NindLocalIndex>(
             new NindLocalIndex(m_shardNames[shard], false, shardIdentifications[shard])));
         vector<unsigned int> docIdents;
@@ -153,13 +162,21 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
                              m_options.retroIndirectionBlocSize ? m_options.retroIndirectionBlocSize : unionWordsNb + 1);
     vector<unsigned int> unionToMerged(unionWordsNb + 1, 0);
     vector<unsigned int> mergedToUnion(1, 0);
-    for (unsigned int unionIdent = 1; unionIdent <= unionWordsNb; unionIdent++) {
-        list<string> components;
-        getUnionComponents(unionIdent, components);
-        const unsigned int mergedIdent = lexicon.addWord(components);
-        unionToMerged[unionIdent] = mergedIdent;
-        if (mergedToUnion.size() <= mergedIdent) mergedToUnion.resize(mergedIdent + 1, 0);
-        mergedToUnion[mergedIdent] = unionIdent;
+    {
+        //tous les mots en une fois, le fichier neuf en mode massif
+        vector<list<string> > words(unionWordsNb);
+        for (unsigned int unionIdent = 1; unionIdent <= unionWordsNb; unionIdent++)
+            getUnionComponents(unionIdent, words[unionIdent - 1]);
+        vector<unsigned int> mergedIdents;
+        lexicon.beginBulk();
+        lexicon.addWords(words, mergedIdents);
+        lexicon.endBulk();
+        for (unsigned int unionIdent = 1; unionIdent <= unionWordsNb; unionIdent++) {
+            const unsigned int mergedIdent = mergedIdents[unionIdent - 1];
+            unionToMerged[unionIdent] = mergedIdent;
+            if (mergedToUnion.size() <= mergedIdent) mergedToUnion.resize(mergedIdent + 1, 0);
+            mergedToUnion[mergedIdent] = unionIdent;
+        }
     }
     const NindPadFile::Identification identification = lexicon.getIdentification();
     stats.wordsNb = identification.lexiconWordsNb;
@@ -193,6 +210,7 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         sort(shardTerms.begin(), shardTerms.end());
         NindTermIndex termIndex(targetName, true, identification, specificsNumber,
                                 m_options.termIndirectionBlocSize ? m_options.termIndirectionBlocSize : stats.wordsNb + 1);
+        termIndex.beginBulk();
         size_t first = 0;
         while (first < shardTerms.size()) {
             const unsigned int mergedIdent = shardTerms[first].mergedIdent;
@@ -232,12 +250,14 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         }
         //les spejcifiques dejfinitifs, une fois tous les termes comptejs
         termIndex.setSpecificWords(getTermSpecifics(), identification);
+        termIndex.endBulk();
     }
 
     //4) les index locaux : chaque document est recopiej avec ses termes renumejrotejs
-    {
+    if (withLocalIndex) {
         NindLocalIndex localIndex(targetName, true, identification,
                                   m_options.localIndirectionBlocSize ? m_options.localIndirectionBlocSize : documents.size() + 1);
+        localIndex.beginBulk();
         for (size_t i = 0; i < documents.size(); i++) {
             const unsigned int shard = documents[i].second;
             const vector<unsigned int> &toMerged = shardToMerged[shard];
@@ -251,6 +271,7 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
             localIndex.setLocalDef(documents[i].first, localDef, identification);
             stats.docsNb++;
         }
+        localIndex.endBulk();
     }
     return stats;
 }

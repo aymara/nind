@@ -76,6 +76,10 @@ NindPadFile::NindPadFile(const string &fileName,
     m_fileName(fileName),
     m_isWriter(isWriter),
     m_isExistingWriter(false),
+    m_isBulk(false),
+    m_bulkTail(),
+    m_bulkEnd(0),
+    m_bulkPos(UINT64_MAX),
     m_entriesBlocksMap(),
     m_specificsSize(specificsSize),
     m_dataEntrySize(dataEntrySize),
@@ -178,6 +182,25 @@ uint64_t NindPadFile::getEntryPos(const unsigned int ident)
 //param fileIdentification unique identification of file */
 void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
 {
+    if (m_isBulk) {
+        //en mode massif, le bloc est ajoutej ah la fin des donnejes, la queue reste en mejmoire
+        const uint64_t entriesBlock = m_bulkEnd;
+        m_file.createBuffer(TAILLE_TETE_INDEX);
+        m_file.putInt1(FLAG_INDEXEJ);
+        m_file.putInt5(0);
+        m_file.putInt3(m_dataEntriesBlocSize);
+        bulkWrite(entriesBlock, 0, TAILLE_TETE_INDEX);
+        m_file.writeValue(0, m_dataEntriesBlocSize*m_dataEntrySize);
+        m_bulkPos += (uint64_t)m_dataEntriesBlocSize*m_dataEntrySize;
+        m_bulkEnd = m_bulkPos;
+        if (m_entriesBlocksMap.size() != 0) {
+            m_file.createBuffer(5);
+            m_file.putInt5(entriesBlock);
+            bulkWrite(m_entriesBlocksMap.back().first - 8, 0, 5);
+        }
+        m_entriesBlocksMap.push_back(pair<uint64_t, unsigned int>(entriesBlock + TAILLE_TETE_INDEX, m_dataEntriesBlocSize));
+        return;
+    }
     //se positionne sur les spejcifiques
     const int offset = TAILLE_ENTETE_SPEJCIFIQUE + TAILLE_IDENTIFICATION + m_specificsSize;
     m_file.setPos(-offset, SEEK_END);
@@ -215,6 +238,7 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
 //return size of 1rst entries block */
 unsigned int NindPadFile::getFirstEntriesBlockSize()
 {
+    if (m_isBulk) { m_file.flush(); bulkForgetPosition(); }
     m_file.setPos(TAILLE_ENTETE_FIXE, SEEK_SET);  //positionne aprehs l'en-teste fixe
     //<flagIndexej=47> <addrBlocSuivant> <nombreIndex>
     m_file.readBuffer(TAILLE_TETE_INDEX);
@@ -237,6 +261,12 @@ unsigned int NindPadFile::getMaxIdent() const
 //brief Read from file specific datas and leave result into read buffer */
 void NindPadFile::getSpecifics()
 {
+    if (m_isBulk) {
+        m_file.loadInBuffer(&m_bulkTail[0], m_specificsSize + TAILLE_ENTETE_SPEJCIFIQUE);
+        if (m_file.getInt1() != FLAG_SPEJCIFIQUE)
+            throw NindPadFileException("NindPadFile::getSpecifics : " + m_fileName);
+        return;
+    }
     m_file.flush();
     //se positionne sur la teste des spejcifiques
     const int offset = TAILLE_ENTETE_SPEJCIFIQUE + TAILLE_IDENTIFICATION + m_specificsSize;
@@ -251,9 +281,14 @@ void NindPadFile::getSpecifics()
 //param identification where unique identification of file is returned */
 void NindPadFile::getFileIdentification(Identification &identification)
 {
-    m_file.setPos(-TAILLE_IDENTIFICATION, SEEK_END);       //se positionne sur l'identification
-    //<flagIdentification=53> <maxIdentifiant> <identifieurUnique>
-    m_file.readBuffer(TAILLE_IDENTIFICATION);
+    if (m_isBulk) {
+        m_file.loadInBuffer(&m_bulkTail[m_bulkTail.size() - TAILLE_IDENTIFICATION], TAILLE_IDENTIFICATION);
+    }
+    else {
+        m_file.setPos(-TAILLE_IDENTIFICATION, SEEK_END);       //se positionne sur l'identification
+        //<flagIdentification=53> <maxIdentifiant> <identifieurUnique>
+        m_file.readBuffer(TAILLE_IDENTIFICATION);
+    }
     if (m_file.getInt1() != FLAG_IDENTIFICATION)
         throw NindPadFileException("NindPadFile::getFileIdentification : " + m_fileName);
     const unsigned int wordsNb = m_file.getInt4();
@@ -297,6 +332,40 @@ void NindPadFile::writeIdentification(const Identification &fileIdentification)
     m_file.putInt1(FLAG_IDENTIFICATION);
     m_file.putInt4(fileIdentification.lexiconWordsNb);
     m_file.putInt4(fileIdentification.lexiconTime);
+}
+////////////////////////////////////////////////////////////
+//brief write the specifics and identification (the file's tail) from the write buffer
+//param position offset into write buffer of the tail
+//param length length of the tail */
+void NindPadFile::writeTail(const unsigned int position,
+                            const unsigned int length)
+{
+    if (length != getSpecificsAndIdentificationSize())
+        throw NindPadFileException("NindPadFile::writeTail bad tail size " + m_fileName);
+    if (m_isBulk) {
+        m_file.copyOutBuffer(position, length, m_bulkTail);
+        return;
+    }
+    m_file.setPos(-(long int)length, SEEK_END);         //se positionne sur les spejcifiques
+    m_file.writeBuffer(position, length);
+}
+////////////////////////////////////////////////////////////
+//ejcrit [position, position + length) du buffer d'ejcriture ah l'adresse spejcifieje du fichier
+void NindPadFile::bulkWrite(const uint64_t address,
+                            const unsigned int position,
+                            const unsigned int length)
+{
+    if (address != m_bulkPos) {
+        if (m_file.setPos(address, SEEK_SET) != 0) throw WriteFileException(m_fileName);
+    }
+    m_file.writeBuffer(position, length);
+    m_bulkPos = address + length;
+}
+////////////////////////////////////////////////////////////
+//ah appeler aprehs toute lecture du fichier en mode massif
+void NindPadFile::bulkForgetPosition()
+{
+    m_bulkPos = UINT64_MAX;
 }
 ////////////////////////////////////////////////////////////
 //retourne la position d'une entreje
@@ -456,6 +525,7 @@ NindPadFile::HoleStats NindPadFile::chercheVides(list<pair<uint64_t, unsigned in
 //throws NindPadFileException if the file's structure is invalid */
 NindPadFile::PadFileStats NindPadFile::analysePadFile()
 {
+    if (m_isBulk) throw NindPadFileException("NindPadFile::analysePadFile : file in bulk mode " + m_fileName);
     PadFileStats stats;
     stats.dataEntrySize = m_dataEntrySize;
     stats.specificsSize = m_specificsSize;

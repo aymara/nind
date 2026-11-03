@@ -96,8 +96,9 @@ The main process is the bottleneck: at 1M docs, 16 and 48 workers take the
 same time. Its time goes almost entirely into the C++ writers, which make
 every entry durable on its own (~13 system calls per definition written:
 seeks, reads of the indirection entry, `fwrite`+`fflush`, and signal-handler
-swaps around each Ctrl-C-safe critical section). A faster bulk load would
-need a C++-side bulk mode (e.g. buffered indirection and sequential writes).
+swaps around each Ctrl-C-safe critical section). These measurements predate
+the writers' bulk mode (`begin_bulk`/`end_bulk`, see `NindIndex::beginBulk`),
+which `NindIndexer` now uses and this script doesn't yet.
 The main process's memory is mostly worker results waiting to be written;
 at most `2 × workers` chunks (~8 MB of corpus each) are in flight.
 

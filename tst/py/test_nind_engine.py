@@ -160,6 +160,11 @@ def test_index_files_replaces_an_existing_index(tmp_path):
     assert engine.get_tf("bird", 0) == 1
 
 
+#: Files of one generation of an index written by NindIndexer (with a local index).
+INDEX_FILES = ["corpus.ninddoclengths", "corpus.nindlexiconindex", "corpus.nindlocalindex", "corpus.nindmeta",
+               "corpus.nindtermindex", "generation.lock"]
+
+
 def generations(index_dir):
     return sorted(p for p in index_dir.iterdir() if p.is_dir())
 
@@ -203,7 +208,7 @@ def test_sharded_index_equals_direct_index(tmp_path, shards):
         assert sharded.search(query) == pytest.approx(direct.search(query))
     # the shards were built in a temporary directory inside the new generation, and removed
     assert index_files_of(tmp_path / "sharded") == \
-        ["corpus.nindlexiconindex", "corpus.nindlocalindex", "corpus.nindtermindex", "generation.lock"]
+        INDEX_FILES
 
 
 def write_texts(directory, texts):
@@ -230,8 +235,7 @@ def test_engine_keeps_working_across_rebuilds_and_switches_by_itself(tmp_path):
     assert engine.get_df("dog") == 0
     assert engine.get_df("fish") == 2
     # and the previous generation was deleted, since nobody was opening it
-    assert index_files_of(index_dir) == ["corpus.nindlexiconindex", "corpus.nindlocalindex",
-                                         "corpus.nindtermindex", "generation.lock"]
+    assert index_files_of(index_dir) == INDEX_FILES
 
 
 def test_objects_taken_from_an_engine_keep_reading_their_build_after_a_rebuild(tmp_path):
@@ -330,6 +334,9 @@ def test_index_in_the_flat_layout_of_older_versions_is_read_then_replaced(tmp_pa
     old = NindIndexer(str(index_dir), prefix="corpus")
     old._write_index([old._tokenize_file(p) for p in write_texts(tmp_path / "v1", ["cat dog", "dog"])],
                      0, str(index_dir / "corpus"))
+    # older versions wrote neither the metadata nor the document lengths: read from the local index
+    os.remove(str(index_dir / "corpus.nindmeta")) if (index_dir / "corpus.nindmeta").exists() else None
+    os.remove(str(index_dir / "corpus.ninddoclengths"))
     engine = NindEngine(str(index_dir))
     assert engine.get_df("dog") == 2
 
@@ -409,8 +416,7 @@ def test_files_indexed_one_by_one_equal_a_full_build(tmp_path):
     # starts without any index: the first file creates it
     assert [indexer.add_file(path) for path in paths] == list(range(len(paths)))
     assert_same_index(NindEngine(str(index_dir)), expected, INCREMENTAL_TERMS, range(len(paths)))
-    assert index_files_of(index_dir) == ["corpus.nindlexiconindex", "corpus.nindlocalindex",
-                                         "corpus.nindtermindex", "generation.lock"]
+    assert index_files_of(index_dir) == INDEX_FILES
 
 
 def test_files_added_to_an_index_built_by_index_files(tmp_path):
@@ -598,3 +604,172 @@ def test_index_jsonl_rejects_bad_records_and_keeps_previous_index(tmp_path):
             indexer.index_jsonl(str(path))
     assert index_files_of(index_dir) == before
     assert NindEngine(str(index_dir)).get_df("cat") == 1
+
+
+# -- local_index=False, tokenizer options, long tokens, Python tokenizers ------------
+
+import json
+
+from nind.nind_engine import TOKENIZER_DEFAULTS
+
+
+def build_with(tmp_path, name, texts, indexer_kwargs=None, **kwargs):
+    index_dir = tmp_path / name
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus", **(indexer_kwargs or {}))
+    indexer.index_files(write_texts(tmp_path / (name + "-docs"), texts), **kwargs)
+    return indexer, NindEngine(str(index_dir))
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"shards": 3, "workers": 2}])
+def test_index_without_local_index_answers_like_one_with(tmp_path, kwargs):
+    _, full = build_with(tmp_path, "full", SHARDED_TEXTS)
+    _, light = build_with(tmp_path, "light", SHARDED_TEXTS, {"local_index": False}, **kwargs)
+    assert light.local_index is None
+    assert "corpus.nindlocalindex" not in index_files_of(tmp_path / "light")
+    assert_same_index(light, full, INCREMENTAL_TERMS, range(len(SHARDED_TEXTS)))
+
+
+def test_updates_of_an_index_without_local_index(tmp_path):
+    texts = ["cat cat dog", "dog fish", "bird", "eel"]
+    indexer, light = build_with(tmp_path, "light", texts, {"local_index": False})
+    full_indexer, full = build_with(tmp_path, "full", texts)
+    for each in (indexer, full_indexer):
+        with each.update() as update:
+            update.add_text("fish fish fish", doc_id=0)     # replaced
+            update.remove(1)
+            update.add_text("whale cat")
+    assert light.local_index is None
+    assert light.total_docs == 4
+    assert_same_index(light, full, INCREMENTAL_TERMS + ["whale"], range(6))
+    # the layout of an existing index can't be changed by an update
+    with pytest.raises(ValueError):
+        with NindIndexer(str(tmp_path / "light"), prefix="corpus", local_index=True).update() as update:
+            update.add_text("cat")
+    assert light.get_df("cat") == 1
+
+
+def test_tokenizer_options_are_stored_and_used_for_queries_and_updates(tmp_path):
+    indexer, engine = build_with(tmp_path, "lower", ["getHTTPServer", "my_var"],
+                                 {"tokenizer": {"lowercase": True, "split_underscore": False}})
+    meta = json.loads((generations(tmp_path / "lower")[0] / "corpus.nindmeta").read_text())
+    assert meta["tokenizer"] == dict(TOKENIZER_DEFAULTS, lowercase=True, split_underscore=False)
+    assert meta["local_index"] is True
+    assert engine.tokenize("GetHTTP my_var") == ["get", "http", "my_var"]
+    assert engine.get_df("http") == 1 and engine.get_df("my_var") == 1
+    assert [doc_id for doc_id, _ in engine.search("HTTP")] == [0]
+    # an update tokenizes like the index, even from an indexer with default options
+    with NindIndexer(str(tmp_path / "lower"), prefix="corpus").update() as update:
+        update.add_text("HTTP_Client")
+    assert engine.get_df("http_client") == 1
+    # but refuses explicitly different options
+    with pytest.raises(ValueError):
+        with NindIndexer(str(tmp_path / "lower"), prefix="corpus", tokenizer={"lowercase": False}).update():
+            pass
+    with pytest.raises(ValueError):
+        NindIndexer(str(tmp_path), tokenizer={"no_such_option": True})
+    with pytest.raises(ValueError):
+        NindIndexer(str(tmp_path), tokenizer={"max_length": 255})
+
+
+def test_tokens_too_long_for_the_lexicon_are_dropped(tmp_path):
+    # a word of a nind lexicon is at most 254 bytes: longer tokens (base64 blobs, separator lines...)
+    # used to make indexing fail
+    long_token = "a" * 300
+    texts = ["cat %s dog" % long_token, "x" * 254 + " " + "y" * 255]
+    _, engine = build_with(tmp_path, "files", texts)
+    assert engine.get_df("cat") == 1 and engine.get_doc_len(0) == 2
+    assert engine.get_df("x" * 254) == 1 and engine.get_doc_len(1) == 1
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": i, "contents": t} for i, t in enumerate(texts)])
+    (tmp_path / "jsonl").mkdir()
+    NindIndexer(str(tmp_path / "jsonl")).index_jsonl(path)
+    assert NindEngine(str(tmp_path / "jsonl")).get_doc_len(0) == 2
+
+    class WholeWords(NindIndexer):
+        def _default_tokenize(self, text):
+            return text.split()
+    (tmp_path / "python").mkdir()
+    WholeWords(str(tmp_path / "python"), prefix="corpus").index_files(write_texts(tmp_path / "python-docs", texts))
+    assert NindEngine(str(tmp_path / "python")).get_doc_len(0) == 2
+
+
+class SplitOnSpaces(NindIndexer):
+    """A tokenizer in Python: overriding _default_tokenize bypasses the native one."""
+
+    def _default_tokenize(self, text):
+        return text.split(" ")
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"shards": 2, "workers": 2}])
+def test_an_overridden_tokenizer_is_used(tmp_path, kwargs):
+    texts = ["fooBar baz", "fooBar", "baz_qux baz"]
+    index_dir = tmp_path / "python"
+    index_dir.mkdir()
+    SplitOnSpaces(str(index_dir), prefix="corpus").index_files(write_texts(tmp_path / "docs", texts), **kwargs)
+    engine = NindEngine(str(index_dir))
+    assert engine.get_df("fooBar") == 2 and engine.get_df("foo") == 0
+    assert engine.get_tf("baz", 2) == 1 and engine.get_df("baz_qux") == 1
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": i, "contents": t} for i, t in enumerate(texts)])
+    (tmp_path / "jsonl").mkdir()
+    SplitOnSpaces(str(tmp_path / "jsonl")).index_jsonl(path)
+    assert NindEngine(str(tmp_path / "jsonl")).get_df("fooBar") == 2
+
+
+def test_python_and_native_paths_build_the_same_index(tmp_path):
+    class NativeInPython(NindIndexer):
+        def _default_tokenize(self, text):
+            return super()._default_tokenize(text)
+    paths = write_texts(tmp_path / "docs", SHARDED_TEXTS + ["getHTTPServer x86_64 été"])
+    for name, cls in (("native", NindIndexer), ("python", NativeInPython)):
+        (tmp_path / name).mkdir()
+        cls(str(tmp_path / name), prefix="corpus").index_files(paths)
+    # same bytes, but for the lexicon's creation time in each file's identification (its last 4 bytes)
+    for extension in (".nindlexiconindex", ".nindtermindex", ".nindlocalindex"):
+        native_file = generations(tmp_path / "native")[0] / ("corpus" + extension)
+        python_file = generations(tmp_path / "python")[0] / ("corpus" + extension)
+        assert native_file.read_bytes()[:-4] == python_file.read_bytes()[:-4], extension
+    for extension in (".ninddoclengths", ".nindmeta"):
+        native_file = generations(tmp_path / "native")[0] / ("corpus" + extension)
+        python_file = generations(tmp_path / "python")[0] / ("corpus" + extension)
+        assert native_file.read_bytes() == python_file.read_bytes(), extension
+
+
+def test_update_of_an_index_written_before_tokenizer_options_keeps_its_tokenizer(tmp_path):
+    index_dir = tmp_path / "indices"
+    index_dir.mkdir()
+    old = NindIndexer(str(index_dir), prefix="corpus")
+    old._write_index([["BAR"]], 0, str(index_dir / "corpus"))
+    os.remove(str(index_dir / "corpus.ninddoclengths"))     # older versions didn't write it, nor .nindmeta
+    engine = NindEngine(str(index_dir))
+    assert engine.tokenize("FOO_BAR") == ["BAR"]        # the original tokenizer
+    with NindIndexer(str(index_dir), prefix="corpus").update() as update:
+        update.add_text("FOO_BAR")
+    assert engine.get_df("BAR") == 2 and engine.get_df("FOO") == 0
+    meta = json.loads((generations(index_dir)[0] / "corpus.nindmeta").read_text())
+    assert meta["tokenizer"] == "legacy"
+    assert engine.total_docs == 2 and engine.get_doc_len(0) == 1
+
+
+def test_empty_corpus(tmp_path):
+    (tmp_path / "empty").mkdir()
+    NindIndexer(str(tmp_path / "empty"), prefix="corpus").index_files([])
+    engine = NindEngine(str(tmp_path / "empty"))
+    assert engine.total_docs == 0 and engine.search("cat") == []
+
+
+def test_text_not_encodable_in_utf8_is_indexed(tmp_path):
+    # json.loads accepts lone surrogates ("\ud800" escapes): they must not abort indexing
+    path = tmp_path / "corpus.jsonl"
+    path.write_text('{"id": "a", "contents": "a\\ud800b cat"}\n{"id": "b", "contents": "dog"}\n', encoding="utf-8")
+    (tmp_path / "native").mkdir()
+    assert NindIndexer(str(tmp_path / "native")).index_jsonl(str(path)) == ["a", "b"]
+    engine = NindEngine(str(tmp_path / "native"))
+    assert engine.total_docs == 2 and engine.get_df("cat") == 1
+    assert engine.tokenize("x\ud800y") == ["x", "y"]
+    (tmp_path / "python").mkdir()
+    SplitOnSpaces(str(tmp_path / "python")).index_jsonl(str(path))
+    engine = NindEngine(str(tmp_path / "python"))
+    assert engine.get_df("cat") == 1 and engine.get_doc_len(0) == 1     # "a\ud800b" can't be stored
+    with NindIndexer(str(tmp_path / "native")).update() as update:
+        update.add_text("fish\udfff")
+    assert NindEngine(str(tmp_path / "native")).get_df("fish") == 1
