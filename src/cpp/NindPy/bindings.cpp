@@ -31,6 +31,7 @@
 #include "NindIndex/NindIndexMerge.h"
 #include "NindIndex/NindTokenizer.h"
 #include <unordered_map>
+#include <cmath>
 #include "NindExceptions.h"
 ////////////////////////////////////////////////////////////
 namespace py = pybind11;
@@ -256,6 +257,87 @@ private:
     std::vector<size_t> m_docEnds;      //document d is m_tokens[m_docEnds[d-1]:m_docEnds[d]]
     std::vector<uint32_t> m_tokens;     //term ids
     uint32_t m_maxTermId;
+};
+
+// Okapi BM25 over the postings of a term index: see the Bm25Scorer binding below.
+class Bm25Scorer {
+public:
+    // the documents of the corpus, in the order that breaks score ties
+    Bm25Scorer(const UIntView &docIds, const UIntView &lengths, const double avgDocLength):
+        m_documents(), m_docsNb(docIds.size), m_avgDocLength(avgDocLength)
+    {
+        if (docIds.size != lengths.size) throw py::value_error("doc_ids and lengths must have the same length");
+        m_documents.reserve(docIds.size);
+        for (size_t i = 0; i < docIds.size; i++)
+            m_documents[docIds.data[i]] = std::make_pair(i, lengths.data[i]);
+    }
+
+    // the documents with a positive score for the query terms (in query order, repeats
+    // included, 0 = unknown term), by decreasing score, at most topK if topK >= 0
+    std::vector<std::pair<uint32_t, double> > search(NindTermIndex &termIndex,
+                                                     const std::vector<unsigned int> &termIds,
+                                                     const double k1, const double b,
+                                                     const long topK) const
+    {
+        py::gil_scoped_release release;
+        std::unordered_map<uint32_t, double> scores;
+        //the postings of each distinct term, read once: (document, frequency)
+        std::unordered_map<unsigned int, std::pair<uint64_t, std::vector<std::pair<uint32_t, uint32_t> > > > postings;
+        for (size_t t = 0; t < termIds.size(); t++) {
+            if (termIds[t] == 0) continue;
+            auto it = postings.find(termIds[t]);
+            if (it == postings.end()) {
+                it = postings.insert(std::make_pair(termIds[t],
+                    std::make_pair(uint64_t(0), std::vector<std::pair<uint32_t, uint32_t> >()))).first;
+                std::list<NindTermIndex::TermCG> termDef;
+                termIndex.getTermDef(termIds[t], termDef);
+                //df counts the documents of every category; a document's frequency is the
+                //one of the first category it is in
+                std::unordered_map<uint32_t, bool> seen;
+                for (std::list<NindTermIndex::TermCG>::const_iterator cg = termDef.begin(); cg != termDef.end(); cg++) {
+                    (*it).second.first += cg->documents.size();
+                    for (std::list<NindTermIndex::Document>::const_iterator doc = cg->documents.begin(); doc != cg->documents.end(); doc++) {
+                        if (seen.insert(std::make_pair(doc->ident, true)).second)
+                            (*it).second.second.push_back(std::make_pair(doc->ident, doc->frequency));
+                    }
+                }
+            }
+            const double df = (double)(*it).second.first;
+            //same operations, in the same order, as NindEngine._bm25_score
+            const double idf = std::log(((double)((int64_t)m_docsNb - (int64_t)(*it).second.first) + 0.5) / (df + 0.5) + 1.0);
+            const std::vector<std::pair<uint32_t, uint32_t> > &termPostings = (*it).second.second;
+            for (size_t i = 0; i < termPostings.size(); i++) {
+                const double tf = termPostings[i].second;
+                if (termPostings[i].second == 0) continue;
+                const auto doc = m_documents.find(termPostings[i].first);
+                if (doc == m_documents.end()) continue;
+                const double docLength = (*doc).second.second;
+                const double numerator = tf * (k1 + 1);
+                const double denominator = tf + k1 * (1 - b + b * (docLength / m_avgDocLength));
+                scores[termPostings[i].first] += idf * (numerator / denominator);
+            }
+        }
+        //(position, document, score) of the documents with a positive score
+        std::vector<std::pair<std::pair<double, size_t>, uint32_t> > ranked;
+        ranked.reserve(scores.size());
+        for (auto it = scores.begin(); it != scores.end(); it++) {
+            if ((*it).second > 0)
+                ranked.push_back(std::make_pair(std::make_pair(-(*it).second, m_documents.at((*it).first).first), (*it).first));
+        }
+        //decreasing score, then the order of the corpus
+        const size_t kept = (topK >= 0 && (size_t)topK < ranked.size()) ? (size_t)topK : ranked.size();
+        std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
+        std::vector<std::pair<uint32_t, double> > result(kept);
+        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(ranked[i].second, -ranked[i].first.first);
+        return result;
+    }
+
+    size_t docsNb() const { return m_docsNb; }
+
+private:
+    std::unordered_map<uint32_t, std::pair<size_t, uint32_t> > m_documents;   //id -> (position, length)
+    size_t m_docsNb;
+    double m_avgDocLength;
 };
 }
 ////////////////////////////////////////////////////////////
@@ -680,6 +762,19 @@ PYBIND11_MODULE(_native, m) {
         .def_property_readonly("docs_nb", &IndexBuilder::docsNb)
         .def_property_readonly("tokens_nb", &IndexBuilder::tokensNb)
         .def_property_readonly("max_term_id", &IndexBuilder::maxTermId);
+
+    // ---- Bm25Scorer -------------------------------------------------------
+    // Okapi BM25 search driven by the postings of the query terms (only the documents
+    // containing them are scored). Built once per index from its documents' lengths;
+    // search() reads the term index (not thread-safe: one search at a time per reader)
+    // with the GIL released.
+    py::class_<Bm25Scorer>(m, "Bm25Scorer")
+        .def(py::init([](const py::buffer &docIds, const py::buffer &lengths, double avgDocLength) {
+            return new Bm25Scorer(uintView(docIds, "doc_ids"), uintView(lengths, "lengths"), avgDocLength);
+        }), py::arg("doc_ids"), py::arg("lengths"), py::arg("avg_doc_len"))
+        .def("search", &Bm25Scorer::search, py::arg("term_index"), py::arg("term_ids"),
+             py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1)
+        .def_property_readonly("docs_nb", &Bm25Scorer::docsNb);
 
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")
         .def(py::init<>())

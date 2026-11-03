@@ -773,3 +773,72 @@ def test_text_not_encodable_in_utf8_is_indexed(tmp_path):
     with NindIndexer(str(tmp_path / "native")).update() as update:
         update.add_text("fish\udfff")
     assert NindEngine(str(tmp_path / "native")).get_df("fish") == 1
+
+
+# -- search from the postings lists --------------------------------------------------
+
+import random
+
+from nind import _native as native
+
+
+def full_scan_search(engine, query, top_k=10):
+    """The former NindEngine.search: every document scored with bm25_score."""
+    scores = []
+    for doc_id in engine._snapshot.doc_ids:
+        score = engine.bm25_score(query, doc_id)
+        if score > 0:
+            scores.append((doc_id, score))
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return scores[:top_k]
+
+
+def test_search_from_postings_equals_the_full_scan(tmp_path):
+    rng = random.Random(42)
+    words = ["w%s" % "abcdefghij"[i % 10] * (1 + i // 10) for i in range(40)]
+    texts = [" ".join(rng.choice(words[:rng.randint(3, 40)]) for _ in range(rng.randint(1, 30)))
+             for _ in range(300)]
+    texts[7] = texts[3]         # identical documents: equal scores, kept in index order
+    texts[12] = ""              # an empty document isn't stored
+    _, engine = build_with(tmp_path, "random", texts)
+    queries = ["wa", "wa wb", "wa wa wc", "wjjjj wa unknown", "unknown", "", " ".join(words)]
+    queries += [" ".join(rng.sample(words, 3)) for _ in range(20)]
+    for query in queries:
+        expected = full_scan_search(engine, query, None)
+        for top_k in (10, 0, 1, 1000, None, -3):
+            assert engine.search(query, top_k=top_k) == expected[:top_k], (query, top_k)
+
+
+def test_search_with_several_categories_per_term(tmp_path):
+    # Amose-style term definitions: a term in several grammatical categories, a document in
+    # more than one of them: its frequency is the first category's, df counts both
+    _, engine = build_with(tmp_path, "cg", ["cat dog", "cat", "dog dog", "bird"])
+    base = str(generations(tmp_path / "cg")[0] / "corpus")
+    lexicon = native.NindLexiconIndex(base, is_writer=False)
+    identification = lexicon.get_identification()
+    cat = lexicon.get_word_id(["cat"])
+    del lexicon
+    first, second = native.TermCG(1, 5), native.TermCG(2, 3)
+    first.documents = [native.Document(0, 2), native.Document(1, 3)]
+    second.documents = [native.Document(0, 1), native.Document(3, 2)]
+    term_index = native.NindTermIndex(base, is_writer=True, lexicon_identification=identification,
+                                      specifics_number=0)
+    term_index.set_term_def(cat, [first, second], identification, [])
+    del term_index
+    engine = NindEngine(str(tmp_path / "cg"))
+    assert engine.get_df("cat") == 4 and engine.get_tf("cat", 0) == 2
+    for query in ["cat", "cat dog", "cat cat bird"]:
+        assert engine.search(query) == full_scan_search(engine, query), query
+    assert [doc_id for doc_id, _ in engine.search("cat")] == [1, 3, 0]   # tf 3; tf 2 in 1 token; tf 2 in 2
+
+
+def test_search_scales_with_the_postings_not_the_corpus(tmp_path):
+    # a corpus where the query term is in one document out of 10000: answered without
+    # scoring the others (the full scan took minutes at this size)
+    texts = ["filler%s" % "abcdefghij"[i % 10] for i in range(10000)]
+    texts[2345] = "needle filler"
+    _, engine = build_with(tmp_path, "big", texts, workers=1)
+    started = time.perf_counter()
+    for _ in range(100):
+        assert engine.search("needle") == [(2345, engine.bm25_score("needle", 2345))]
+    assert time.perf_counter() - started < 2

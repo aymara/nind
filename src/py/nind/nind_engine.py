@@ -279,6 +279,14 @@ class _Snapshot:
         self.total_docs = len(self.doc_ids)
         total_len = sum(lengths.values())
         self.avg_doc_len = total_len / self.total_docs if self.total_docs else 0
+        self.scorer = native.Bm25Scorer(array('I', self.doc_ids), array('I', (lengths[d] for d in self.doc_ids)),
+                                        self.avg_doc_len)
+
+    def search(self, terms, k1, b, top_k):
+        # the scores of the documents containing the terms, by decreasing score (see native.Bm25Scorer)
+        term_ids = [self.term_id(term) for term in terms]
+        # the native term index reader behind self.term_index
+        return self.scorer.search(self.term_index._native, term_ids, k1, b, top_k)
 
     def term_id(self, term):
         return self.lexicon.donneIdentifiant([term])
@@ -469,17 +477,17 @@ class NindEngine:
         :return: a list of ``(doc_id, score)`` tuples, sorted by descending
             score, of length at most ``top_k`` (only documents with a
             positive score are included).
-        """
-        with self._session() as snapshot:
-            tokens = self.tokenize(query)
-            scores = []
-            for doc_id in snapshot.doc_ids:
-                score = self._bm25_score(snapshot, tokens, doc_id, 1.5, 0.75)
-                if score > 0:
-                    scores.append((doc_id, score))
 
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return scores[:top_k]
+        Only the documents containing a query term are scored, from the
+        terms' postings lists (in native code): the cost depends on how many
+        documents contain the query terms, not on the size of the corpus.
+        Scores are those of :meth:`bm25_score`; equal scores keep the order
+        of the documents in the index.
+        """
+        limit = top_k if isinstance(top_k, int) and top_k >= 0 else -1
+        with self._session() as snapshot:
+            results = snapshot.search(self.tokenize(query), 1.5, 0.75, limit)
+        return results if limit >= 0 else results[:top_k]
 
 class _CancelUpdate(Exception):
     """Raised into the generation of an update that changes nothing, so that it isn't published."""
