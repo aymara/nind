@@ -39,7 +39,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
-from ._index_store import IndexStore, INDEX_EXTENSIONS, META_EXTENSION, DOC_LENGTHS_EXTENSION
+from ._index_store import IndexStore, INDEX_EXTENSIONS, META_EXTENSION, DOC_LENGTHS_EXTENSION, DOC_NAMES_EXTENSION
 try:
     from . import _native as native
 except ImportError:
@@ -241,6 +241,20 @@ def _read_doc_lengths(base):
     return dict(zip(doc_ids, values))
 
 
+def _write_doc_names(base, names):
+    """Write ``{document id: name}`` (names: unique strings; other values are converted with str)."""
+    doc_ids = sorted(names)
+    native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('I', doc_ids),
+                              [name if isinstance(name, str) else str(name) for name in map(names.__getitem__, doc_ids)])
+
+
+def _read_doc_names(base):
+    """The document names of the index at ``base`` (``None`` if it has none)."""
+    if not os.path.exists(base + DOC_NAMES_EXTENSION):
+        return None
+    return native.NindDocNames(base + DOC_NAMES_EXTENSION)
+
+
 def _local_index_lengths(base):
     # the document lengths of an index written before they were stored apart
     lexicon = native.NindLexiconIndex(base, is_writer=False)
@@ -281,6 +295,7 @@ class _Snapshot:
         self.avg_doc_len = total_len / self.total_docs if self.total_docs else 0
         self.scorer = native.Bm25Scorer(array('I', self.doc_ids), array('I', (lengths[d] for d in self.doc_ids)),
                                         self.avg_doc_len)
+        self.doc_names = _read_doc_names(base)
 
     def search(self, terms, k1, b, top_k):
         # the scores of the documents containing the terms, by decreasing score (see native.Bm25Scorer)
@@ -439,6 +454,24 @@ class NindEngine:
         with self._session() as snapshot:
             return snapshot.doc_len(doc_id)
 
+    def doc_name(self, doc_id):
+        """The name of a document: its identifier in the corpus (e.g. the ``id`` of its
+        record for :meth:`NindIndexer.index_jsonl`).
+
+        :param doc_id: the document's identifier in the index.
+        :return: its name, or ``None`` if it has none.
+        """
+        with self._session() as snapshot:
+            return snapshot.doc_names.name(doc_id) if snapshot.doc_names is not None else None
+
+    def doc_id(self, name):
+        """The identifier in the index of the document named ``name`` (see :meth:`doc_name`).
+
+        :return: the document's identifier, or ``None`` if no document has that name.
+        """
+        with self._session() as snapshot:
+            return snapshot.doc_names.doc_id(name) if snapshot.doc_names is not None else None
+
     def bm25_score(self, query, doc_id, k1=1.5, b=0.75):
         """Compute the Okapi BM25 relevance score of a document for a query.
 
@@ -469,14 +502,17 @@ class NindEngine:
 
         return score
 
-    def search(self, query, top_k=10):
+    def search(self, query, top_k=10, doc_names=False):
         """Search the corpus with BM25 and return the top-scoring documents.
 
         :param query: the query text.
         :param top_k: maximum number of results to return.
-        :return: a list of ``(doc_id, score)`` tuples, sorted by descending
-            score, of length at most ``top_k`` (only documents with a
-            positive score are included).
+        :param doc_names: return the documents' names (see :meth:`doc_name`;
+            ``None`` for a document without name) instead of their
+            identifiers in the index - like pyserini's hits' ``docid``.
+        :return: a list of ``(doc_id, score)`` tuples (``(name, score)``
+            with ``doc_names``), sorted by descending score, of length at
+            most ``top_k`` (only documents with a positive score are included).
 
         Only the documents containing a query term are scored, from the
         terms' postings lists (in native code): the cost depends on how many
@@ -487,7 +523,13 @@ class NindEngine:
         limit = top_k if isinstance(top_k, int) and top_k >= 0 else -1
         with self._session() as snapshot:
             results = snapshot.search(self.tokenize(query), 1.5, 0.75, limit)
-        return results if limit >= 0 else results[:top_k]
+            if limit < 0:
+                results = results[:top_k]
+            if doc_names:
+                names = snapshot.doc_names.names([doc_id for doc_id, _ in results]) \
+                    if snapshot.doc_names is not None else [None] * len(results)
+                results = [(name, score) for name, (_, score) in zip(names, results)]
+        return results
 
 class _CancelUpdate(Exception):
     """Raised into the generation of an update that changes nothing, so that it isn't published."""
@@ -582,6 +624,14 @@ class IndexUpdate:
         self._existing = set(self._lengths)
         self._pending = {}      # doc id -> its tokens, or None to remove it
         self._next_id = max(self._existing) + 1 if self._existing else 0
+        # document names: doc id -> name and back
+        names = _read_doc_names(self._base)
+        self._had_names = names is not None
+        self._names = {}
+        if names is not None:
+            doc_ids, doc_names = names.entries()
+            self._names = dict(zip(_uint_array(doc_ids), doc_names))
+        self._ids_by_name = {name: doc_id for doc_id, name in self._names.items()}
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -607,25 +657,30 @@ class IndexUpdate:
         return False
 
     # -- changes ------------------------------------------------------------
-    def add_file(self, path, doc_id=None):
+    def add_file(self, path, doc_id=None, name=None):
         """Index the text file ``path`` as one document.
 
         :param path: path to a UTF-8 (or UTF-8-decodable, with errors
             ignored) text file.
         :param doc_id: the document's identifier; replaces the document with
-            this id if there is one. Default: one more than the highest id
-            in the index or in this update (``0`` for the first document).
+            this id if there is one. Default: the document named ``name`` if
+            there is one, else one more than the highest id in the index or
+            in this update (``0`` for the first document).
+        :param name: the document's name (see :meth:`NindEngine.doc_name`),
+            unique in the index: adding a document with the name of another
+            one replaces it (unless ``doc_id`` is another document: then
+            ``ValueError``). Default: a replaced document keeps its name.
         :return: the document's identifier.
         """
         self._check_active()
-        return self.add_tokens(self._tokenizing_indexer._tokenize_file(path), doc_id)
+        return self.add_tokens(self._tokenizing_indexer._tokenize_file(path), doc_id, name)
 
-    def add_text(self, text, doc_id=None):
+    def add_text(self, text, doc_id=None, name=None):
         """Index ``text`` as one document; see :meth:`add_file`."""
         self._check_active()
-        return self.add_tokens(self._tokenizing_indexer._default_tokenize(text), doc_id)
+        return self.add_tokens(self._tokenizing_indexer._default_tokenize(text), doc_id, name)
 
-    def add_tokens(self, tokens, doc_id=None):
+    def add_tokens(self, tokens, doc_id=None, name=None):
         """Index an already tokenized document; see :meth:`add_file`.
 
         A document without any token isn't stored (an existing document with
@@ -633,10 +688,33 @@ class IndexUpdate:
         than 254 bytes in UTF-8) are dropped.
         """
         self._check_active()
+        if name is not None:
+            name = name if isinstance(name, str) else str(name)
+            owner = self._ids_by_name.get(name)
+            if doc_id is None:
+                doc_id = owner
+            elif owner is not None and owner != _check_doc_id(doc_id):
+                raise ValueError("another document (%d) is named %r" % (owner, name))
         doc_id = self._next_id if doc_id is None else _check_doc_id(doc_id)
         self._pending[doc_id] = [token for token in tokens if _storable(token)]
         self._next_id = max(self._next_id, doc_id + 1)
+        if name is not None:
+            self._set_name(doc_id, name)
         return doc_id
+
+    def doc_id(self, name):
+        """The identifier of the document named ``name`` (``None`` if there is none),
+        changes of this update included."""
+        self._check_active()
+        return self._ids_by_name.get(name)
+
+    def _set_name(self, doc_id, name):
+        previous = self._names.pop(doc_id, None)
+        if previous is not None:
+            del self._ids_by_name[previous]
+        if name is not None:
+            self._names[doc_id] = name
+            self._ids_by_name[name] = doc_id
 
     def remove(self, doc_id):
         """Remove the document ``doc_id`` from the index.
@@ -646,6 +724,7 @@ class IndexUpdate:
         """
         self._check_active()
         doc_id = _check_doc_id(doc_id)
+        self._set_name(doc_id, None)
         if doc_id in self._existing:
             found = self._pending.get(doc_id, True) is not None
             self._pending[doc_id] = None
@@ -702,6 +781,12 @@ class IndexUpdate:
                 self._lengths.pop(doc_id, None)
         _write_doc_lengths(self._base, self._lengths)
         _write_meta(self._base, self._tokenizer_options, self._local)
+        if self._names or self._had_names:
+            # the names of documents that are no longer stored (no tokens left) go too
+            if os.path.exists(self._base + DOC_NAMES_EXTENSION):
+                os.remove(self._base + DOC_NAMES_EXTENSION)
+            _write_doc_names(self._base, {doc_id: name for doc_id, name in self._names.items()
+                                          if doc_id in self._lengths})
 
     def _open_writers(self, vocabulary_size, docs_nb):
         # in bulk mode: nobody reads this generation before it is published
@@ -829,7 +914,7 @@ class NindIndexer:
         # Do not initialize engine here; files may not exist yet
         self.engine = None
 
-    def index_files(self, file_paths, workers=None, shards=1):
+    def index_files(self, file_paths, workers=None, shards=1, doc_names=None):
         """Tokenize ``file_paths`` and write the resulting corpus as a nind index.
 
         Each file becomes one document, identified externally by its
@@ -857,10 +942,17 @@ class NindIndexer:
             part of ``file_paths``) built in parallel processes, then merged
             into this one by ``nind._native.merge_indexes``. ``1`` builds the
             index directly. At most ``workers`` shards are built at a time.
+        :param doc_names: the documents' names (their identifiers in the
+            corpus, unique), in ``file_paths`` order; :meth:`NindEngine.doc_name`
+            and ``search(..., doc_names=True)`` return them. Default: none.
         """
         if native is None:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         file_paths = list(file_paths)
+        if doc_names is not None:
+            doc_names = list(doc_names)
+            if len(doc_names) != len(file_paths):
+                raise ValueError("doc_names and file_paths must have the same length")
         shards = max(1, min(shards, len(file_paths)))
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             if shards > 1:
@@ -868,6 +960,8 @@ class NindIndexer:
             else:
                 self._write_chunks(self._tokenize_chunks(file_paths, workers), 0, base)
             _write_meta(base, self.tokenizer_options, self._with_local_index)
+            if doc_names is not None:
+                _write_doc_names(base, dict(enumerate(doc_names)))
 
     @property
     def _with_local_index(self):
@@ -917,6 +1011,8 @@ class NindIndexer:
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             self._write_chunks([chunk for _, chunk in parts], 0, base)
             _write_meta(base, self.tokenizer_options, self._with_local_index)
+            # the records' ids are the documents' names (converted to strings, unique)
+            _write_doc_names(base, dict(enumerate(ids)))
         return ids
 
     #: Below this many bytes of JSON Lines, :meth:`index_jsonl` works in-process.
@@ -984,24 +1080,29 @@ class NindIndexer:
         """
         return IndexUpdate(self)
 
-    def add_files(self, file_paths, doc_ids=None, workers=None):
+    def add_files(self, file_paths, doc_ids=None, workers=None, doc_names=None):
         """Add (or replace) documents incrementally: one :meth:`update` for all of ``file_paths``.
 
         :param file_paths: paths of the text files to index, one document each.
         :param doc_ids: their identifiers (an existing document with the same
-            id is replaced); default: new ids following the highest one.
+            id is replaced); default: new ids following the highest one, or
+            the document with the same name.
         :param workers: processes tokenizing the files, as in :meth:`index_files`.
+        :param doc_names: their names (see :meth:`IndexUpdate.add_file`).
         :return: the documents' identifiers, in ``file_paths`` order.
         """
         if doc_ids is not None and len(doc_ids) != len(file_paths):
             raise ValueError("doc_ids and file_paths must have the same length")
+        if doc_names is not None and len(doc_names) != len(file_paths):
+            raise ValueError("doc_names and file_paths must have the same length")
         with self.update() as update:
             # tokenized like the index
             tokenized = update._tokenizing_indexer._tokenize_files(list(file_paths), workers)
-            return [update.add_tokens(tokens, None if doc_ids is None else doc_ids[i])
+            return [update.add_tokens(tokens, None if doc_ids is None else doc_ids[i],
+                                      None if doc_names is None else doc_names[i])
                     for i, tokens in enumerate(tokenized)]
 
-    def add_file(self, path, doc_id=None):
+    def add_file(self, path, doc_id=None, name=None):
         """Add (or replace) one document incrementally; see :meth:`add_files`.
 
         Each call publishes a new version of the index, which costs a copy
@@ -1011,7 +1112,7 @@ class NindIndexer:
         :return: the document's identifier.
         """
         with self.update() as update:
-            return update.add_file(path, doc_id)
+            return update.add_file(path, doc_id, name)
 
     def remove_documents(self, doc_ids):
         """Remove documents from the index, in one :meth:`update`.

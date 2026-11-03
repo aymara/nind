@@ -1,0 +1,100 @@
+//
+// C++ Interface: NindDocNames
+//
+// Description: the names of the documents of an index (their identifiers in the
+// corpus, e.g. "d49309"), for both lookups: document id -> name and name -> document id.
+// Written once (a new index generation is never modified), read whole.
+//
+// Copyright: 2026 LATEJCON. See LICENCE.md file that comes with this distribution
+// This file is part of NIND (as "nouvelle indexation").
+// NIND is free software: you can redistribute it and/or modify it under the terms of the
+// GNU Less General Public License (LGPL) as published by the Free Software Foundation,
+// (see <http://www.gnu.org/licenses/>), either version 3 of the License, or any later version.
+// NIND is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+// even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Less General Public License for more details.
+////////////////////////////////////////////////////////////
+#ifndef NindDocNames_H
+#define NindDocNames_H
+////////////////////////////////////////////////////////////
+#include "NindCommonExport.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+////////////////////////////////////////////////////////////
+namespace latecon {
+    namespace nindex {
+////////////////////////////////////////////////////////////
+/**\brief The names of the documents of an index (file <name>.ninddocnames).
+* <fichier>        ::= <magic="NINDDN01"> <flags> <nombre> <premierIdent>
+*                      [ <idents> ] <offsets> <parNom> <noms>
+* <flags>          ::= <Entier4>    bit 0 : idents given (otherwise premierIdent, premierIdent + 1...)
+* <nombre>         ::= <Entier4>    number of documents
+* <premierIdent>   ::= <Entier4>
+* <idents>         ::= { <Entier4> }    nombre idents, strictly increasing
+* <offsets>        ::= { <Entier4> }    nombre + 1 offsets into <noms>, the first 0, increasing
+* <parNom>         ::= { <Entier4> }    the documents' ranks in increasing name order (byte order)
+* <noms>           ::= { <Octet> }      the names (UTF-8), in document order
+* Entier4: 4 bytes, little-endian. Names are unique; they may be empty. */
+class DLLExportLexicon NindDocNames {
+public:
+    /**\brief Write the names of documents into a new file
+    *\param fileName file name (must not exist)
+    *\param docIdents document idents
+    *\param names their names, in the same order (unique)
+    *\throws std::invalid_argument if the sizes differ, an ident or a name is repeated,
+    * or the names are too long together (4 GiB)
+    *\throws OpenFileException or WriteFileException on I/O errors (the file is then removed) */
+    static void write(const std::string &fileName,
+                      const std::vector<uint32_t> &docIdents,
+                      const std::vector<std::string> &names);
+
+    /**\brief Read the names of an index
+    *\param fileName file name
+    *\throws OpenFileException, ReadFileException, FormatFileException if invalid */
+    explicit NindDocNames(const std::string &fileName);
+
+    /**\brief number of documents */
+    size_t size() const { return m_size; }
+
+    /**\brief get the name of a document
+    *\param docIdent document ident
+    *\param name receives its name
+    *\return true if the document has a name */
+    bool getName(const uint32_t docIdent,
+                 std::string &name) const;
+
+    /**\brief get the document of a name
+    *\param name the name
+    *\param docIdent receives the document ident
+    *\return true if a document has that name */
+    bool getDocIdent(const std::string &name,
+                     uint32_t &docIdent) const;
+
+    /**\brief every (document, name), in increasing document ident order
+    *\param docIdents receives the documents
+    *\param names receives their names */
+    void getEntries(std::vector<uint32_t> &docIdents,
+                    std::vector<std::string> &names) const;
+
+private:
+    uint32_t read4(const size_t offset) const;
+    uint32_t docIdentAt(const size_t rank) const;
+    //the name of the document of rank rank: (offset into m_bytes, length)
+    std::pair<size_t, size_t> nameAt(const size_t rank) const;
+    //compares the name of rank rank with name (like std::string::compare)
+    int compareName(const size_t rank, const char *name, const size_t length) const;
+
+    std::string m_fileName;
+    std::vector<unsigned char> m_bytes;     //the whole file
+    size_t m_size;
+    bool m_hasIdents;
+    uint32_t m_firstIdent;
+    size_t m_identsPos, m_offsetsPos, m_byNamePos, m_namesPos;
+};
+////////////////////////////////////////////////////////////
+    } // end namespace
+} // end namespace
+#endif
+////////////////////////////////////////////////////////////
