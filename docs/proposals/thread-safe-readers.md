@@ -34,6 +34,25 @@ process holds its own copy of everything per index: document lengths (a
 Python dict, most of nind's 1.5 GB peak search memory on MS MARCO), the scorer's arrays, the document names.
 With threads, one copy and one page cache serve all of them.
 
+## Principles kept from the original design
+
+- **Readers synchronize through the files themselves** (the original author's
+  *synchronisation des lecteurs par les fichiers*, LAT2017.JYS.468, referenced
+  by his other documents but not available here): one writer appends in
+  place, readers notice new definitions lazily, and no lock is taken across
+  processes. Section 2 keeps that protocol and only makes it safe between
+  threads of one process; LAT2017.JYS.468 should be checked before
+  implementing it.
+- **Function first, the byte last**, and **a robust system accommodates
+  errors**: thread safety must not cost the single-threaded path (the
+  existing API is kept as is), and a reader that meets a damaged or
+  half-written definition reports it (exception) and keeps serving the rest,
+  as today.
+- **The term index can be rebuilt from the lexicon and the local index**:
+  which is what makes treating a published generation as immutable (section
+  3) safe. Damage is repaired by a rebuild into a new generation, never by
+  patching files under live readers.
+
 ## Proposal
 
 Separate what's **shared and immutable** (the open file, the indirection
