@@ -32,6 +32,15 @@ object per line) is indexed directly, record `n` becoming document `n`:
 record_ids = indexer.index_jsonl("corpus.jsonl")   # record_ids[n]: the "id" of document n
 ```
 
+The records' ids are stored with the index, so results can be reported with
+them, like pyserini's hits' `docid` (`index_files` takes them as
+`doc_names=[...]`):
+
+```python
+engine.search("binary search tree", doc_names=True)  # [("d49309", 12.7), ...]
+engine.doc_name(0), engine.doc_id("d49309")
+```
+
 ## Tokenizer and index options
 
 Texts are tokenized by a native tokenizer for source-code-like text: words

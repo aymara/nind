@@ -842,3 +842,90 @@ def test_search_scales_with_the_postings_not_the_corpus(tmp_path):
     for _ in range(100):
         assert engine.search("needle") == [(2345, engine.bm25_score("needle", 2345))]
     assert time.perf_counter() - started < 2
+
+
+# -- document names (the corpus's own identifiers) ----------------------------------
+
+def test_index_jsonl_stores_the_records_ids(tmp_path):
+    records = [{"id": "d%d" % (1000 - i), "contents": text} for i, text in enumerate(SHARDED_TEXTS)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    (tmp_path / "jsonl").mkdir()
+    NindIndexer(str(tmp_path / "jsonl")).index_jsonl(path)
+    engine = NindEngine(str(tmp_path / "jsonl"))
+    for doc_id, record in enumerate(records):
+        assert engine.doc_name(doc_id) == record["id"]
+        assert engine.doc_id(record["id"]) == doc_id
+    assert engine.doc_name(len(records)) is None and engine.doc_id("nope") is None
+    hits = engine.search("fish eel", doc_names=True)
+    assert hits == [(engine.doc_name(doc_id), score) for doc_id, score in engine.search("fish eel")]
+    assert hits[0][0] == "d994"         # document 6, "eel": the shortest match
+    # numeric ids are stored as strings
+    path = write_jsonl(tmp_path / "numeric.jsonl", [{"id": 7, "contents": "cat"}, {"id": 3, "contents": "dog"}])
+    (tmp_path / "numeric").mkdir()
+    assert NindIndexer(str(tmp_path / "numeric")).index_jsonl(path) == [7, 3]
+    assert NindEngine(str(tmp_path / "numeric")).doc_id("3") == 1
+
+
+def test_duplicate_record_ids_are_refused(tmp_path):
+    (tmp_path / "jsonl").mkdir()
+    indexer = NindIndexer(str(tmp_path / "jsonl"), prefix="corpus")
+    indexer.index_jsonl(write_jsonl(tmp_path / "good.jsonl", [{"id": "a", "contents": "cat"}]))
+    before = index_files_of(tmp_path / "jsonl")
+    path = write_jsonl(tmp_path / "dup.jsonl", [{"id": "a", "contents": "cat"}, {"id": "a", "contents": "dog"}])
+    with pytest.raises(ValueError):
+        indexer.index_jsonl(path)
+    assert index_files_of(tmp_path / "jsonl") == before
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"shards": 3, "workers": 2}])
+def test_index_files_with_doc_names(tmp_path, kwargs):
+    names = ["file-%s.py" % chr(ord("a") + i) for i in range(len(SHARDED_TEXTS))]
+    _, engine = build_with(tmp_path, "named", SHARDED_TEXTS, doc_names=names, **kwargs)
+    assert [engine.doc_name(i) for i in range(len(names))] == names
+    assert engine.doc_id("file-c.py") == 2
+    _, unnamed = build_with(tmp_path, "unnamed", SHARDED_TEXTS)
+    assert unnamed.doc_name(0) is None and unnamed.doc_id("file-a.py") is None
+    assert unnamed.search("cat", doc_names=True) == [(None, score) for _, score in unnamed.search("cat")]
+    assert "corpus.ninddocnames" not in index_files_of(tmp_path / "unnamed")
+    with pytest.raises(ValueError):
+        NindIndexer(str(tmp_path / "unnamed"), prefix="corpus").index_files(["x"], doc_names=["a", "b"])
+
+
+def test_updates_keep_document_names(tmp_path):
+    path = write_jsonl(tmp_path / "corpus.jsonl",
+                       [{"id": "a", "contents": "cat"}, {"id": "b", "contents": "dog"}, {"id": "c", "contents": "eel"}])
+    index_dir = tmp_path / "jsonl"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    indexer.index_jsonl(str(path))
+    engine = NindEngine(str(index_dir))
+    with indexer.update() as update:
+        assert update.doc_id("b") == 1
+        assert update.add_text("bird bird", name="b") == 1           # replaces the document named b
+        assert update.add_text("fish", name="d") == 3                # a new document
+        assert update.add_text("whale", doc_id=0) == 0               # replaced: keeps its name
+        assert update.remove(2)                                      # its name goes with it
+        with pytest.raises(ValueError):
+            update.add_text("x", doc_id=0, name="d")                 # d is another document
+        assert update.add_text("cow", doc_id=3, name="e") == 3       # renamed
+    assert [engine.doc_name(i) for i in range(5)] == ["a", "b", None, "e", None]
+    assert engine.doc_id("c") is None and engine.doc_id("d") is None
+    assert engine.get_tf("bird", engine.doc_id("b")) == 2
+    assert engine.search("whale cow", doc_names=True)[0][0] in ("a", "e")
+    assert indexer.add_file(write_texts(tmp_path / "more", ["cat"])[0], name="a") == 0
+    assert engine.get_df("whale") == 0 and engine.get_tf("cat", 0) == 1
+    # an index without names gets them with its first named document
+    _, unnamed = build_with(tmp_path, "unnamed", ["cat", "dog"])
+    with NindIndexer(str(tmp_path / "unnamed"), prefix="corpus").update() as update:
+        update.add_text("eel", name="x")
+    assert unnamed.doc_name(2) == "x" and unnamed.doc_name(0) is None
+
+
+def test_document_names_are_stored_compactly(tmp_path):
+    records = [{"id": "d%d" % i, "contents": "word%s" % "abcdefghij"[i % 10]} for i in range(2000)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    (tmp_path / "jsonl").mkdir()
+    NindIndexer(str(tmp_path / "jsonl"), prefix="corpus").index_jsonl(path)
+    names_file = generations(tmp_path / "jsonl")[0] / "corpus.ninddocnames"
+    # consecutive document ids aren't stored: 8 bytes per document plus the names
+    assert names_file.stat().st_size == 20 + 4 + 8 * 2000 + sum(len(r["id"]) for r in records)

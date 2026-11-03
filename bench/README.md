@@ -13,11 +13,11 @@ the design discussion this came out of for why. Three things are measured:
 3. **Term/document lookup latency**, through the same `nind._native`-backed
    Python reader classes real callers use.
 
-Retrieval effectiveness (nDCG/MAP vs. qrels) is out of scope: `NindEngine`
-would first need stable external document ids (`index_jsonl` returns the
-records' ids but doesn't store them). Its search is driven by the postings
-lists (`nind._native.Bm25Scorer`), so it scales with the query terms'
-document frequencies, not the corpus size.
+Retrieval effectiveness (nDCG/MAP vs. qrels) isn't measured here, though
+`NindEngine` now has what it needs: `index_jsonl` stores the records' ids
+(`search(..., doc_names=True)` returns them, like pyserini's `docid`) and its
+search is driven by the postings lists (`nind._native.Bm25Scorer`), so it
+scales with the query terms' document frequencies, not the corpus size.
 
 ## Corpus: MS MARCO Passage Ranking
 

@@ -30,6 +30,7 @@
 #include "NindIndex/NindLocalIndex.h"
 #include "NindIndex/NindIndexMerge.h"
 #include "NindIndex/NindTokenizer.h"
+#include "NindIndex/NindDocNames.h"
 #include <unordered_map>
 #include <cmath>
 #include "NindExceptions.h"
@@ -762,6 +763,47 @@ PYBIND11_MODULE(_native, m) {
         .def_property_readonly("docs_nb", &IndexBuilder::docsNb)
         .def_property_readonly("tokens_nb", &IndexBuilder::tokensNb)
         .def_property_readonly("max_term_id", &IndexBuilder::maxTermId);
+
+    // ---- NindDocNames -----------------------------------------------------
+    // The names of an index's documents (their identifiers in the corpus), both ways.
+    py::class_<NindDocNames>(m, "NindDocNames")
+        .def(py::init<const std::string &>(), py::arg("file_name"))
+        // writes a new file (never overwrites one); ValueError on a repeated ident or name
+        .def_static("write", [](const std::string &fileName, const py::buffer &docIds,
+                                const std::vector<std::string> &names) {
+            const UIntView ids = uintView(docIds, "doc_ids");
+            const std::vector<uint32_t> idents(ids.data, ids.data + ids.size);
+            py::gil_scoped_release release;
+            NindDocNames::write(fileName, idents, names);
+        }, py::arg("file_name"), py::arg("doc_ids"), py::arg("names"))
+        .def("name", [](const NindDocNames &self, uint32_t docId) -> py::object {
+            std::string name;
+            if (!self.getName(docId, name)) return py::none();
+            return py::str(name);
+        }, py::arg("doc_id"))
+        // the names of many documents (None for a document without name)
+        .def("names", [](const NindDocNames &self, const std::vector<uint32_t> &docIds) {
+            py::list result;
+            std::string name;
+            for (size_t i = 0; i < docIds.size(); i++) {
+                if (self.getName(docIds[i], name)) result.append(py::str(name));
+                else result.append(py::none());
+            }
+            return result;
+        }, py::arg("doc_ids"))
+        .def("doc_id", [](const NindDocNames &self, const std::string &name) -> py::object {
+            uint32_t docId = 0;
+            if (!self.getDocIdent(name, docId)) return py::none();
+            return py::int_(docId);
+        }, py::arg("name"))
+        // every (document, name): (doc ids as uint32 bytes, names), in increasing doc id order
+        .def("entries", [](const NindDocNames &self) {
+            std::vector<uint32_t> docIds;
+            std::vector<std::string> names;
+            self.getEntries(docIds, names);
+            return py::make_tuple(uintBytes(docIds), names);
+        })
+        .def("__len__", &NindDocNames::size);
 
     // ---- Bm25Scorer -------------------------------------------------------
     // Okapi BM25 search driven by the postings of the query terms (only the documents
