@@ -33,7 +33,9 @@ namespace latecon {
 ////////////////////////////////////////////////////////////
 /**\brief Merges several nind indexes (shards over disjoint sets of documents) into one.
 * Shards must have no term specifics (see NindAmoseMerge for Amose indexes), and no
-* document may appear in more than one shard. The target files must not exist yet. */
+* document may appear in more than one shard. The target files must not exist yet.
+* Shards may have no local index (all of them, then): the merged index has none either
+* (docsNb is then 0). The merged files are written in bulk mode (see NindIndex::beginBulk). */
 class DLLExportLexicon NindIndexMerge {
 public:
     /**\brief Merge parameters: indirection block sizes of the merged files (0 = sized to fit) */
@@ -52,7 +54,7 @@ public:
         unsigned int shardsNb;
         unsigned int wordsNb;       //words of the merged lexicon
         unsigned int termsNb;       //terms with at least one document in the merged term index
-        unsigned int docsNb;        //documents of the merged local index
+        unsigned int docsNb;        //documents of the merged local index (0 without local index)
         NindPadFile::Identification identification;     //of the merged lexicon
         Stats(): shardsNb(0), wordsNb(0), termsNb(0), docsNb(0), identification() {}
     };

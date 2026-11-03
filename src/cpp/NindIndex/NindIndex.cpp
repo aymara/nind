@@ -67,7 +67,83 @@ NindIndex::NindIndex(const std::string &fileName,
 ////////////////////////////////////////////////////////////
 NindIndex::~NindIndex()
 {
+    //le fichier doit estre complet : ne pas oublier les indirections et la queue
+    if (m_isBulk) {
+        try { endBulk(); }
+        catch (...) {}
+    }
     m_file.close();
+}
+////////////////////////////////////////////////////////////
+//brief Enter bulk mode
+void NindIndex::beginBulk()
+{
+    if (!m_isWriter) throw NindIndexException("NindIndex::beginBulk not a writer : " + m_fileName);
+    if (m_isBulk) return;
+    m_file.flush();
+    //les indirections actuelles, bloc par bloc
+    m_bulkIndirections.clear();
+    m_bulkIndirections.reserve(getMaxIdent());
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
+        it != m_entriesBlocksMap.end(); it++) {
+        m_file.setPos((*it).first, SEEK_SET);
+        m_file.readBuffer((*it).second * TAILLE_INDIRECTION);
+        for (unsigned int i = 0; i < (*it).second; i++) {
+            //<offsetDejfinition> <longueurDejfinition>
+            const uint64_t offsetDejfinition = m_file.getInt5();
+            const unsigned int longueurDejfinition = m_file.getInt3();
+            m_bulkIndirections.push_back(pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition));
+        }
+    }
+    //la queue actuelle (spejcifiques et identification)
+    const unsigned int tailleQueue = getSpecificsAndIdentificationSize();
+    m_file.setPos(-(long int)tailleQueue, SEEK_END);
+    m_bulkEnd = m_file.getPos();
+    m_file.readBuffer(tailleQueue);
+    m_bulkTail.resize(tailleQueue);
+    for (unsigned int i = 0; i < tailleQueue; i++) m_bulkTail[i] = m_file.getInt1();
+    //les nouvelles dejfinitions vont toutes ah la fin : les vides seront recalculejs en sortie
+    m_emptyAreas.clear();
+    m_bulkPos = UINT64_MAX;
+    m_isBulk = true;
+    m_file.setBulk(true);
+}
+////////////////////////////////////////////////////////////
+//brief Leave bulk mode
+void NindIndex::endBulk()
+{
+    if (!m_isBulk) return;
+    //1) les indirections, bloc par bloc, par tranches
+    const unsigned int TRANCHE = 65536;
+    size_t ident = 0;
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
+        it != m_entriesBlocksMap.end(); it++) {
+        for (unsigned int first = 0; first < (*it).second; first += TRANCHE) {
+            const unsigned int nb = min(TRANCHE, (*it).second - first);
+            m_file.createBuffer(nb * TAILLE_INDIRECTION);
+            for (unsigned int i = 0; i < nb; i++, ident++) {
+                const pair<uint64_t, unsigned int> entry = (ident < m_bulkIndirections.size()) ?
+                    m_bulkIndirections[ident] : pair<uint64_t, unsigned int>(0, 0);
+                m_file.putInt5(entry.first);
+                m_file.putInt3(entry.second);
+            }
+            bulkWrite((*it).first + (uint64_t)first * TAILLE_INDIRECTION, 0, nb * TAILLE_INDIRECTION);
+        }
+    }
+    //2) la queue, aprehs les donnejes
+    m_file.createBuffer(m_bulkTail.size());
+    m_file.putBytes(&m_bulkTail[0], m_bulkTail.size());
+    bulkWrite(m_bulkEnd, 0, m_bulkTail.size());
+    m_isBulk = false;
+    m_file.setBulk(false);         //vidange, taille du fichier
+    //3) les vides, pour le mode normal
+    list<pair<uint64_t, unsigned int> > nonVidesList;
+    for (size_t i = 0; i < m_bulkIndirections.size(); i++) {
+        if (m_bulkIndirections[i].first != 0) nonVidesList.push_back(m_bulkIndirections[i]);
+    }
+    nonVidesList.push_back(pair<uint64_t, unsigned int>(m_bulkEnd, m_bulkTail.size()));
+    vector<pair<uint64_t, unsigned int> >().swap(m_bulkIndirections);
+    fillEmptyAreas(nonVidesList);
 }
 ////////////////////////////////////////////////////////////
 //brief Read from file datas of a specified definition and leave result into read buffer 
@@ -79,6 +155,17 @@ bool NindIndex::getDefinition(const unsigned int ident,
 {
     uint64_t indirection = getEntryPos(ident);
     if (indirection == 0) return false;
+    if (m_isBulk) {
+        //les indirections sont en mejmoire
+        if (ident >= m_bulkIndirections.size()) return false;
+        const pair<uint64_t, unsigned int> entry = m_bulkIndirections[ident];
+        if (entry.first == 0) return false;
+        m_file.flush();
+        bulkForgetPosition();
+        m_file.setPos(entry.first, SEEK_SET);
+        m_file.readBuffer((bytesNb == 0) ? entry.second : bytesNb);
+        return true;
+    }
     m_file.flush();
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     m_file.readBuffer(TAILLE_INDIRECTION);
@@ -103,6 +190,10 @@ void NindIndex::setDefinition(const unsigned int ident)
     //1) trouve l'ancienne indirection si elle existe
     uint64_t indirection = getEntryPos(ident);
     if (indirection == 0) throw NindIndexException("NindIndex::setDefinition : " + m_fileName);
+    if (m_isBulk) {
+        setDefinitionBulk(ident, tailleQueue);
+        return;
+    }
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     //<offsetDejfinition> <longueurDejfinition> 
     m_file.readBuffer(TAILLE_INDIRECTION);
@@ -165,6 +256,37 @@ void NindIndex::setDefinition(const unsigned int ident)
     setIndirection(indirection, offsetDejfinition, longueurDejfinition);
 }
 ////////////////////////////////////////////////////////////
+//ejcriture d'une dejfinition en mode massif : toujours ah la fin, sauf si elle tient ah son ancienne place
+void NindIndex::setDefinitionBulk(const unsigned int ident,
+                                  const unsigned int tailleQueue)
+{
+    //des blocs d'indirection ont pu estre ajoutejs depuis
+    if (m_bulkIndirections.size() < getMaxIdent())
+        m_bulkIndirections.resize(getMaxIdent(), pair<uint64_t, unsigned int>(0, 0));
+    if (ident >= m_bulkIndirections.size()) throw NindIndexException("NindIndex::setDefinition : " + m_fileName);
+    pair<uint64_t, unsigned int> &entry = m_bulkIndirections[ident];
+    if (m_file.getOutBufferSize() < tailleQueue)
+        throw NindIndexException("NindIndex::setDefinition write buffer smaller than specifics : " + m_fileName);
+    const unsigned int dataSize = m_file.getOutBufferSize() - tailleQueue;
+    //la queue est toujours en fin de buffer
+    m_file.copyOutBuffer(dataSize, tailleQueue, m_bulkTail);
+    if (dataSize == 0) {
+        //EFFACEMENT
+        entry = pair<uint64_t, unsigned int>(0, 0);
+        return;
+    }
+    if (dataSize <= entry.second) {
+        //REMPLACEMENT AU MESME ENDROIT, longueur inchangeje
+        bulkWrite(entry.first, 0, dataSize);
+        return;
+    }
+    //ah la fin
+    const uint64_t offsetDejfinition = m_bulkEnd;
+    bulkWrite(offsetDejfinition, 0, dataSize);
+    m_bulkEnd += dataSize;
+    entry = pair<uint64_t, unsigned int>(offsetDejfinition, dataSize);
+}
+////////////////////////////////////////////////////////////
 //brief verifie que l'indirection existe et cree un bloc supplementaire si c'est pertinent
 //param ident ident of definition
 //param fileIdentification unique identification of file 
@@ -187,6 +309,7 @@ void NindIndex::checkExtendIndirection(const unsigned int ident,
 //throws NindPadFileException/NindIndexException if the file is structurally invalid */
 NindIndex::IndexStats NindIndex::analyseIndex()
 {
+    if (m_isBulk) throw NindIndexException("NindIndex::analyseIndex : file in bulk mode " + m_fileName);
     IndexStats stats;
     stats.maxIdent = getMaxIdent();
 
@@ -244,14 +367,8 @@ void NindIndex::setIndirection(const uint64_t indirection,
 //ejtablit la carte des vides
 void NindIndex::mapEmptySpaces()
 {
-    //trouve la carte des non vides
+    //trouve la carte des non vides (les blocs d'indirection sont ajoutejs par fillEmptyAreas)
     list<pair<uint64_t, unsigned int> > nonVidesList;
-    //les blocs d'indirection sont mis dans les non-vides
-    for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin(); 
-        it != m_entriesBlocksMap.end(); it++) {
-        const pair<uint64_t, unsigned int> nonVide((*it).first - TAILLE_TETE_INDEX, (*it).second * TAILLE_INDIRECTION + TAILLE_TETE_INDEX);
-        nonVidesList.push_back(nonVide);
-    }
     //prend toutes les entrees d'indirection
     unsigned int ident = 0;
     uint64_t indirection = getEntryPos(ident);
@@ -275,6 +392,19 @@ void NindIndex::mapEmptySpaces()
     m_file.setPos(-tailleQueue, SEEK_END);       //se positionne sur les spejcifiques
     const pair<uint64_t, unsigned int> nonVide(m_file.getPos(), tailleQueue);
     nonVidesList.push_back(nonVide);
+    fillEmptyAreas(nonVidesList);
+}
+////////////////////////////////////////////////////////////
+//remplit la carte des vides ah partir de la liste des zones occupejes
+void NindIndex::fillEmptyAreas(list<pair<uint64_t, unsigned int> > &nonVidesList)
+{
+    //les blocs d'indirection sont mis dans les non-vides
+    for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
+        it != m_entriesBlocksMap.end(); it++) {
+        const pair<uint64_t, unsigned int> nonVide((*it).first - TAILLE_TETE_INDEX, (*it).second * TAILLE_INDIRECTION + TAILLE_TETE_INDEX);
+        nonVidesList.push_back(nonVide);
+    }
+    m_emptyAreas.clear();
     //ordonne les non vides
     nonVidesList.sort();
     //remplit la carte des vides

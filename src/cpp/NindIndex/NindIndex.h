@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <string>
 #include <list>
+#include <vector>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
@@ -49,6 +50,22 @@ public:
     *\return the file's index-level structural statistics
     *\throws NindPadFileException if the file is structurally invalid */
     IndexStats analyseIndex();
+
+    /**\brief Enter bulk mode, to write many definitions fast (writer only).
+    * Until endBulk(), definitions are appended to the file, indirections and the tail
+    * (specifics + identification) stay in memory and writes aren't flushed one by one:
+    * the file is invalid for readers until endBulk(), and a crash leaves it unusable.
+    * For a file that no reader opens before it is complete (e.g. a new index generation).
+    * Holes left by rewritten definitions are reused again once back in normal mode. */
+    void beginBulk();
+
+    /**\brief Leave bulk mode: write the indirections and the tail, then flush.
+    * Also called by the destructor (errors then ignored): call it explicitly. */
+    void endBulk();
+
+    /**\brief Test if bulk mode is on
+    *\return true if in bulk mode */
+    bool isBulk() const { return m_isBulk; }
 
 protected:
     /**\brief Creates NindIndex with a specified name associated with.
@@ -93,6 +110,16 @@ private:
 
     //ejtablit la carte des vides
     void mapEmptySpaces();
+
+    //remplit la carte des vides ah partir de la liste des zones occupejes (blocs d'indirection en plus)
+    void fillEmptyAreas(std::list<std::pair<uint64_t, unsigned int> > &nonVidesList);
+
+    //ejcriture d'une dejfinition en mode massif
+    void setDefinitionBulk(const unsigned int ident,
+                           const unsigned int tailleQueue);
+
+    //indirections en mejmoire en mode massif
+    std::vector<std::pair<uint64_t, unsigned int> > m_bulkIndirections;
 
     //trouve une nouvelle zone pour les nouvelles donnejs
     //retourne true si l'identification est dejjah ejcrite
