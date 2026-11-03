@@ -89,6 +89,34 @@ TEST_CASE("NindTermIndexTest.GetTermPostingsMatchesGetTermDef") {
     CHECK(categoryEnds.empty());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.DefinitionOver16MiBIsRefused") {
+    // a definition's length is a 3-byte field: a longer one used to be written truncated,
+    // leaving a corrupt file; it is refused instead, and the index stays readable
+    TestTempDir tmp;
+    NindTermIndex index(tmp.file("big"), true, kNoCheck, 0, 8);
+    list<TermCG> small;
+    small.push_back(TermCG(0, 1));
+    small.back().documents.push_back(Document(3, 1));
+    index.setTermDef(1, small, kNoCheck, list<unsigned int>());
+
+    list<TermCG> big;
+    big.push_back(TermCG(0, 0));
+    // 2-byte deltas, 2-byte frequencies: 4 bytes per posting, ~18 MB
+    for (unsigned int i = 0; i < 4500000; i++) big.back().documents.push_back(Document(i * 900, 200));
+    CHECK_THROWS_AS(index.setTermDef(2, big, kNoCheck, list<unsigned int>()), OutOfBoundException);
+    big.clear();
+
+    list<TermCG> read;
+    REQUIRE(index.getTermDef(1, read));
+    REQUIRE_EQ(1u, read.size());
+    CHECK_EQ(3u, read.front().documents.front().ident);
+    read.clear();
+    CHECK_FALSE(index.getTermDef(2, read));
+    NindTermIndex reader(tmp.file("big"), false, kNoCheck, 0);
+    read.clear();
+    CHECK(reader.getTermDef(1, read));
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindTermIndexTest.UnknownIdentReturnsFalse") {
     TestTempDir tmp;
     NindTermIndex index(tmp.file("unknown"), true, kNoCheck, 0, 8);
