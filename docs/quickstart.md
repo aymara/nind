@@ -20,8 +20,9 @@ indexer.index_files([
 
 This writes the index into a new generation directory inside `indices/`
 (`corpus.gen-<n>-<hex>/`: `corpus.nindlexiconindex`, `corpus.nindtermindex`,
-`corpus.nindlocalindex`, plus `corpus.nindmeta` - the tokenizer options - and
-`corpus.ninddoclengths`), published atomically through `corpus.CURRENT`.
+`corpus.nindlocalindex`, plus `corpus.nindmeta` - the tokenizer options -,
+`corpus.ninddoclengths` and, when documents have names, `corpus.ninddocnames`),
+published atomically through `corpus.CURRENT`.
 `index_dir` must already exist; each input file becomes one document,
 identified externally by its position in the list (`0`, `1`, `2`, ...).
 
@@ -32,14 +33,10 @@ object per line) is indexed directly, record `n` becoming document `n`:
 record_ids = indexer.index_jsonl("corpus.jsonl")   # record_ids[n]: the "id" of document n
 ```
 
-The records' ids are stored with the index, so results can be reported with
-them, like pyserini's hits' `docid` (`index_files` takes them as
-`doc_names=[...]`):
-
-```python
-engine.search("binary search tree", doc_names=True)  # [("d49309", 12.7), ...]
-engine.doc_name(0), engine.doc_id("d49309")
-```
+The records' ids are stored with the index as the documents' *names*
+(`index_files` takes names as `doc_names=[...]`), so search results can be
+reported with them, like pyserini's hits' `docid` - see
+"Document names" below.
 
 ## Tokenizer and index options
 
@@ -80,7 +77,14 @@ with indexer.update() as update:
         doc_id = update.add_file(path)     # new id: one more than the highest
     update.add_file("changed.py", doc_id=1) # replaces document 1
     update.remove(2)
+    update.add_text("...", name="d49309")   # replaces the document named d49309, if any
 ```
+
+A document's name is unique in the index: adding a document under a name
+that is already used replaces that document (giving another document's id
+with it raises `ValueError`); a replaced document keeps its name unless a new
+one is given. `update.doc_id(name)` finds a document by name, changes of the
+update included.
 
 `add_file(path)`, `add_files(paths)` and `remove_documents(ids)` on the
 indexer are one-update shortcuts. Each update copies the index and reopens
@@ -99,6 +103,18 @@ for doc_id, score in engine.search("ejcrit nombre", top_k=5):
 
 `NindEngine` auto-discovers the index by scanning `index_dir` for a
 `*.nindlexiconindex` file, so it only needs the directory - not the prefix.
+
+## Document names
+
+When the index stores document names (`index_jsonl`, `index_files(...,
+doc_names=...)`, or `name=` in updates), the engine maps them to and from
+document ids, and `search` can return them instead of ids:
+
+```python
+engine.search("binary search tree", doc_names=True)  # [("d49309", 12.7), ...]
+engine.doc_name(0)         # "d49309"; None if the index has no names
+engine.doc_id("d49309")    # 0; None if there is no such document
+```
 
 ## Inspecting a document or term directly
 

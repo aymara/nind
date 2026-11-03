@@ -24,7 +24,7 @@ Requires `NIND_DIST` environment variable to be set.
   - `src/`: Core implementation.
   - `tst/`: Test suites (mostly in `tst/cpp/`).
 - **Debug Mode**: The `-DDEBUG_NIND` flag is automatically added in `Debug` and `RelWithDebInfo` modes to enable debug output.
-- **Binary Format**: Nind uses an EBNF grammar to specify binary file formats. These are verified by Python programs (not in this repo's main source but referenced in README).
+- **Binary Format**: Nind uses an EBNF grammar to specify binary file formats. The Python package (`src/py/nind`) reads and writes them through the `nind._native` pybind11 bindings over the C++ classes (see `CLAUDE.md`).
 
 ## Toolchain Quirks
 
