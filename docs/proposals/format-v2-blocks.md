@@ -119,7 +119,7 @@ indirection:
 `NindTermIndex` gets, next to `getTermDef` (unchanged API, which assembles the
 blocks), a block-level reader: read the directory, then `pread` the blocks
 asked for. No whole-definition buffer, no stdio buffer discard, one syscall
-per block (see the I/O follow-up in CLAUDE.md). `Bm25Scorer` then does
+per block (see the I/O follow-up in CLAUDE.md, and {doc}`thread-safe-readers`, whose positioned reads this builds on). `Bm25Scorer` then does
 MaxScore / block-max WAND over the descriptors. With the same operations on
 the documents it does score, the top k is unchanged: nind and bm25s keep
 identical rankings, now with skipping.

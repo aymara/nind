@@ -117,6 +117,10 @@ def test_search_bm25_parameters(engine):
         assert {d for d, _ in results} == {0, 1}
     # b = 0: no length normalization; k1 = 0: term frequency ignored, docs 0 and 1 tie on "dog"
     assert [s for _, s in engine.search("dog", k1=0.0, b=0.0)] == [engine.bm25_score("dog", 0, k1=0.0, b=0.0)] * 2
+    # the per-document length normalization is cached for the last (k1, b): switching back and forth
+    for k1, b in ((1.5, 0.75), (0.9, 0.4), (1.5, 0.75), (1.5, 0.4), (0.9, 0.4)) * 2:
+        results = engine.search("dog cat bird", k1=k1, b=b)
+        assert results == [(d, engine.bm25_score("dog cat bird", d, k1=k1, b=b)) for d, _ in results], (k1, b)
 
 
 def test_underlying_files_are_structurally_consistent(engine):
