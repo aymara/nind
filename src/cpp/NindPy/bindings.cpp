@@ -29,6 +29,8 @@
 #include "NindIndex/NindTermIndex.h"
 #include "NindIndex/NindLocalIndex.h"
 #include "NindIndex/NindIndexMerge.h"
+#include "NindIndex/NindTokenizer.h"
+#include <unordered_map>
 #include "NindExceptions.h"
 ////////////////////////////////////////////////////////////
 namespace py = pybind11;
@@ -118,6 +120,144 @@ std::list<NindLocalIndex::Term> buildLocalDef(const uint32_t *termIds, const uin
     return localDef;
 }
 }
+namespace {
+py::bytes uintBytes(const std::vector<uint32_t> &values)
+{
+    return py::bytes(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(uint32_t));
+}
+
+// Builds the term and local index files of a corpus from its documents, given as
+// chunks of term ids (in document order): see the IndexBuilder binding below.
+class IndexBuilder {
+public:
+    IndexBuilder(): m_docIds(), m_docEnds(), m_tokens(), m_maxTermId(0) {}
+
+    // documents firstDocId, firstDocId + 1... : document i is localIds[ends[i-1]:ends[i]],
+    // local id x being the term idMap[x]
+    void addDocuments(const uint32_t firstDocId, const UIntView &ends, const UIntView &localIds,
+                      const UIntView &idMap)
+    {
+        checkEnds(ends, localIds.size, "ends");
+        if (ends.size != 0 && !m_docIds.empty() && firstDocId <= m_docIds.back())
+            throw py::value_error("documents must be added in increasing id order");
+        if (ends.size != 0 && (uint64_t)firstDocId + ends.size - 1 > std::numeric_limits<uint32_t>::max())
+            throw py::value_error("document id out of range");
+        for (size_t i = 0; i < idMap.size; i++) {
+            if (idMap.data[i] == 0) throw py::value_error("id_map: 0 is not a valid term id");
+        }
+        for (size_t i = 0; i < localIds.size; i++) {
+            if (localIds.data[i] >= idMap.size) throw py::value_error("term_ids: local id beyond id_map");
+        }
+        py::gil_scoped_release release;
+        const size_t base = m_tokens.size();
+        m_tokens.reserve(base + localIds.size);
+        for (size_t i = 0; i < localIds.size; i++) {
+            const uint32_t termId = idMap.data[localIds.data[i]];
+            m_tokens.push_back(termId);
+            if (termId > m_maxTermId) m_maxTermId = termId;
+        }
+        for (size_t i = 0; i < ends.size; i++) {
+            m_docIds.push_back(firstDocId + (uint32_t)i);
+            m_docEnds.push_back(base + ends.data[i]);
+        }
+    }
+
+    // writes every term's postings, terms in increasing id order (GIL released)
+    void writeTermIndex(NindTermIndex &termIndex, const NindPadFile::Identification &identification,
+                        const unsigned char cg) const
+    {
+        py::gil_scoped_release release;
+        const std::list<unsigned int> noSpecifics;
+        //1) occurrences of each term in each document, counted per document
+        std::vector<uint32_t> counts(m_maxTermId + 1, 0);
+        std::vector<uint32_t> touched;
+        std::vector<size_t> postingsNb(m_maxTermId + 2, 0);
+        size_t begin = 0;
+        for (size_t d = 0; d < m_docIds.size(); d++) {
+            for (size_t i = begin; i < m_docEnds[d]; i++) {
+                if (counts[m_tokens[i]]++ == 0) touched.push_back(m_tokens[i]);
+            }
+            for (size_t i = 0; i < touched.size(); i++) {
+                postingsNb[touched[i] + 1]++;
+                counts[touched[i]] = 0;
+            }
+            touched.clear();
+            begin = m_docEnds[d];
+        }
+        //2) postings by term (CSR), documents in increasing id order
+        for (size_t t = 1; t < postingsNb.size(); t++) postingsNb[t] += postingsNb[t - 1];
+        std::vector<size_t> fill(postingsNb.begin(), postingsNb.end() - 1);
+        std::vector<uint32_t> postingDocs(postingsNb.back()), postingFreqs(postingsNb.back());
+        begin = 0;
+        for (size_t d = 0; d < m_docIds.size(); d++) {
+            for (size_t i = begin; i < m_docEnds[d]; i++) {
+                if (counts[m_tokens[i]]++ == 0) touched.push_back(m_tokens[i]);
+            }
+            for (size_t i = 0; i < touched.size(); i++) {
+                const size_t slot = fill[touched[i]]++;
+                postingDocs[slot] = m_docIds[d];
+                postingFreqs[slot] = counts[touched[i]];
+                counts[touched[i]] = 0;
+            }
+            touched.clear();
+            begin = m_docEnds[d];
+        }
+        //3) the term definitions
+        for (uint32_t t = 1; t <= m_maxTermId; t++) {
+            if (postingsNb[t] == postingsNb[t + 1]) continue;
+            const std::list<NindTermIndex::TermCG> termDef =
+                buildTermDef(postingDocs.data(), postingFreqs.data(), postingsNb[t], postingsNb[t + 1], cg);
+            termIndex.setTermDef(t, termDef, identification, noSpecifics);
+        }
+    }
+
+    // writes every document: its term occurrences at positions 0, 1... (length 1) (GIL released)
+    void writeLocalIndex(NindLocalIndex &localIndex, const NindPadFile::Identification &identification,
+                         const unsigned char cg) const
+    {
+        py::gil_scoped_release release;
+        size_t maxLength = 0, begin = 0;
+        for (size_t d = 0; d < m_docIds.size(); d++) {
+            maxLength = std::max(maxLength, m_docEnds[d] - begin);
+            begin = m_docEnds[d];
+        }
+        std::vector<uint32_t> positions(maxLength), lengths(maxLength, 1);
+        for (size_t i = 0; i < maxLength; i++) positions[i] = (uint32_t)i;
+        begin = 0;
+        for (size_t d = 0; d < m_docIds.size(); d++) {
+            const size_t length = m_docEnds[d] - begin;
+            if (length != 0) {
+                const std::list<NindLocalIndex::Term> localDef =
+                    buildLocalDef(m_tokens.data() + begin, positions.data(), lengths.data(), 0, length, cg);
+                localIndex.setLocalDef(m_docIds[d], localDef, identification);
+            }
+            begin = m_docEnds[d];
+        }
+    }
+
+    // (document ids, lengths in tokens), as uint32 bytes
+    py::tuple docLengths() const
+    {
+        std::vector<uint32_t> lengths(m_docIds.size());
+        size_t begin = 0;
+        for (size_t d = 0; d < m_docIds.size(); d++) {
+            lengths[d] = (uint32_t)(m_docEnds[d] - begin);
+            begin = m_docEnds[d];
+        }
+        return py::make_tuple(uintBytes(m_docIds), uintBytes(lengths));
+    }
+
+    size_t docsNb() const { return m_docIds.size(); }
+    size_t tokensNb() const { return m_tokens.size(); }
+    uint32_t maxTermId() const { return m_maxTermId; }
+
+private:
+    std::vector<uint32_t> m_docIds;     //in increasing order
+    std::vector<size_t> m_docEnds;      //document d is m_tokens[m_docEnds[d-1]:m_docEnds[d]]
+    std::vector<uint32_t> m_tokens;     //term ids
+    uint32_t m_maxTermId;
+};
+}
 ////////////////////////////////////////////////////////////
 PYBIND11_MODULE(_native, m) {
     m.doc() = "Native (C++) implementation of the nind core index stack";
@@ -188,6 +328,28 @@ PYBIND11_MODULE(_native, m) {
              py::arg("indirection_bloc_size") = 0,
              py::arg("retro_indirection_bloc_size") = 0)
         .def("add_word", &NindLexiconIndex::addWord, py::arg("components"))
+        // many words at once (same idents as add_word on each in turn, each hash bucket
+        // read and written once): words is a list of component lists
+        .def("add_words", [](NindLexiconIndex &self, const std::vector<std::list<std::string> > &words) {
+            std::vector<unsigned int> idents;
+            py::gil_scoped_release release;
+            self.addWords(words, idents);
+            return idents;
+        }, py::arg("words"))
+        // the same for simple words: words is a list of strings
+        .def("add_simple_words", [](NindLexiconIndex &self, const std::vector<std::string> &words) {
+            std::vector<unsigned int> idents;
+            py::gil_scoped_release release;
+            std::vector<std::list<std::string> > lists(words.size());
+            for (size_t i = 0; i < words.size(); i++) lists[i].push_back(words[i]);
+            self.addWords(lists, idents);
+            return idents;
+        }, py::arg("words"))
+        // bulk mode (see NindIndex::beginBulk): only for a file no reader opens before
+        // end_bulk(), which must then be called (the destructor does it too, ignoring errors)
+        .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
+        .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
+        .def("is_bulk", &NindIndex::isBulk)
         .def("get_word_id", &NindLexiconIndex::getWordId, py::arg("components"))
         .def("get_identification", &NindLexiconIndex::getIdentification)
         .def("get_modulo", &NindLexiconIndex::getModulo)
@@ -244,6 +406,11 @@ PYBIND11_MODULE(_native, m) {
             self.getSpecificWords(specifics);
             return specifics;
         })
+        // bulk mode (see NindIndex::beginBulk): only for a file no reader opens before
+        // end_bulk(), which must then be called (the destructor does it too, ignoring errors)
+        .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
+        .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
+        .def("is_bulk", &NindIndex::isBulk)
         .def("set_term_def", &NindTermIndex::setTermDef,
              py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"),
              py::call_guard<py::gil_scoped_release>())
@@ -332,6 +499,11 @@ PYBIND11_MODULE(_native, m) {
             if (!self.getTermIdents(ident, termIdents)) return py::none();
             return py::cast(termIdents);
         }, py::arg("ident"))
+        // bulk mode (see NindIndex::beginBulk): only for a file no reader opens before
+        // end_bulk(), which must then be called (the destructor does it too, ignoring errors)
+        .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
+        .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
+        .def("is_bulk", &NindIndex::isBulk)
         .def("set_local_def", &NindLocalIndex::setLocalDef,
              py::arg("ident"), py::arg("local_def"), py::arg("file_identification"),
              py::call_guard<py::gil_scoped_release>())
@@ -427,6 +599,88 @@ PYBIND11_MODULE(_native, m) {
        py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0);
 
     // ---- NindRetrolexicon -----------------------------------------------
+    // ---- NindTokenizer ----------------------------------------------------
+    py::class_<NindTokenizer::Options>(m, "TokenizerOptions")
+        .def(py::init([](bool splitCamelCase, bool splitUnderscore, bool splitDigits, bool lowercase,
+                         unsigned int minLength, unsigned int maxLength) {
+            NindTokenizer::Options options;
+            options.splitCamelCase = splitCamelCase;
+            options.splitUnderscore = splitUnderscore;
+            options.splitDigits = splitDigits;
+            options.lowercase = lowercase;
+            options.minLength = minLength;
+            options.maxLength = maxLength;
+            return options;
+        }), py::arg("split_camel_case") = true, py::arg("split_underscore") = true,
+            py::arg("split_digits") = true, py::arg("lowercase") = false,
+            py::arg("min_length") = 1, py::arg("max_length") = 255)
+        .def_readwrite("split_camel_case", &NindTokenizer::Options::splitCamelCase)
+        .def_readwrite("split_underscore", &NindTokenizer::Options::splitUnderscore)
+        .def_readwrite("split_digits", &NindTokenizer::Options::splitDigits)
+        .def_readwrite("lowercase", &NindTokenizer::Options::lowercase)
+        .def_readwrite("min_length", &NindTokenizer::Options::minLength)
+        .def_readwrite("max_length", &NindTokenizer::Options::maxLength);
+
+    py::class_<NindTokenizer>(m, "Tokenizer")
+        .def(py::init<const NindTokenizer::Options &>(), py::arg("options") = NindTokenizer::Options())
+        .def("get_options", &NindTokenizer::getOptions)
+        .def("tokenize", [](const NindTokenizer &self, const std::string &text) {
+            std::vector<std::string> tokens;
+            self.tokenize(text, tokens);
+            return tokens;
+        }, py::arg("text"))
+        // Tokenize many documents at once, for IndexBuilder: returns (vocabulary,
+        // term_ids, ends) where vocabulary lists the distinct tokens (in order of first
+        // occurrence), term_ids (uint32 bytes) is every token as its index in vocabulary,
+        // and document i is term_ids[ends[i-1]:ends[i]] (ends: uint32 bytes).
+        .def("tokenize_batch", [](const NindTokenizer &self, const std::vector<std::string> &texts) {
+            std::vector<std::string> vocabulary;
+            std::vector<uint32_t> termIds, ends;
+            {
+                py::gil_scoped_release release;
+                std::unordered_map<std::string, uint32_t> localIds;
+                std::vector<std::pair<size_t, size_t> > spans;
+                std::string token;
+                for (size_t d = 0; d < texts.size(); d++) {
+                    self.tokenize(texts[d].data(), texts[d].size(), spans);
+                    for (size_t i = 0; i < spans.size(); i++) {
+                        self.getToken(texts[d].data(), spans[i], token);
+                        std::unordered_map<std::string, uint32_t>::const_iterator it = localIds.find(token);
+                        if (it == localIds.end()) {
+                            it = localIds.insert(std::make_pair(token, (uint32_t)vocabulary.size())).first;
+                            vocabulary.push_back(token);
+                        }
+                        termIds.push_back((*it).second);
+                    }
+                    if (termIds.size() > std::numeric_limits<uint32_t>::max())
+                        throw py::value_error("tokenize_batch: too many tokens in one batch");
+                    ends.push_back((uint32_t)termIds.size());
+                }
+            }
+            return py::make_tuple(vocabulary, uintBytes(termIds), uintBytes(ends));
+        }, py::arg("texts"));
+
+    // ---- IndexBuilder -----------------------------------------------------
+    // Accumulates a corpus as term ids, then writes its term index and local index:
+    // add_documents() chunk by chunk in increasing document id order, then
+    // write_term_index() and write_local_index() (both release the GIL and only read
+    // the builder: they can run concurrently, each on its own writer).
+    py::class_<IndexBuilder>(m, "IndexBuilder")
+        .def(py::init<>())
+        .def("add_documents", [](IndexBuilder &self, uint32_t firstDocId, const py::buffer &ends,
+                                 const py::buffer &termIds, const py::buffer &idMap) {
+            self.addDocuments(firstDocId, uintView(ends, "ends"), uintView(termIds, "term_ids"),
+                              uintView(idMap, "id_map"));
+        }, py::arg("first_doc_id"), py::arg("ends"), py::arg("term_ids"), py::arg("id_map"))
+        .def("write_term_index", &IndexBuilder::writeTermIndex,
+             py::arg("term_index"), py::arg("file_identification"), py::arg("cg") = 0)
+        .def("write_local_index", &IndexBuilder::writeLocalIndex,
+             py::arg("local_index"), py::arg("file_identification"), py::arg("cg") = 0)
+        .def("doc_lengths", &IndexBuilder::docLengths)
+        .def_property_readonly("docs_nb", &IndexBuilder::docsNb)
+        .def_property_readonly("tokens_nb", &IndexBuilder::tokensNb)
+        .def_property_readonly("max_term_id", &IndexBuilder::maxTermId);
+
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")
         .def(py::init<>())
         .def(py::init<unsigned int, std::string>(), py::arg("identifiant"), py::arg("mot_simple"))
