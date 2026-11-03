@@ -124,7 +124,9 @@ length)` pair, the variable-length data those indirections point to, and a
 trailer holding format-specific data plus an identification stamp. Every
 concrete format (the lexicon, the inverted term index, the per-document
 local index, the reverse lexicon) builds on that same envelope, adding
-only the meaning of its own records — see the
+only the meaning of its own records. An index built from Python also
+stores its tokenizer options, its documents' lengths and, optionally, their
+names (`.ninddocnames`: the corpus's own document ids) — see the
 [architecture guide](https://aymara.github.io/nind/architecture.html) for
 the full module layering, on both the C++ and Python sides.
 
