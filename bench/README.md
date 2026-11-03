@@ -13,11 +13,8 @@ the design discussion this came out of for why. Three things are measured:
 3. **Term/document lookup latency**, through the same `nind._native`-backed
    Python reader classes real callers use.
 
-Retrieval effectiveness (nDCG/MAP vs. qrels) isn't measured here, though
-`NindEngine` now has what it needs: `index_jsonl` stores the records' ids
-(`search(..., doc_names=True)` returns them, like pyserini's `docid`) and its
-search is driven by the postings lists (`nind._native.Bm25Scorer`), so it
-scales with the query terms' document frequencies, not the corpus size.
+A fourth benchmark (section 4) compares nind with other indexers (Lucene,
+tantivy, bm25s) on the same tokens, including rankings as a parity check.
 
 ## Corpus: MS MARCO Passage Ranking
 
@@ -180,6 +177,145 @@ Lookups stay essentially flat from 10K to 8.84M documents: the lexicon's
 hash-bucket count is sized to the vocabulary, so buckets don't lengthen, and
 the term and local indexes are addressed directly by id. The id→postings tail
 is the few very frequent terms in the sample, whose postings lists are long.
+
+## 4. Comparison with other indexers (`bench/retrieval/`)
+
+nind is only the indexing layer of the search stack: text analysis is LIMA's
+job, search Amose's. So the comparison is between indexes, not search
+engines: every system gets **the same tokens** and scores with **the same
+BM25** (k1, b), and what is measured is building, size, querying and
+updating. Retrieval quality (nDCG@10, R@100, RR@10) is only reported as a
+**parity check** — the systems must rank alike — not as a quality claim: the
+analysis (a stand-in for LIMA) isn't any system's own.
+
+| system | what | update |
+|---|---|---|
+| `nind` | `NindIndexer.index_jsonl` / `NindEngine.search`, no local index | `NindIndexer.update()`, in place |
+| `nind+local` | the same, with the local index (terms and positions per document, read by Amose) | in place |
+| `lucene` | Lucene 10.4 through Anserini (`IndexCollection -pretokenized`, `SimpleSearcher` with `WhitespaceAnalyzer`), frequencies only | `SimpleIndexer -append`, in place |
+| `lucene+pos` | the same with `-storePositions -storeDocvectors` (what nind's local index holds) | in place |
+| `bm25s` | bm25s, `lucene` BM25 variant: precomputed score matrix, in memory | none: full rebuild |
+| `tantivy` | tantivy-py, `whitespace` tokenizer, frequencies only (its BM25 is fixed at k1=1.2, b=0.75) | `writer.add_document` + `commit` |
+
+### Running
+
+The benchmark has its own environment (not the package's dependencies).
+pyserini's Python layer imports torch, so only its bundled Anserini fatjar is
+used (installed `--no-deps`, driven through pyjnius); Anserini needs a Java
+21+ runtime (a JRE is enough: `JAVA_HOME` is derived from `java` on the
+`PATH`, or set it; `ANSERINI_JAR` overrides the jar).
+
+```bash
+uv venv bench-env && export VIRTUAL_ENV=$PWD/bench-env
+uv pip install .                    # nind itself (CXX=g++ if clang++ can't find libstdc++)
+uv pip install --no-deps pyserini   # only for its Anserini fatjar
+uv pip install pyjnius numpy bm25s tantivy ir_datasets ir_measures
+
+# 1. tokens for every system, once (ir_datasets downloads into $IR_DATASETS_HOME)
+bench-env/bin/python bench/retrieval/prepare.py beir/scifact/test data/scifact
+bench-env/bin/python bench/retrieval/prepare.py beir/fiqa/test data/fiqa
+bench-env/bin/python bench/retrieval/prepare.py msmarco-passage/dev/small data/msmarco
+# 2. the matrix: every system x build, search, update; then the report
+bench-env/bin/python bench/retrieval/driver.py --work work --data data/scifact data/fiqa \
+    [--systems nind,lucene,...] [--threads 8] [--k1 1.2 --b 0.75] [--max-queries N]
+bench-env/bin/python bench/retrieval/driver.py --work work --report-only
+```
+
+`prepare.py` writes the corpus as JSON Lines whose `contents` are the tokens
+joined by spaces — nind's own tokenizer's words (no identifier splitting),
+lowercased, a fixed point of that tokenizer, so nind and the whitespace
+tokenizers of the others see exactly the same tokens. Documents without any
+token are dropped for everyone (nind doesn't store them: N and avgdl would
+differ), query tokens are deduplicated (systems don't all count a repeated
+term twice). The last 1% of the documents (`--update-fraction`) form the
+update. With `--limit` (a corpus subset) no qrels are written: judgments of a
+subset mean nothing. `prepare.py` is the place to plug LIMA's analysis in.
+
+`driver.py` runs each phase of each system in its own process (`worker.py`)
+and takes its peak RSS from `wait4` (children included: Anserini's JVM). Times
+are measured around the operation (not interpreter or JVM start; the Lucene
+build does include its JVM start, about 0.5 s). Per dataset and system:
+
+- **build**: index the whole corpus with `--threads` threads (Anserini
+  parallelizes over input files: the corpus is split into one part per
+  thread; bm25s is single-threaded); index size on disk.
+- **search**: open time, N and avgdl as the index sees them (they must be
+  equal for all), single-thread latency per query (p50, p99, QPS) at k=10 and
+  k=1000 after a warm-up pass, and a run file (k=1000) scored with
+  ir_measures; `top10 = nind` is the mean overlap of the system's top 10 with
+  nind's.
+- **update**: build the corpus minus the update, add the update (in place, or
+  rebuild for bm25s), then query: `update = build` is the overlap of the
+  updated index's top 10 with the index built at once (1.000 expected).
+
+Results go to `WORK/results.jsonl` (the last run of a dataset/system/phase
+wins), `WORK/report.md` and `WORK/report.csv`.
+
+### What to expect from the scores
+
+nind and bm25s compute BM25 exactly: their quality numbers and rankings are
+identical. Lucene and tantivy store document lengths in one byte (lossy) and
+leave out BM25's constant (k1 + 1) factor: their rankings agree with each
+other and overlap nind's top 10 at 0.96–0.99, quality within ±0.004.
+
+### Results (2026-11-03)
+
+One laptop: Intel i7-1370P (20 threads), 62 GB, NVMe; 8 threads to build,
+1 to query; k1=1.2, b=0.75; nind 2.6.0, Anserini 2.3.0 (Lucene 10.4), bm25s
+0.3.16, tantivy-py 0.27.0, JDK 25.
+
+BEIR SciFact, NFCorpus, FiQA (sizes in MB, latencies in ms; full columns in
+`WORK/report.md`):
+
+| dataset | system | build s | build peak MB | index MB | k10 p50 ms | k10 p99 ms | k1000 p50 ms | nDCG@10 | top10 = nind | update s | incremental |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| fiqa | nind | 1.22 | 215 | 15.1 | 12.013 | 25.623 | 13.035 | 0.2365 |  | 3.070 | yes |
+| fiqa | nind+local | 2.04 | 217 | 51.5 | 11.915 | 25.340 | 12.974 | 0.2365 | 1.000 | 3.176 | yes |
+| fiqa | lucene | 2.53 | 446 | 9.3 | 0.891 | 2.501 | 11.404 | 0.2375 | 0.959 | 1.332 | yes |
+| fiqa | lucene+pos | 3.84 | 1053 | 46.9 | 0.935 | 2.567 | 11.065 | 0.2375 | 0.959 | 1.528 | yes |
+| fiqa | bm25s | 3.39 | 312 | 39.6 | 0.325 | 1.928 | 0.594 | 0.2365 | 1.000 | 3.081 | no (rebuild) |
+| fiqa | tantivy | 1.21 | 131 | 9.0 | 0.669 | 1.511 | 1.833 | 0.2375 | 0.959 | 0.765 | yes |
+| nfcorpus | nind | 0.37 | 81 | 2.3 | 0.086 | 0.872 | 0.162 | 0.3067 |  | 0.300 | yes |
+| nfcorpus | nind+local | 0.49 | 81 | 6.0 | 0.075 | 0.983 | 0.167 | 0.3067 | 1.000 | 0.319 | yes |
+| nfcorpus | lucene | 2.12 | 216 | 1.4 | 0.295 | 1.210 | 3.231 | 0.3080 | 0.988 | 1.102 | yes |
+| nfcorpus | lucene+pos | 2.56 | 538 | 5.8 | 0.304 | 1.266 | 3.182 | 0.3080 | 0.988 | 1.183 | yes |
+| nfcorpus | bm25s | 0.48 | 85 | 4.4 | 0.062 | 0.141 | 0.262 | 0.3067 | 1.000 | 0.310 | no (rebuild) |
+| nfcorpus | tantivy | 0.60 | 80 | 1.1 | 0.023 | 0.082 | 0.361 | 0.3078 | 0.988 | 0.572 | yes |
+| scifact | nind | 0.49 | 89 | 3.1 | 1.142 | 3.964 | 1.460 | 0.6615 |  | 0.326 | yes |
+| scifact | nind+local | 0.53 | 90 | 8.1 | 1.086 | 2.389 | 1.534 | 0.6615 | 1.000 | 0.350 | yes |
+| scifact | lucene | 2.12 | 223 | 1.9 | 0.790 | 2.580 | 8.609 | 0.6611 | 0.981 | 1.075 | yes |
+| scifact | lucene+pos | 2.21 | 526 | 7.9 | 0.802 | 2.772 | 8.944 | 0.6611 | 0.981 | 1.362 | yes |
+| scifact | bm25s | 0.58 | 94 | 5.8 | 0.073 | 0.163 | 0.304 | 0.6615 | 1.000 | 0.368 | no (rebuild) |
+| scifact | tantivy | 1.22 | 85 | 1.5 | 0.106 | 0.192 | 1.045 | 0.6611 | 0.981 | 0.975 | yes |
+
+### Findings
+
+- **Parity holds** on every dataset: N and avgdl are the same for every
+  system, nind's rankings equal bm25s's, its top 10 overlaps Lucene's and
+  tantivy's at 0.96–0.99, and every updated index answers as one built at once.
+- **Building**: nind is among the fastest builders and has the smallest
+  memory footprint after tantivy; its index is about 1.6x Lucene's without
+  the local index, about the size of Lucene with positions and document
+  vectors with it.
+- **Updates**: nind, Lucene and tantivy update in place, bm25s rebuilds.
+  nind's update cost is dominated by reopening its writers, which scan their
+  whole files (see the I/O follow-up in CLAUDE.md), so it grows with the
+  index, not the update: batch documents per update.
+- **Querying is nind's weak point, and it isn't for lack of pruning**:
+  `Bm25Scorer` costs a constant **~85–100 ns per posting** (82 on SciFact,
+  88 on FiQA, 100 on NFCorpus), when bm25s, also exhaustive, costs ~2 ns.
+  Each posting goes through a `std::list` node (decoding by
+  `NindTermIndex::getTermDef`), a `seen` hash set, a hash-map lookup of the
+  document and a hash-map score update. Queries with frequent terms (FiQA:
+  ~146k postings per query, no stopword removal) are then ~12 ms, against
+  ~0.9 ms for Lucene and ~0.7 ms for tantivy, which also skip postings that
+  can't reach the top k (block-max WAND/MaxScore). Flat arrays indexed by
+  document (scores, lengths) and decoding postings into a vector would
+  remove most of it; dynamic pruning would be the next step.
+- Lucene's k=1000 latency is mostly Anserini's `SimpleSearcher` loading each
+  hit's stored `docid` and building one Java object per hit for pyjnius (the
+  `search` call alone, without reading the hits from Python, is as slow): k=10
+  is the comparable figure.
 
 ## Notes
 

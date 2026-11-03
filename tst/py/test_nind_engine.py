@@ -108,6 +108,17 @@ def test_search_respects_top_k(engine):
     assert len(results) == 1
 
 
+def test_search_bm25_parameters(engine):
+    # the defaults are those of bm25_score
+    assert engine.search("dog cat") == [(d, engine.bm25_score("dog cat", d)) for d, _ in engine.search("dog cat")]
+    for k1, b in ((0.9, 0.4), (1.2, 0.0), (2.0, 1.0)):
+        results = engine.search("dog cat", k1=k1, b=b)
+        assert results == [(d, engine.bm25_score("dog cat", d, k1=k1, b=b)) for d, _ in results]
+        assert {d for d, _ in results} == {0, 1}
+    # b = 0: no length normalization; k1 = 0: term frequency ignored, docs 0 and 1 tie on "dog"
+    assert [s for _, s in engine.search("dog", k1=0.0, b=0.0)] == [engine.bm25_score("dog", 0, k1=0.0, b=0.0)] * 2
+
+
 def test_underlying_files_are_structurally_consistent(engine):
     engine.lexicon.analyseFichierLexiconindex(False)   # raises on inconsistency
     assert engine.term_index.analyseFichierIndex(False) is True
