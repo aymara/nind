@@ -87,6 +87,12 @@ public:
                     const Identification &fileIdentification,
                     const std::list<unsigned int> &specifics);
 
+    /**\brief Rewrite only the specifics (and identification), leaving every term definition unchanged
+    *\param specifics list of specific unsigned int
+    *\param fileIdentification unique identification of lexicon */
+    void setSpecificWords(const std::list<unsigned int> &specifics,
+                          const Identification &fileIdentification);
+
 private:
     unsigned int m_specificsNumber;
 

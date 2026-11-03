@@ -26,6 +26,7 @@
 #include "NindExceptions.h"
 #include <string>
 #include <list>
+#include <vector>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
@@ -57,6 +58,14 @@ public:
      * \return ident of word */
     unsigned int addWord(const std::list<std::string> &components);
 
+    /**\brief add many words at once: same result as addWord on each word in turn
+     * (same idents), but each hash bucket is read and written only once.
+     * \param words the words, each a list of components
+     * (1 component = simple word, more components = compound word)
+     * \param idents receives the ident of each word, in the order of words */
+    void addWords(const std::vector<std::list<std::string> > &words,
+                  std::vector<unsigned int> &idents);
+
     /**\brief get ident of the specified word
      * if word exists in lexicon, its ident is returned
      * else, return 0 (0 is not a valid ident !)
@@ -68,7 +77,12 @@ public:
     /**\brief get identification of lexicon
      * \return unique identification of lexicon */
     Identification getIdentification();
-    
+
+    /**\brief get the number of hash buckets of the lexicon (fixed when the file is created:
+     * beyond a few words per bucket, lookups slow down and the lexicon should be rebuilt larger)
+     * \return number of hash buckets */
+    unsigned int getModulo() const { return m_modulo; }
+
     /**\brief get word components from the specified ident
     * if retro lexicon is not implanted, an exception is raised
     * \param ident ident of word
@@ -78,6 +92,26 @@ public:
     bool getComponents(const unsigned int ident,
                        std::list<std::string> &components);
     
+    /**\brief One word of the lexicon as stored : a simple word (prefixIdent = 0),
+    * or a compound word made of the word prefixIdent followed by the simple word lastComponent */
+    struct Entry {
+        unsigned int ident;
+        unsigned int prefixIdent;
+        std::string lastComponent;
+        Entry(): ident(0), prefixIdent(0), lastComponent() {}
+        Entry(const unsigned int id, const unsigned int prefixId, const std::string &last):
+            ident(id), prefixIdent(prefixId), lastComponent(last) {}
+        ~Entry() {}
+    };
+
+    /**\brief List every word of the lexicon by walking the whole file (no retro lexicon needed).
+    * The prefix of a compound word always has a smaller ident than the compound itself,
+    * so the components of every word can be rebuilt in a single pass over the result.
+    *\param entries receives all words, in increasing ident order
+    *\throws NindLexiconIndexException if an ident is out of range or duplicated,
+    * or a prefix doesn't precede its compound word */
+    void getEntries(std::vector<Entry> &entries);
+
     /**\brief get retrolexicon file name
     * \return file name of retrolexicon */
     std::string getRetrolexiconFileName();
@@ -114,6 +148,10 @@ private:
                             std::list<Mot>::iterator &motIt);
         
     //Ecrit les donnees de tous les mots qui ont la meme clef modulo 
+    //lit tous les mots d'un seau de hachage (liste vide si le seau est vide)
+    void readBucket(const unsigned int ident,
+                    std::list<Mot> &mots);
+
     void setDefinitionWords(const std::list<Mot> &definition,
                              const Identification &lexiconIdentification);
 

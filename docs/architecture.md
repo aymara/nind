@@ -69,9 +69,18 @@ NindFile            binary "Latecon" number/string codec (read + write) -
 nind_engine (no C++ equivalent - pure-Python frontend, native-backed)
   NindIndexer   the only Python *writer* for the index-family formats;
                 builds them via nind._native's is_writer=True constructors.
-  NindEngine    BM25 search, built on NindLexiconindex/NindTermindex/
-                NindLocalindex.
+  NindEngine    BM25 search, driven by the postings lists: nind._native's
+                Bm25Scorer reads each query term's postings once and
+                scores only the documents in them.
 ```
+
+Besides the three index files, each index (one *generation* directory,
+published atomically through `<prefix>.CURRENT`) holds small side files
+written by `NindIndexer`: `<prefix>.nindmeta` (JSON: tokenizer options,
+local index or not), `<prefix>.ninddoclengths` (document lengths, so
+`NindEngine` needs no local index) and, when documents have names,
+`<prefix>.ninddocnames` (document id <-> name, the C++ `NindDocNames`
+format: written once, read whole, name -> id by binary search).
 
 None of these classes write the index-family formats themselves except
 `NindIndexer` (which, like the readers, delegates to `nind._native` rather

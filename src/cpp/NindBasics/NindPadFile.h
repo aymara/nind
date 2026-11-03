@@ -165,10 +165,35 @@ protected:
     * \param fileIdentification unique identification of file */
     void writeIdentification(const Identification &fileIdentification);
 
+    /**\brief write the specifics and identification (the file's tail) from the write buffer
+    * In bulk mode, the tail is only kept in memory until bulk mode ends.
+    *\param position offset into write buffer of the tail
+    *\param length length of the tail (getSpecificsAndIdentificationSize()) */
+    void writeTail(const unsigned int position,
+                   const unsigned int length);
+
+    //--- mode massif (voir NindIndex::beginBulk) ---
+    //ejcrit [position, position + length) du buffer d'ejcriture ah l'adresse spejcifieje du fichier,
+    //sans repositionnement si l'ejcriture prejcejdente s'est arresteje lah
+    void bulkWrite(const uint64_t address,
+                   const unsigned int position,
+                   const unsigned int length);
+    //ah appeler aprehs toute lecture du fichier en mode massif (la position courante est perdue)
+    void bulkForgetPosition();
+
+    bool m_isBulk;                              //vrai en mode massif
+    std::vector<unsigned char> m_bulkTail;      //spejcifiques + identification, pas encore ejcrits
+    uint64_t m_bulkEnd;                         //fin des donnejes (lah oug ira la queue)
+    uint64_t m_bulkPos;                         //position courante connue du fichier (sinon BULK_POS_UNKNOWN)
+
 public:
     /**\brief get file name
     * \return file name */
     std::string getFileName();
+
+    /**\brief get size of specific datas, as read from the file (or given to a neo writer)
+    * \return size in bytes of specific datas */
+    unsigned int getSpecificsSize() const;
     NindFile m_file;                //pour l'ecrivain ou le lecteur
 
 protected:

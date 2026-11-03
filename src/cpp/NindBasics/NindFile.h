@@ -23,6 +23,7 @@
 #include "NindSignalCatcher.h"
 #include <stdio.h>
 #include <string>
+#include <vector>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
@@ -45,6 +46,12 @@ public:
     *\param accessMode authorized access modes are "rb", "wb", "ab", "r+b", "w+b", "a+b", "rb+", "wb+", "ab+"
     *\return true if success, false otherwise */
     bool open(const std::string &accessMode);
+
+    /**\brief Take an advisory exclusive lock on the open file, without waiting: a second
+    * writer on the same file (in any process) is refused instead of silently corrupting it.
+    * The lock is released when the file is closed. No-op (always true) on Windows.
+    *\return true if the lock was taken, false if another open of the file holds it */
+    bool lockExclusive();
 
     /**\brief Close file associated with. Success in any case. */
     void close();
@@ -239,6 +246,36 @@ public:
     *\param count number of bytes to write */
     void writeValue(const unsigned char value,
                     const unsigned int count);
+
+    /**\brief Switch bulk mode on or off. In bulk mode, writes are not flushed one by one
+    * (stdio buffers them) and critical sections don't install a signal handler: for a file
+    * nobody reads while it is written. Leaving bulk mode flushes the file.
+    *\param bulk true to enter bulk mode, false to leave it */
+    void setBulk(const bool bulk);
+
+    /**\brief Test if bulk mode is on
+    *\return true if bulk mode is on */
+    inline bool isBulk() const;
+
+    /**\brief Replace the read buffer with bytes from memory (instead of the file)
+    *\param bytes bytes to read next
+    *\param bytesNb number of bytes */
+    void loadInBuffer(const unsigned char *bytes,
+                      const unsigned int bytesNb);
+
+    /**\brief Copy part of the write buffer
+    *\param position offset into write buffer of the first byte to copy
+    *\param length number of bytes to copy
+    *\param bytes receives the copied bytes */
+    void copyOutBuffer(const unsigned int position,
+                       const unsigned int length,
+                       std::vector<unsigned char> &bytes) const;
+
+    /**\brief Put bytes into the intermediate buffer
+    *\param bytes bytes to put
+    *\param bytesNb number of bytes */
+    void putBytes(const unsigned char *bytes,
+                  const unsigned int bytesNb);
        
 private:
     //non copiable : possehde un FILE* et deux buffers allouejs (une copie provoquerait double fclose/delete[])
@@ -260,6 +297,7 @@ private:
     unsigned char *m_rPtr;           //pointeur buffer de lecture
     long int m_fileSize;             //taille du fichier
     bool m_isLittleEndian;
+    bool m_isBulk;                   //vrai en mode massif (ejcritures non vidanges une ah une)
     NindSignalCatcher *m_nindSignalCatcher;
 };
 ////////////////////////////////////////////////////////////
@@ -267,13 +305,23 @@ private:
  * The section is closed on every exit path, including early returns and exceptions. */
 class NindCriticalSection {
 public:
-    explicit NindCriticalSection(NindFile &file): m_file(file) { m_file.beginCriticalSection(); }
-    ~NindCriticalSection() { m_file.endCriticalSection(); }
+    //en mode massif, le fichier n'est cohejrent qu'ah la fin : rien ah protejger
+    explicit NindCriticalSection(NindFile &file): m_file(file), m_isActive(!file.isBulk()) {
+        if (m_isActive) m_file.beginCriticalSection(); }
+    ~NindCriticalSection() { if (m_isActive) m_file.endCriticalSection(); }
 private:
     NindCriticalSection(const NindCriticalSection &);
     NindCriticalSection &operator=(const NindCriticalSection &);
     NindFile &m_file;
+    const bool m_isActive;
 };
+////////////////////////////////////////////////////////////
+//brief Test if bulk mode is on
+//return true if bulk mode is on */
+inline bool NindFile::isBulk() const
+{
+    return m_isBulk;
+}
 ////////////////////////////////////////////////////////////
 //brief get current position in file
 //return current position in file */

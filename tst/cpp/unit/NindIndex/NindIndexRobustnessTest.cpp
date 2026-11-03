@@ -253,6 +253,8 @@ void readLexicon(const string &base) {
     lexicon.getWordId(words("unknown"));
     list<string> components;
     for (unsigned int id = 0; id < 12; id++) lexicon.getComponents(id, components);
+    vector<NindLexiconIndex::Entry> entries;
+    lexicon.getEntries(entries);
     lexicon.analyseIndex();
     lexicon.analysePadFile();
 }
@@ -300,6 +302,8 @@ void readLocalIndex(const string &base) {
         index.getTermIdents(1000 * doc, termIdents);
     }
     index.getDocCount();
+    vector<unsigned int> docIdents;
+    index.getDocIdents(docIdents);
     index.analyseIndex();
     index.analysePadFile();
 }

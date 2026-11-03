@@ -171,3 +171,25 @@ TEST_CASE("NindTermIndexTest.ReopenWithWrongIdentificationThrows") {
     { NindTermIndex writer(path, true, NindIndex::Identification(1, 111), 0, 8); }
     CHECK_THROWS_AS(NindTermIndex(path, false, NindIndex::Identification(2, 222), 0, 8), NindPadFileException);
 }
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.SecondWriterOnTheSameFileIsRefused") {
+    TestTempDir tmp;
+    const string base = tmp.file("locked");
+    list<TermCG> termDef(1, TermCG(1, 1));
+    termDef.back().documents.push_back(Document(3, 1));
+    {
+        NindTermIndex writer(base, true, kNoCheck, 0, 8);
+        writer.setTermDef(1, termDef, kNoCheck, list<unsigned int>());
+        //a 2nd writer is refused, even in-process
+        CHECK_THROWS_AS(NindTermIndex(base, true, kNoCheck, 0, 8), NindPadFileException);
+        //readers are never blocked by the writer
+        NindTermIndex reader(base, false, kNoCheck, 0);
+        list<TermCG> readDef;
+        CHECK(reader.getTermDef(1, readDef));
+        //and the refused writer didn't damage the file
+        CHECK_EQ(3u, readDef.front().documents.front().ident);
+    }
+    //once the writer is closed, the file can be written again
+    NindTermIndex writer(base, true, kNoCheck, 0, 8);
+    writer.setTermDef(2, termDef, kNoCheck, list<unsigned int>());
+}

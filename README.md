@@ -77,6 +77,21 @@ for doc_id, score in engine.search("ejcrit nombre", top_k=5):
 
 `index_dir` must already exist; each input file becomes one document,
 identified externally by its position in the list (`0`, `1`, `2`, ...).
+A JSON Lines corpus (pyserini's format) is indexed with
+`indexer.index_jsonl("corpus.jsonl")`; its records' ids are stored, and
+`engine.search(query, doc_names=True)` returns them. Tokenizer options (each identifier
+split optional, lowercasing) and `local_index=False` (a much smaller index,
+enough for `NindEngine`) are `NindIndexer` arguments.
+To add, replace or remove documents in an existing index (or build one
+file by file), use an incremental update instead of rebuilding:
+
+```python
+with indexer.update() as update:
+    for path in more_files:
+        update.add_file(path)       # returns the new document's id
+    update.remove(1)
+```
+
 `NindEngine` also exposes the building blocks it uses internally
 (`get_term_id`, `get_df`, `get_tf`, `get_doc_len`) for inspecting relevance
 or a specific document directly.
@@ -109,7 +124,9 @@ length)` pair, the variable-length data those indirections point to, and a
 trailer holding format-specific data plus an identification stamp. Every
 concrete format (the lexicon, the inverted term index, the per-document
 local index, the reverse lexicon) builds on that same envelope, adding
-only the meaning of its own records — see the
+only the meaning of its own records. An index built from Python also
+stores its tokenizer options, its documents' lengths and, optionally, their
+names (`.ninddocnames`: the corpus's own document ids) — see the
 [architecture guide](https://aymara.github.io/nind/architecture.html) for
 the full module layering, on both the C++ and Python sides.
 

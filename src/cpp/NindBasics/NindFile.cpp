@@ -18,6 +18,9 @@
 #include "NindFile.h"
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/file.h>
+#endif
 //#include <iostream>
 using namespace latecon::nindex;
 using namespace std;
@@ -79,6 +82,7 @@ NindFile::NindFile(const string &fileName):
     m_rPtr(0),
     m_fileSize(0),
     m_isLittleEndian(false),
+    m_isBulk(false),
     m_nindSignalCatcher(NindSignalCatcher::Instance())
 {
     //teste si la plateforme est little endian ou big endian
@@ -122,6 +126,18 @@ bool NindFile::open(const string &accessMode)
     fseek(m_file, 0, SEEK_END);
     m_fileSize = ftell(m_file);
     return true;
+}
+////////////////////////////////////////////////////////////
+//brief Take an advisory exclusive lock on the open file, without waiting
+//return true if the lock was taken, false if another open of the file holds it */
+bool NindFile::lockExclusive()
+{
+#ifdef _WIN32
+    return true;
+#else
+    //flock est par description de fichier ouvert : refuse aussi un 2e ejcrivain du mesme processus
+    return flock(fileno(m_file), LOCK_EX | LOCK_NB) == 0;
+#endif
 }
 ////////////////////////////////////////////////////////////
 //brief Close file associated with. Success in any case. */
@@ -641,10 +657,12 @@ void NindFile::writeBuffer(const unsigned int position,
     if ((uint64_t)position + size > (uint64_t)(m_wbufferEnd - m_wbuffer))
         throw OutWriteBufferException("in write buffer (W) " + m_fileName);
     const unsigned int writeSize =  fwrite(m_wbuffer + position, 1, size, m_file);
-    fflush(m_file);
-    if (writeSize != size) throw WriteFileException(m_fileName);
     //remet le pointeur d'ejcriture en teste du buffer pour une hypothejtique rejutilisation
     m_wPtr = m_wbuffer;
+    if (writeSize != size) throw WriteFileException(m_fileName);
+    //en mode massif, ni vidange ni taille : l'appelant sait oug il ejcrit
+    if (m_isBulk) return;
+    fflush(m_file);
     //memorise la taille du fichier
     const long int current = ftell(m_file);
     if (current > m_fileSize) m_fileSize = current;
@@ -660,9 +678,10 @@ void NindFile::writeValue(const unsigned char value,
     if (buffer == 0) throw BadAllocException("in write value buffer " + m_fileName);
     for (unsigned int it = 0; it != count; it++) buffer[it] = value;
     const unsigned int writeSize =  fwrite(buffer, 1, count, m_file);
-    fflush(m_file);
     delete [] buffer;
     if (writeSize != count) throw WriteFileException(m_fileName);
+    if (m_isBulk) return;
+    fflush(m_file);
     //memorise la taille du fichier
     const long int current = ftell(m_file);
     if (current > m_fileSize) m_fileSize = current;
@@ -680,4 +699,58 @@ void NindFile::readBytes(unsigned char* bytes,
     }
 }
 ////////////////////////////////////////////////////////////
-
+//brief Switch bulk mode on or off
+//param bulk true to enter bulk mode, false to leave it */
+void NindFile::setBulk(const bool bulk)
+{
+    if (bulk == m_isBulk) return;
+    if (fflush(m_file) != 0) throw WriteFileException(m_fileName);
+    m_isBulk = bulk;
+    if (bulk) return;
+    //en sortie, la taille du fichier est rejtablie
+    const long int current = ftell(m_file);
+    if (fseek(m_file, 0, SEEK_END) != 0) throw WriteFileException(m_fileName);
+    m_fileSize = ftell(m_file);
+    fseek(m_file, current, SEEK_SET);
+}
+////////////////////////////////////////////////////////////
+//brief Replace the read buffer with bytes from memory
+//param bytes bytes to read next
+//param bytesNb number of bytes */
+void NindFile::loadInBuffer(const unsigned char *bytes,
+                            const unsigned int bytesNb)
+{
+    delete [] m_rbuffer;
+    m_rbuffer = m_rbufferAbsEnd = m_rbufferEnd = m_rPtr = 0;
+    m_rbuffer = new (nothrow) unsigned char[bytesNb == 0 ? 1 : bytesNb];
+    if (m_rbuffer == 0) throw BadAllocException("in read buffer " + m_fileName);
+    if (bytesNb != 0) memcpy(m_rbuffer, bytes, bytesNb);
+    m_rbufferAbsEnd = m_rbuffer + bytesNb;
+    m_rbufferEnd = m_rbufferAbsEnd;
+    m_rPtr = m_rbuffer;
+}
+////////////////////////////////////////////////////////////
+//brief Copy part of the write buffer
+//param position offset into write buffer of the first byte to copy
+//param length number of bytes to copy
+//param bytes receives the copied bytes */
+void NindFile::copyOutBuffer(const unsigned int position,
+                             const unsigned int length,
+                             std::vector<unsigned char> &bytes) const
+{
+    if ((uint64_t)position + length > (uint64_t)(m_wPtr - m_wbuffer))
+        throw OutWriteBufferException("in write buffer (C) " + m_fileName);
+    bytes.assign(m_wbuffer + position, m_wbuffer + position + length);
+}
+////////////////////////////////////////////////////////////
+//brief Put bytes into the intermediate buffer
+//param bytes bytes to put
+//param bytesNb number of bytes */
+void NindFile::putBytes(const unsigned char *bytes,
+                        const unsigned int bytesNb)
+{
+    if ((size_t)(m_wbufferEnd - m_wPtr) < bytesNb) throw OutWriteBufferException("in write buffer (B) " + m_fileName);
+    if (bytesNb != 0) memcpy(m_wPtr, bytes, bytesNb);
+    m_wPtr += bytesNb;
+}
+////////////////////////////////////////////////////////////

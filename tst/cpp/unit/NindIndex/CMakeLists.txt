@@ -3,6 +3,10 @@ add_executable(NindIndexUnitTests
   NindTermIndexTest.cpp
   NindLocalIndexTest.cpp
   NindIndexRobustnessTest.cpp
+  NindIndexMergeTest.cpp
+  NindBulkTest.cpp
+  NindTokenizerTest.cpp
+  NindDocNamesTest.cpp
 )
 target_link_libraries(NindIndexUnitTests NindIndex NindRetrolexicon NindBasics nind_doctest_main)
 add_test(NAME NindIndexUnitTests COMMAND NindIndexUnitTests)

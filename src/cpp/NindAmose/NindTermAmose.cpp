@@ -24,6 +24,12 @@ using namespace std;
 ////////////////////////////////////////////////////////////
 #define NOMBRE_COMPTEURS 8
 ////////////////////////////////////////////////////////////
+//ordre des documents par ident
+static bool identInfejrieur(const NindTermIndex::Document &doc1, const NindTermIndex::Document &doc2)
+{
+    return doc1.ident < doc2.ident;
+}
+////////////////////////////////////////////////////////////
 //brief Creates NindTermAmose with a specified name associated with.
 //param fileNameExtensionLess absolute path file name without extension
 //param isTermIndexWriter true if termIndex writer, false if termIndex reader  */
@@ -72,28 +78,22 @@ void NindTermAmose::addDocsToTerm(const unsigned int ident,
     }
     //travaille sur l'unique ejlejment
     TermCG &termcg = termDef.front();
-    list<Document> &documents = termcg.documents;       //documents dejjah lah
+    list<Document> &documents = termcg.documents;       //documents dejjah lah, ordonnejs par ident
+    //trie les nouveaux documents pour les fusionner en une seule passe dans la liste ordonneje,
+    //au lieu de la reparcourir depuis le dejbut pour chacun (quadratique pour un gros paquet)
+    list<Document> sortedDocuments(newDocuments);
+    sortedDocuments.sort(identInfejrieur);
     //ajoute tous les documents
-    for (list<Document>::const_iterator itdoc = newDocuments.begin(); itdoc != newDocuments.end(); itdoc++) {
+    list<NindTermIndex::Document>::iterator it2 = documents.begin();
+    for (list<Document>::const_iterator itdoc = sortedDocuments.begin(); itdoc != sortedDocuments.end(); itdoc++) {
         const Document &document = (*itdoc);            //document ah ajouter
         unsigned int frequency = document.frequency;    //sa frejquence
-        //trouve la place dans la liste ordonnee
-        list<NindTermIndex::Document>::iterator it2 = documents.begin();
-        while (it2 != documents.end()) {
-            //deja dans la liste, met ah jour la frejquence
-            if ((*it2).ident == document.ident) {
-                (*it2).frequency += frequency;
-                break;
-            }
-            //insere a l'interieur de la liste
-            if ((*it2).ident > document.ident) {
-                documents.insert(it2, document);
-                break;
-            }
-            it2++;
-        }
-        //si fin de liste, insere en fin
-        if (it2 == documents.end()) documents.push_back(document);
+        //trouve la place dans la liste ordonnee, ah partir de celle du document prejcejdent
+        while (it2 != documents.end() && (*it2).ident < document.ident) it2++;
+        //deja dans la liste, met ah jour la frejquence
+        if (it2 != documents.end() && (*it2).ident == document.ident) (*it2).frequency += frequency;
+        //sinon insere ah cette place (en fin si fin de liste)
+        else it2 = documents.insert(it2, document);
         //increjmente les occurrences pour ce type
         m_termOccurrences[type] += frequency;
         m_termOccurrences[ALL] += frequency;
@@ -132,9 +132,9 @@ void NindTermAmose::removeDocFromTerm(const unsigned int ident,
         //dejcrejmente la frejquence globale de ce terme
         termcg.frequency -= document.frequency;
         //enlehve le doc de la liste
-        itdoc = documents.erase(itdoc);
-        //si c'ejtait le dernier, efface le terme
-        if (itdoc == documents.end()) {
+        documents.erase(itdoc);
+        //si c'ejtait le seul restant, efface le terme
+        if (documents.empty()) {
             //dejcrejmente le nombre de termes pour ce type
             m_uniqueTermCount[type] -=1;
             m_uniqueTermCount[ALL] -=1;

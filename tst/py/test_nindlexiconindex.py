@@ -15,7 +15,7 @@ from nind.NindLexiconindex import NindLexiconindex
 
 def write_lexicon(index_dir, terms):
     indexer = NindIndexer(str(index_dir), prefix="corpus")
-    term_to_id, _ = indexer._write_lexicon(terms)
+    term_to_id, _ = indexer._write_lexicon(terms, str(index_dir / "corpus"))
     return str(index_dir / "corpus.nindlexiconindex"), term_to_id
 
 
@@ -61,7 +61,7 @@ def test_compound_lookup_of_two_known_words_is_unknown(tmp_path):
 
 def test_donneIdentification_matches_native_writer(tmp_path):
     indexer = NindIndexer(str(tmp_path), prefix="corpus")
-    term_to_id, lexicon_identification = indexer._write_lexicon(["alpha", "beta", "gamma"])
+    term_to_id, lexicon_identification = indexer._write_lexicon(["alpha", "beta", "gamma"], str(tmp_path / "corpus"))
 
     lexicon = NindLexiconindex(str(tmp_path / "corpus.nindlexiconindex"))
     identification = lexicon.donneIdentification()
