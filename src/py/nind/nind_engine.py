@@ -14,6 +14,7 @@ Typical usage::
     from nind.nind_engine import NindIndexer, NindEngine
 
     NindIndexer("indices", prefix="corpus").index_files(["a.py", "b.py"])
+    NindIndexer("indices", prefix="docs").index_jsonl("corpus.jsonl")    # pyserini's format
     with NindIndexer("indices", prefix="corpus").update() as update:
         update.add_file("c.py")             # incremental: add, replace, remove
     engine = NindEngine("indices")
@@ -21,11 +22,14 @@ Typical usage::
         print(doc_id, score)
 """
 import contextlib
+import copy
 import json
 import math
 import os
 import re
 import shutil
+import struct
+import sys
 import tempfile
 import threading
 import time
@@ -35,7 +39,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
-from ._index_store import IndexStore, INDEX_EXTENSIONS
+from ._index_store import IndexStore, INDEX_EXTENSIONS, META_EXTENSION, DOC_LENGTHS_EXTENSION
 try:
     from . import _native as native
 except ImportError:
@@ -60,6 +64,171 @@ def _pool_worker_init():
     threading.Thread(target=watch, daemon=True).start()
 
 
+# ---------------------------------------------------------------------------
+# Tokenization
+# ---------------------------------------------------------------------------
+
+#: Default tokenizer options of :class:`NindIndexer` (see its ``tokenizer`` argument).
+TOKENIZER_DEFAULTS = {
+    "split_camel_case": True,   # "fooBar" -> "foo" "Bar", "HTTPServer" -> "HTTP" "Server"
+    "split_underscore": True,   # "foo_bar" -> "foo" "bar"
+    "split_digits": True,       # "utf8" -> "utf" "8"
+    "lowercase": False,         # ASCII letters only
+    "min_length": 1,            # shorter tokens are dropped (in bytes)
+    "max_length": 254,          # longer tokens are dropped (in bytes; a lexicon word is at most 254)
+}
+
+#: Tokenizer of indexes written before tokenizer options were stored with the
+#: index: the original pure-Python tokenizer, kept to query and update them as built.
+LEGACY_TOKENIZER = "legacy"
+
+
+def _tokenizer_options(options):
+    """Complete and check tokenizer options (``None``: the defaults)."""
+    if options is None:
+        return dict(TOKENIZER_DEFAULTS)
+    if options == LEGACY_TOKENIZER:
+        return LEGACY_TOKENIZER
+    unknown = set(options) - set(TOKENIZER_DEFAULTS)
+    if unknown:
+        raise ValueError("unknown tokenizer options: %s" % ", ".join(sorted(unknown)))
+    result = dict(TOKENIZER_DEFAULTS)
+    result.update(options)
+    for name in ("split_camel_case", "split_underscore", "split_digits", "lowercase"):
+        result[name] = bool(result[name])
+    result["min_length"], result["max_length"] = int(result["min_length"]), int(result["max_length"])
+    if not 1 <= result["min_length"] <= result["max_length"] <= 254:
+        raise ValueError("tokenizer options: need 1 <= min_length <= max_length <= 254")
+    return result
+
+
+_native_tokenizers = {}     # per process: options -> native.Tokenizer
+
+
+def _native_tokenizer(options):
+    key = tuple(sorted(options.items()))
+    tokenizer = _native_tokenizers.get(key)
+    if tokenizer is None:
+        tokenizer = _native_tokenizers[key] = native.Tokenizer(native.TokenizerOptions(**options))
+    return tokenizer
+
+
+def _legacy_tokenize(text):
+    tokens = re.split(r'[^a-zA-Z0-9_]', text)
+    refined = []
+    for t in tokens:
+        if not t: continue
+        parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', t)
+        refined.extend(parts if parts else [t])
+    return refined
+
+
+def _tokenize_text(options, text):
+    """Tokens of ``text`` with tokenizer ``options`` (a dict, or LEGACY_TOKENIZER)."""
+    if options == LEGACY_TOKENIZER:
+        return _legacy_tokenize(text)
+    return _native_tokenizer(options).tokenize(text)
+
+
+def _storable(token):
+    # a lexicon word is 1 to 254 bytes long
+    return 0 < len(token) and len(token.encode("utf-8")) <= 254
+
+
+def _chunk_from_token_lists(token_lists):
+    """(vocabulary, term ids, ends) of documents given as token lists, as
+    native.Tokenizer.tokenize_batch returns them; unstorable tokens are dropped."""
+    local_ids, vocabulary = {}, []
+    term_ids, ends = array('I'), array('I')
+    for tokens in token_lists:
+        for token in tokens:
+            local_id = local_ids.get(token)
+            if local_id is None:
+                if not _storable(token):
+                    continue
+                local_id = local_ids[token] = len(vocabulary)
+                vocabulary.append(token)
+            term_ids.append(local_id)
+        ends.append(len(term_ids))
+    return vocabulary, term_ids.tobytes(), ends.tobytes()
+
+
+def _uint_array(data):
+    values = array('I')
+    values.frombytes(data)
+    return values
+
+
+# ---------------------------------------------------------------------------
+# Index metadata and document lengths, stored next to the nind files
+# ---------------------------------------------------------------------------
+
+def _write_meta(base, tokenizer_options, local_index):
+    with open(base + META_EXTENSION, "w", encoding="utf-8") as f:
+        json.dump({"format": 1, "tokenizer": tokenizer_options, "local_index": bool(local_index)}, f)
+
+
+def _read_meta(base):
+    """The metadata of the index at ``base`` (``None`` for an index written before it existed)."""
+    try:
+        with open(base + META_EXTENSION, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except FileNotFoundError:
+        return None
+    if not isinstance(meta, dict) or meta.get("format") != 1:
+        raise ValueError("Unsupported %s" % (base + META_EXTENSION))
+    meta["tokenizer"] = _tokenizer_options(meta.get("tokenizer"))
+    return meta
+
+
+_DOC_LENGTHS_MAGIC = b"NINDDL01"
+
+
+def _write_doc_lengths(base, lengths):
+    """Write ``{document id: length in tokens}`` (documents of length 0 are left out)."""
+    doc_ids = array('I', sorted(doc_id for doc_id, length in lengths.items() if length))
+    values = array('I', (lengths[doc_id] for doc_id in doc_ids))
+    if sys.byteorder == "big":
+        doc_ids.byteswap()
+        values.byteswap()
+    with open(base + DOC_LENGTHS_EXTENSION, "wb") as f:
+        f.write(_DOC_LENGTHS_MAGIC + struct.pack("<I", len(doc_ids)))
+        f.write(doc_ids.tobytes())
+        f.write(values.tobytes())
+
+
+def _read_doc_lengths(base):
+    """``{document id: length in tokens}`` (``None`` if the index has no such file)."""
+    try:
+        with open(base + DOC_LENGTHS_EXTENSION, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return None
+    header = len(_DOC_LENGTHS_MAGIC) + 4
+    if len(data) < header or not data.startswith(_DOC_LENGTHS_MAGIC):
+        raise ValueError("Corrupt %s" % (base + DOC_LENGTHS_EXTENSION))
+    (count,) = struct.unpack_from("<I", data, len(_DOC_LENGTHS_MAGIC))
+    if len(data) != header + 8 * count:
+        raise ValueError("Corrupt %s" % (base + DOC_LENGTHS_EXTENSION))
+    doc_ids, values = array('I'), array('I')
+    doc_ids.frombytes(data[header:header + 4 * count])
+    values.frombytes(data[header + 4 * count:])
+    if sys.byteorder == "big":
+        doc_ids.byteswap()
+        values.byteswap()
+    return dict(zip(doc_ids, values))
+
+
+def _local_index_lengths(base):
+    # the document lengths of an index written before they were stored apart
+    lexicon = native.NindLexiconIndex(base, is_writer=False)
+    local_index = native.NindLocalIndex(base, is_writer=False, lexicon_identification=lexicon.get_identification())
+    lengths = {}
+    for doc_id in local_index.get_doc_idents():
+        lengths[doc_id] = sum(len(term.localisation) for term in local_index.get_local_def(doc_id) or ())
+    return lengths
+
+
 class _Snapshot:
     """One opened generation of an index: every file from the same build."""
 
@@ -68,10 +237,25 @@ class _Snapshot:
         self.lexicon = NindLexiconindex(base + ".nindlexiconindex")
         lexicon_identification = self.lexicon.donneIdentification()
         self.term_index = NindTermindex(base + ".nindtermindex", lexicon_identification)
-        self.local_index = NindLocalindex(base + ".nindlocalindex", lexicon_identification)
-        self.doc_ids = [ext_id for ext_id, _ in self.local_index.donneidentifiantsExternes()]
+        # an index built with local_index=False has none
+        self.local_index = NindLocalindex(base + ".nindlocalindex", lexicon_identification) \
+            if os.path.exists(base + ".nindlocalindex") else None
+        meta = _read_meta(base)
+        # an index written before tokenizer options were stored: the original tokenizer
+        self.tokenizer_options = meta["tokenizer"] if meta is not None else LEGACY_TOKENIZER
+        lengths = _read_doc_lengths(base)
+        if lengths is not None:
+            self.doc_ids = sorted(lengths)
+        else:
+            # written before document lengths were stored apart: read from the local index
+            if self.local_index is None:
+                raise FileNotFoundError("No document lengths nor local index for %s" % base)
+            self.doc_ids = [ext_id for ext_id, _ in self.local_index.donneidentifiantsExternes()]
+            lengths = {doc_id: sum(len(term.localisation) for term in self.local_index.donneListeTermes(doc_id))
+                       for doc_id in self.doc_ids}
+        self._doc_lengths = lengths
         self.total_docs = len(self.doc_ids)
-        total_len = sum(self.doc_len(doc_id) for doc_id in self.doc_ids)
+        total_len = sum(lengths.values())
         self.avg_doc_len = total_len / self.total_docs if self.total_docs else 0
 
     def term_id(self, term):
@@ -92,7 +276,7 @@ class _Snapshot:
         return sum(len(term_cg.documents) for term_cg in self.term_defs(term))
 
     def doc_len(self, doc_id):
-        return sum(len(term.localisation) for term in self.local_index.donneListeTermes(doc_id))
+        return self._doc_lengths.get(doc_id, 0)
 
 
 class NindEngine:
@@ -153,7 +337,8 @@ class NindEngine:
 
     @property
     def local_index(self):
-        """The :class:`~nind.NindLocalindex.NindLocalindex` of the current build."""
+        """The :class:`~nind.NindLocalindex.NindLocalindex` of the current build
+        (``None`` for an index built with ``local_index=False``)."""
         with self._session() as snapshot:
             return snapshot.local_index
 
@@ -170,25 +355,19 @@ class NindEngine:
             return snapshot.avg_doc_len
 
     def tokenize(self, text):
-        """Split source-code-like text into tokens, splitting camelCase/snake_case identifiers into subwords.
+        """Split source-code-like text into tokens, as the index's documents were.
 
-        Used both here (query tokenization for :meth:`search`) and by
-        :class:`NindIndexer` (corpus tokenization at indexing time) - the
-        two must stay in sync for search results to be meaningful.
+        Uses the tokenizer options the index was built with (see
+        :class:`NindIndexer`): queries must be tokenized like the corpus for
+        search results to be meaningful.
 
         :param text: the text to tokenize.
-        :return: a list of lowercase-preserving token strings.
+        :return: the list of tokens.
         """
-        tokens = re.split(r'[^a-zA-Z0-9_]', text)
-        refined_tokens = []
-        for t in tokens:
-            if not t: continue
-            parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', t)
-            if parts:
-                refined_tokens.extend(parts)
-            else:
-                refined_tokens.append(t)
-        return refined_tokens
+        if not hasattr(self, "_store"):
+            return _tokenize_text(_tokenizer_options(None), text)
+        with self._session() as snapshot:
+            return _tokenize_text(snapshot.tokenizer_options, text)
 
     def get_term_id(self, term):
         """Look up a term's internal lexicon identifier.
@@ -314,6 +493,10 @@ class IndexUpdate:
     at least a copy of the index files: group many documents in one update
     rather than making one update per document on a large index.
 
+    Documents are tokenized as the index's were (its stored tokenizer
+    options); an index built without local index stays without (replacing
+    or removing documents then reads every term of the index).
+
     Not thread-safe: use an update from one thread at a time.
     """
 
@@ -336,12 +519,14 @@ class IndexUpdate:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         if self._stack is not None:
             raise RuntimeError("this update is already in progress")
-        store = IndexStore(self._indexer.index_dir, self._indexer.prefix)
+        indexer = self._indexer
+        store = IndexStore(indexer.index_dir, indexer.prefix)
         with contextlib.ExitStack() as stack:
             self._base = stack.enter_context(store.new_generation())
-            self._existing = set()
             self._with_retrolexicon = False
-            self._is_new = True
+            self._tokenizer_options = indexer.tokenizer_options
+            self._local = indexer.local_index is not False
+            self._lengths = {}
             source = store.published_base()
             if source is not None:
                 # the published generation is never modified: work on a copy of it
@@ -349,13 +534,22 @@ class IndexUpdate:
                     if os.path.exists(source + extension):
                         shutil.copyfile(source + extension, self._base + extension)
                 self._with_retrolexicon = os.path.exists(self._base + ".nindretrolexicon")
-                self._is_new = False
-                lexicon = native.NindLexiconIndex(self._base, is_writer=False)
-                local_index = native.NindLocalIndex(self._base, is_writer=False,
-                                                    lexicon_identification=lexicon.get_identification())
-                self._existing = set(local_index.get_doc_idents())
-                del local_index, lexicon
+                # the index keeps the tokenizer and layout it was built with
+                meta = _read_meta(self._base)
+                options = meta["tokenizer"] if meta is not None else LEGACY_TOKENIZER
+                if indexer._explicit_tokenizer and options != indexer.tokenizer_options:
+                    raise ValueError("the index was built with other tokenizer options: %r" % (options,))
+                local = os.path.exists(self._base + ".nindlocalindex")
+                if indexer.local_index is not None and indexer.local_index != local:
+                    raise ValueError("the index was built %s local index" % ("with" if local else "without"))
+                self._tokenizer_options, self._local = options, local
+                lengths = _read_doc_lengths(self._base)
+                self._lengths = lengths if lengths is not None else _local_index_lengths(self._base)
             self._stack = stack.pop_all()
+        # tokenizes like the index: the indexer, with the index's tokenizer options
+        self._tokenizing_indexer = copy.copy(indexer)
+        self._tokenizing_indexer.tokenizer_options = self._tokenizer_options
+        self._existing = set(self._lengths)
         self._pending = {}      # doc id -> its tokens, or None to remove it
         self._next_id = max(self._existing) + 1 if self._existing else 0
         return self
@@ -393,22 +587,24 @@ class IndexUpdate:
             in the index or in this update (``0`` for the first document).
         :return: the document's identifier.
         """
-        tokens, _ = self._indexer._tokenize_file(path)
-        return self.add_tokens(tokens, doc_id)
+        self._check_active()
+        return self.add_tokens(self._tokenizing_indexer._tokenize_file(path), doc_id)
 
     def add_text(self, text, doc_id=None):
         """Index ``text`` as one document; see :meth:`add_file`."""
-        return self.add_tokens(self._indexer._default_tokenize(text), doc_id)
+        self._check_active()
+        return self.add_tokens(self._tokenizing_indexer._default_tokenize(text), doc_id)
 
     def add_tokens(self, tokens, doc_id=None):
         """Index an already tokenized document; see :meth:`add_file`.
 
         A document without any token isn't stored (an existing document with
-        that id is removed).
+        that id is removed). Tokens a lexicon can't store (empty, or longer
+        than 254 bytes in UTF-8) are dropped.
         """
         self._check_active()
         doc_id = self._next_id if doc_id is None else _check_doc_id(doc_id)
-        self._pending[doc_id] = list(tokens)
+        self._pending[doc_id] = [token for token in tokens if _storable(token)]
         self._next_id = max(self._next_id, doc_id + 1)
         return doc_id
 
@@ -437,12 +633,21 @@ class IndexUpdate:
         lexicon, term_index, local_index = self._open_writers(len(vocabulary), len(pending))
         # the previous postings of every replaced or removed document go
         removed = defaultdict(set)
-        for doc_id in pending:
-            if doc_id in self._existing:
+        replaced = [doc_id for doc_id in pending if doc_id in self._existing]
+        if replaced and local_index is not None:
+            for doc_id in replaced:
                 for term_id in local_index.get_term_idents(doc_id) or ():
                     removed[term_id].add(doc_id)
+        elif replaced:
+            # no local index: find their terms in the whole term index
+            replaced = set(replaced)
+            for term_id in range(1, lexicon.get_identification().lexicon_words_nb + 1):
+                for term_cg in term_index.get_term_def(term_id) or ():
+                    for document in term_cg.documents:
+                        if document.ident in replaced:
+                            removed[term_id].add(document.ident)
         # term/local files are opened with the lexicon's identification: they're written after it
-        term_to_id = {term: lexicon.add_word([term]) for term in vocabulary}
+        term_to_id = dict(zip(vocabulary, lexicon.add_simple_words(vocabulary)))
         identification = lexicon.get_identification()
         added = defaultdict(dict)
         for doc_id, tokens in pending.items():
@@ -450,15 +655,26 @@ class IndexUpdate:
                 added[term_to_id[term]][doc_id] = freq
         doc_ids = sorted(pending)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            term_future = pool.submit(self._update_term_index, term_index, removed, added, identification)
-            local_future = pool.submit(self._update_local_index, local_index, doc_ids, pending,
-                                       term_to_id, identification)
-            term_future.result()
-            local_future.result()
+            futures = [pool.submit(self._update_term_index, term_index, removed, added, identification)]
+            if local_index is not None:
+                futures.append(pool.submit(self._update_local_index, local_index, doc_ids, pending,
+                                           term_to_id, identification))
+            for future in futures:
+                future.result()
+        for writer in self._writers:
+            writer.end_bulk()
         self._modulo = lexicon.get_modulo()
         self._words_nb = identification.lexicon_words_nb
+        for doc_id, tokens in pending.items():
+            if tokens:
+                self._lengths[doc_id] = len(tokens)
+            else:
+                self._lengths.pop(doc_id, None)
+        _write_doc_lengths(self._base, self._lengths)
+        _write_meta(self._base, self._tokenizer_options, self._local)
 
     def _open_writers(self, vocabulary_size, docs_nb):
+        # in bulk mode: nobody reads this generation before it is published
         lexicon = native.NindLexiconIndex(
             self._base, is_writer=True, with_retrolexicon=self._with_retrolexicon,
             indirection_bloc_size=max(self.LEXICON_MIN_BUCKETS, 2 * vocabulary_size),
@@ -470,13 +686,17 @@ class IndexUpdate:
                                           specifics_number=0,
                                           indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, vocabulary_size + 1))
         self._writers.append(term_index)
-        local_index = native.NindLocalIndex(self._base, is_writer=True, lexicon_identification=identification,
-                                            indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, docs_nb + 1))
-        self._writers.append(local_index)
+        local_index = None
+        if self._local:
+            local_index = native.NindLocalIndex(self._base, is_writer=True, lexicon_identification=identification,
+                                                indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, docs_nb + 1))
+            self._writers.append(local_index)
+        for writer in self._writers:
+            writer.begin_bulk()
         return lexicon, term_index, local_index
 
     def _close_writers(self):
-        # the native writers close their files when destroyed
+        # the native writers close their files when destroyed (ending bulk mode if needed)
         self._writers = None
 
     @staticmethod
@@ -534,24 +754,48 @@ class NindIndexer:
     module docstring): it builds them via ``nind._native``'s
     ``is_writer=True`` constructors.
 
-    Two ways of indexing: :meth:`index_files` (re)builds the whole index from
-    a list of files, in parallel; :meth:`update` (and its shortcuts
-    :meth:`add_file`, :meth:`add_files`, :meth:`remove_documents`) changes an
-    existing index - or creates one - incrementally.
+    Two ways of indexing: :meth:`index_files` (or :meth:`index_jsonl`)
+    (re)builds the whole index, in parallel; :meth:`update` (and its
+    shortcuts :meth:`add_file`, :meth:`add_files`, :meth:`remove_documents`)
+    changes an existing index - or creates one - incrementally.
+
+    Texts are tokenized by the native tokenizer (``nind._native.Tokenizer``),
+    with the options given at construction, stored with the index so that
+    :class:`NindEngine` tokenizes queries the same way. To tokenize
+    differently, a subclass may override :meth:`_default_tokenize` (a
+    function of a text returning its list of tokens): it is then used
+    instead, in pure Python (slower).
     """
 
-    def __init__(self, index_dir, prefix="corpus"):
+    def __init__(self, index_dir, prefix="corpus", tokenizer=None, local_index=None):
         """Prepare an indexer that will write into ``index_dir``.
 
-        Does not touch the filesystem until :meth:`index_files` is called.
+        Does not touch the filesystem until it indexes.
 
         :param index_dir: directory the index files will be written into
             (must already exist).
-        :param prefix: filename prefix shared by the three index files
+        :param prefix: filename prefix shared by the index files
             (e.g. ``"corpus"`` -> ``corpus.nindlexiconindex`` etc.).
+        :param tokenizer: tokenizer options, a dict overriding some of
+            :data:`TOKENIZER_DEFAULTS`: ``split_camel_case``,
+            ``split_underscore``, ``split_digits`` (each kind of split of
+            identifiers is optional), ``lowercase``, ``min_length`` and
+            ``max_length`` (in bytes; longer or shorter tokens are dropped).
+            Default: the defaults for a new index, and the index's own options
+            for an :meth:`update` (which refuses explicitly different ones).
+        :param local_index: whether to write the local index (per document:
+            its terms and their positions). The search engine doesn't need it
+            (it only needs document lengths, stored apart), and it makes up
+            most of an index's size and a good part of its build time; other
+            readers of nind indexes (e.g. Amose) may need it. Default: with a
+            local index for a new index, the index's own choice for an
+            :meth:`update` (which refuses an explicitly different one).
         """
         self.index_dir = index_dir
         self.prefix = prefix
+        self._explicit_tokenizer = tokenizer is not None
+        self.tokenizer_options = _tokenizer_options(tokenizer)
+        self.local_index = None if local_index is None else bool(local_index)
         # Do not initialize engine here; files may not exist yet
         self.engine = None
 
@@ -568,9 +812,10 @@ class NindIndexer:
         themselves); if indexing fails, the previous index stays in place.
         Several ``index_files`` on the same index wait for each other.
 
-        Files are tokenized in parallel worker processes, then the term and
-        local index files (independent of each other once the lexicon is
-        written) are written concurrently, each by its own single writer.
+        Files are tokenized in parallel worker processes, then the lexicon is
+        written, then the term and local index files (independent of each
+        other once the lexicon is written) are written concurrently, each by
+        its own single writer, in bulk mode.
 
         :param file_paths: list of paths to UTF-8 (or UTF-8-decodable, with
             errors ignored) text files to index.
@@ -585,12 +830,18 @@ class NindIndexer:
         """
         if native is None:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
+        file_paths = list(file_paths)
         shards = max(1, min(shards, len(file_paths)))
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             if shards > 1:
                 self._index_sharded(file_paths, workers, shards, base)
             else:
-                self._write_index(self._tokenize_files(file_paths, workers), 0, base)
+                self._write_chunks(self._tokenize_chunks(file_paths, workers), 0, base)
+            _write_meta(base, self.tokenizer_options, self._with_local_index)
+
+    @property
+    def _with_local_index(self):
+        return self.local_index is not False
 
     def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None):
         """Index a JSON Lines corpus (one document per line) as a nind index.
@@ -632,10 +883,10 @@ class NindIndexer:
                 parts = list(pool.map(self._tokenize_jsonl_range, [path] * len(ranges),
                                       [start for start, _ in ranges], [stop for _, stop in ranges],
                                       [id_field] * len(ranges), [text_field] * len(ranges)))
-        ids = [doc_ident for part in parts for doc_ident, _ in part]
-        tokenized = [document for part in parts for _, document in part]
+        ids = [doc_ident for record_ids, _ in parts for doc_ident in record_ids]
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
-            self._write_index(tokenized, 0, base)
+            self._write_chunks([chunk for _, chunk in parts], 0, base)
+            _write_meta(base, self.tokenizer_options, self._with_local_index)
         return ids
 
     #: Below this many bytes of JSON Lines, :meth:`index_jsonl` works in-process.
@@ -674,11 +925,11 @@ class NindIndexer:
         return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
     def _tokenize_jsonl_range(self, path, start, stop, id_field, text_field):
-        # Runs in a worker process: [(record id, (tokens, counts))] of the lines in [start, stop).
+        # Runs in a worker process: (record ids, chunk) of the lines in [start, stop).
         with open(path, 'rb') as f:
             f.seek(start)
             data = f.read(stop - start)
-        documents = []
+        record_ids, texts = [], []
         for line_number, line in enumerate(data.split(b'\n')):
             if not line.strip():
                 continue
@@ -691,9 +942,9 @@ class NindIndexer:
             if not isinstance(text, str):
                 raise ValueError("%s, at byte %d (+%d lines): field %r is not a string"
                                  % (path, start, line_number, text_field))
-            tokens = self._default_tokenize(text)
-            documents.append((doc_ident, (tokens, Counter(tokens))))
-        return documents
+            record_ids.append(doc_ident)
+            texts.append(text)
+        return record_ids, self._tokenize_texts(texts)
 
     def update(self):
         """Start an incremental update of the index (created if there is none yet).
@@ -714,10 +965,11 @@ class NindIndexer:
         """
         if doc_ids is not None and len(doc_ids) != len(file_paths):
             raise ValueError("doc_ids and file_paths must have the same length")
-        tokenized = self._tokenize_files(list(file_paths), workers)
         with self.update() as update:
+            # tokenized like the index
+            tokenized = update._tokenizing_indexer._tokenize_files(list(file_paths), workers)
             return [update.add_tokens(tokens, None if doc_ids is None else doc_ids[i])
-                    for i, (tokens, _) in enumerate(tokenized)]
+                    for i, tokens in enumerate(tokenized)]
 
     def add_file(self, path, doc_id=None):
         """Add (or replace) one document incrementally; see :meth:`add_files`.
@@ -739,26 +991,45 @@ class NindIndexer:
         with self.update() as update:
             return [update.remove(doc_id) for doc_id in doc_ids]
 
-    def _write_index(self, tokenized, first_doc_id, base):
-        # writes the index files at base (a path without extension)
-        # tokenized: (tokens, counts) per document, the first one being document first_doc_id
-        global_lexicon = Counter()
-        for _, counts in tokenized:
-            global_lexicon.update(counts)
-        term_to_id, lexicon_identification = self._write_lexicon(sorted(global_lexicon.keys()), base)
+    def _write_chunks(self, chunks, first_doc_id, base):
+        # writes the index files at base (a path without extension), plus the document lengths
+        # chunks: (vocabulary, term ids, ends) of consecutive documents, the first one being
+        # document first_doc_id (see native.Tokenizer.tokenize_batch)
+        vocabulary = sorted(set().union(*(chunk[0] for chunk in chunks)))
+        term_to_id, identification = self._write_lexicon(vocabulary, base)
+        builder = native.IndexBuilder()
+        doc_id = first_doc_id
+        for chunk_vocabulary, term_ids, ends in chunks:
+            ends = _uint_array(ends)
+            builder.add_documents(doc_id, ends, _uint_array(term_ids),
+                                  array('I', map(term_to_id.__getitem__, chunk_vocabulary)))
+            doc_id += len(ends)
+        del chunks
+        writers = [native.NindTermIndex(base, is_writer=True, lexicon_identification=identification,
+                                        specifics_number=0, indirection_bloc_size=len(vocabulary) + 1)]
+        if self._with_local_index:
+            writers.append(native.NindLocalIndex(base, is_writer=True, lexicon_identification=identification,
+                                                 indirection_bloc_size=max(1, builder.docs_nb + 1)))
 
-        inverted_index = defaultdict(list)
-        for doc_id, (_, counts) in enumerate(tokenized, first_doc_id):
-            for term, freq in counts.items():
-                inverted_index[term_to_id[term]].append((doc_id, freq))
+        def write(writer, method):
+            # one writer per file, in its own thread: the native writers release the GIL
+            writer.begin_bulk()
+            method(writer, identification)
+            writer.end_bulk()
 
-        # One writer per file: the native writers release the GIL while they build and write.
         with ThreadPoolExecutor(max_workers=2) as pool:
-            term_future = pool.submit(self._write_term_index, inverted_index, lexicon_identification, base)
-            local_future = pool.submit(self._write_local_index, [tokens for tokens, _ in tokenized],
-                                       term_to_id, lexicon_identification, first_doc_id, base)
-            term_future.result()
-            local_future.result()
+            futures = [pool.submit(write, writers[0], builder.write_term_index)]
+            if len(writers) > 1:
+                futures.append(pool.submit(write, writers[1], builder.write_local_index))
+            for future in futures:
+                future.result()
+        del writers
+        doc_ids, lengths = builder.doc_lengths()
+        _write_doc_lengths(base, dict(zip(_uint_array(doc_ids), _uint_array(lengths))))
+
+    def _write_index(self, token_lists, first_doc_id, base):
+        # writes the index of documents given as token lists (first one: document first_doc_id)
+        self._write_chunks([_chunk_from_token_lists(token_lists)], first_doc_id, base)
 
     def _index_sharded(self, file_paths, workers, shards, base):
         if workers is None:
@@ -775,17 +1046,55 @@ class NindIndexer:
                 for future in futures:
                     future.result()
             native.merge_indexes(shard_bases, base)
+            # disjoint documents: the shards' lengths together
+            lengths = {}
+            for shard_base in shard_bases:
+                lengths.update(_read_doc_lengths(shard_base))
+            _write_doc_lengths(base, lengths)
         finally:
             shutil.rmtree(shard_dir, ignore_errors=True)
 
     def _build_shard(self, shard_base, file_paths, first_doc_id):
         # Runs in a worker process (self is a copy: keeps an overridden tokenizer).
-        self._write_index([self._tokenize_file(path) for path in file_paths], first_doc_id, shard_base)
+        self._write_chunks(self._tokenize_chunks(file_paths, 1), first_doc_id, shard_base)
 
     #: Below this many files, :meth:`index_files` tokenizes in-process.
     PARALLEL_MIN_FILES = 64
+    #: At most this many files per tokenizing task.
+    CHUNK_MAX_FILES = 4096
+
+    def _tokenize_chunks(self, file_paths, workers):
+        # the files as chunks (see _write_chunks), tokenized in worker processes
+        if workers is None:
+            workers = os.cpu_count() or 1
+        workers = min(workers, len(file_paths))
+        if workers <= 1 or len(file_paths) < self.PARALLEL_MIN_FILES:
+            size = self.CHUNK_MAX_FILES
+        else:
+            size = max(1, min(self.CHUNK_MAX_FILES, -(-len(file_paths) // (workers * 4))))
+        pieces = [file_paths[i:i + size] for i in range(0, len(file_paths), size)]
+        if workers <= 1 or len(file_paths) < self.PARALLEL_MIN_FILES:
+            return [self._tokenize_paths(piece) for piece in pieces]
+        with ProcessPoolExecutor(max_workers=workers, initializer=_pool_worker_init) as pool:
+            return list(pool.map(self._tokenize_paths, pieces))
+
+    def _tokenize_paths(self, file_paths):
+        # Runs in a worker process: one chunk (see _write_chunks) of the files.
+        texts = []
+        for path in file_paths:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                texts.append(f.read())
+        return self._tokenize_texts(texts)
+
+    def _tokenize_texts(self, texts):
+        # one chunk (see _write_chunks): natively, unless _default_tokenize is overridden
+        if type(self)._default_tokenize is NindIndexer._default_tokenize and \
+                self.tokenizer_options != LEGACY_TOKENIZER:
+            return _native_tokenizer(self.tokenizer_options).tokenize_batch(texts)
+        return _chunk_from_token_lists([self._default_tokenize(text) for text in texts])
 
     def _tokenize_files(self, file_paths, workers):
+        # the files' token lists (for updates)
         if workers is None:
             workers = os.cpu_count() or 1
         workers = min(workers, len(file_paths))
@@ -797,42 +1106,37 @@ class NindIndexer:
             return list(pool.map(self._tokenize_file, file_paths, chunksize=chunksize))
 
     def _tokenize_file(self, path):
-        # Runs in a worker process: also counts there, so the parent doesn't have to.
         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            tokens = self._default_tokenize(f.read())
-        return tokens, Counter(tokens)
+            return self._default_tokenize(f.read())
 
     def _default_tokenize(self, text):
-        tokens = re.split(r'[^a-zA-Z0-9_]', text)
-        refined = []
-        for t in tokens:
-            if not t: continue
-            parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', t)
-            refined.extend(parts if parts else [t])
-        return refined
+        """The tokens of ``text`` (see the class documentation to override it)."""
+        return _tokenize_text(self.tokenizer_options, text)
 
     ########################################################################
     # .nindlexiconindex : one simple word per term, ids assigned by the writer.
     ########################################################################
     def _write_lexicon(self, terms, base):
+        # terms get the idents 1, 2... in the order given
         lexicon_writer = native.NindLexiconIndex(base, is_writer=True,
-                                                   indirection_bloc_size=max(1, len(terms)))
-        term_to_id = {}
-        for term in terms:
-            term_to_id[term] = lexicon_writer.add_word([term])
+                                                 indirection_bloc_size=max(1, len(terms)))
+        lexicon_writer.begin_bulk()
+        term_to_id = dict(zip(terms, lexicon_writer.add_simple_words(terms)))
+        lexicon_writer.end_bulk()
         return term_to_id, lexicon_writer.get_identification()
 
     ########################################################################
     # .nindtermindex : directly indexed by identifiant terme.
+    # (_write_term_index and _write_local_index: writers of index files from
+    # Python structures, used by the reader tests; indexing uses IndexBuilder)
     ########################################################################
     def _write_term_index(self, inverted_index, lexicon_identification, base):
+        # inverted_index: term id -> [(doc id, frequency)] in increasing doc id order
         max_term_id = max(inverted_index) if inverted_index else 0
         term_writer = native.NindTermIndex(base, is_writer=True,
-                                            lexicon_identification=lexicon_identification,
-                                            specifics_number=0,
-                                            indirection_bloc_size=max_term_id + 1)
-        # flat buffers: term i's postings are doc_ids/freqs[ends[i-1]:ends[i]], already in
-        # increasing doc_id order (built by iterating documents in order)
+                                           lexicon_identification=lexicon_identification,
+                                           specifics_number=0,
+                                           indirection_bloc_size=max_term_id + 1)
         idents, ends, doc_ids, freqs = array('I'), array('I'), array('I'), array('I')
         for tid in sorted(inverted_index):
             postings = inverted_index[tid]
@@ -840,7 +1144,9 @@ class NindIndexer:
             doc_ids.extend(doc_id for doc_id, _ in postings)
             freqs.extend(freq for _, freq in postings)
             ends.append(len(doc_ids))
+        term_writer.begin_bulk()
         term_writer.set_term_defs_arrays(idents, ends, doc_ids, freqs, lexicon_identification)
+        term_writer.end_bulk()
 
     ########################################################################
     # .nindlocalindex : directly indexed by identifiant document externe
@@ -848,21 +1154,15 @@ class NindIndexer:
     ########################################################################
     def _write_local_index(self, corpus_tokens, term_to_id, lexicon_identification, first_doc_id, base):
         local_writer = native.NindLocalIndex(base, is_writer=True,
-                                              lexicon_identification=lexicon_identification,
-                                              indirection_bloc_size=len(corpus_tokens) + 1)
-        # one call per chunk of documents: the native writer builds and writes a chunk with
-        # the GIL released while this thread is flattening the next one
-        for first in range(0, len(corpus_tokens), self.LOCAL_CHUNK_DOCS):
-            idents, ends, term_ids, positions = array('I'), array('I'), array('I'), array('I')
-            for index in range(first, min(first + self.LOCAL_CHUNK_DOCS, len(corpus_tokens))):
-                tokens = corpus_tokens[index]
-                idents.append(first_doc_id + index)
-                term_ids.extend(term_to_id[token] for token in tokens)
-                positions.extend(range(len(tokens)))
-                ends.append(len(term_ids))
-            lengths = array('I', [1]) * len(term_ids)
-            local_writer.set_local_defs_arrays(idents, ends, term_ids, positions, lengths,
-                                               lexicon_identification)
-
-    #: Number of documents per native call in :meth:`_write_local_index`.
-    LOCAL_CHUNK_DOCS = 1024
+                                             lexicon_identification=lexicon_identification,
+                                             indirection_bloc_size=len(corpus_tokens) + 1)
+        idents, ends, term_ids, positions = array('I'), array('I'), array('I'), array('I')
+        for index, tokens in enumerate(corpus_tokens):
+            idents.append(first_doc_id + index)
+            term_ids.extend(term_to_id[token] for token in tokens)
+            positions.extend(range(len(tokens)))
+            ends.append(len(term_ids))
+        lengths = array('I', [1]) * len(term_ids)
+        local_writer.begin_bulk()
+        local_writer.set_local_defs_arrays(idents, ends, term_ids, positions, lengths, lexicon_identification)
+        local_writer.end_bulk()

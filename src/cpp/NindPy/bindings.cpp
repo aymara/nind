@@ -613,7 +613,7 @@ PYBIND11_MODULE(_native, m) {
             return options;
         }), py::arg("split_camel_case") = true, py::arg("split_underscore") = true,
             py::arg("split_digits") = true, py::arg("lowercase") = false,
-            py::arg("min_length") = 1, py::arg("max_length") = 255)
+            py::arg("min_length") = 1, py::arg("max_length") = 254)
         .def_readwrite("split_camel_case", &NindTokenizer::Options::splitCamelCase)
         .def_readwrite("split_underscore", &NindTokenizer::Options::splitUnderscore)
         .def_readwrite("split_digits", &NindTokenizer::Options::splitDigits)

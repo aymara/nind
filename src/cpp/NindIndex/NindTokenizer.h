@@ -39,7 +39,7 @@ namespace latecon {
 * Non-ASCII characters count as letters without case (no camelCase split between
 * them), and are never split inside. lowercase lowercases ASCII letters only, after
 * splitting. Tokens shorter than minLength or longer than maxLength bytes are dropped
-* (a lexicon word is at most 255 bytes). Thread-safe (const). */
+* (a lexicon word is at most 254 bytes). Thread-safe (const). */
 class DLLExportLexicon NindTokenizer {
 public:
     /**\brief Tokenizer options */
@@ -51,7 +51,7 @@ public:
         unsigned int minLength;     //in bytes
         unsigned int maxLength;     //in bytes
         Options(): splitCamelCase(true), splitUnderscore(true), splitDigits(true), lowercase(false),
-            minLength(1), maxLength(255) {}
+            minLength(1), maxLength(254) {}
     };
 
     /**\brief Creates a tokenizer

@@ -18,11 +18,45 @@ indexer.index_files([
 ])
 ```
 
-This writes three files into `indices/`:
-`corpus.nindlexiconindex`, `corpus.nindtermindex` and
-`corpus.nindlocalindex`. `index_dir` must already exist; each input file
-becomes one document, identified externally by its position in the list
-(`0`, `1`, `2`, ...).
+This writes the index into a new generation directory inside `indices/`
+(`corpus.gen-<n>-<hex>/`: `corpus.nindlexiconindex`, `corpus.nindtermindex`,
+`corpus.nindlocalindex`, plus `corpus.nindmeta` - the tokenizer options - and
+`corpus.ninddoclengths`), published atomically through `corpus.CURRENT`.
+`index_dir` must already exist; each input file becomes one document,
+identified externally by its position in the list (`0`, `1`, `2`, ...).
+
+A corpus in pyserini's JSON Lines format (one `{"id": ..., "contents": ...}`
+object per line) is indexed directly, record `n` becoming document `n`:
+
+```python
+record_ids = indexer.index_jsonl("corpus.jsonl")   # record_ids[n]: the "id" of document n
+```
+
+## Tokenizer and index options
+
+Texts are tokenized by a native tokenizer for source-code-like text: words
+are runs of letters and digits, split at camelCase (`fooBar` -> `foo` `Bar`,
+`HTTPServer` -> `HTTP` `Server`), underscore (`foo_bar` -> `foo` `bar`) and
+letter/digit (`utf8` -> `utf` `8`) boundaries. Each split is optional, and
+tokens can be lowercased:
+
+```python
+indexer = NindIndexer("indices", prefix="corpus",
+                      tokenizer={"lowercase": True, "split_digits": False})
+```
+
+The options are stored with the index: `NindEngine` tokenizes queries the
+same way, and updates keep them. Tokens longer than 254 bytes (the longest
+word a nind lexicon stores) are dropped.
+
+`local_index=False` leaves out the local index (each document's terms and
+their positions). `NindEngine` doesn't need it - document lengths are stored
+apart - and it makes up most of an index's size and a good part of its build
+time; other readers of nind indexes (Amose...) may need it:
+
+```python
+indexer = NindIndexer("indices", prefix="corpus", local_index=False)
+```
 
 ## Index incrementally
 

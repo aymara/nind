@@ -298,7 +298,7 @@ TEST_CASE("NindBulkTest.AddWordsOnAnExistingLexiconAndTooLongWords") {
     list<string> components;
     REQUIRE(lexicon.getComponents(4, components));       // the retro lexicon follows
     CHECK(components == word("one", "three"));
-    words.push_back(word(string(256, 'x')));
+    words.push_back(word(string(255, 'x')));
     CHECK_THROWS_AS(lexicon.addWords(words, idents), FileException);
     CHECK_EQ(4u, lexicon.getIdentification().lexiconWordsNb);   // nothing added
 }

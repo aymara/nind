@@ -10,7 +10,8 @@ publish it::
         <prefix>.CURRENT            name of the published generation (replaced atomically)
         <prefix>.lock               held by the single writer of <prefix> while it builds
         <prefix>.gen-<n>-<hex>/     one complete, never modified, index per build:
-            <prefix>.nindlexiconindex, <prefix>.nindtermindex, <prefix>.nindlocalindex
+            <prefix>.nindlexiconindex, <prefix>.nindtermindex, <prefix>.nindlocalindex,
+            <prefix>.nindmeta, <prefix>.ninddoclengths
             generation.lock         shared by readers while they open the files,
                                     exclusive while the generation is deleted
 
@@ -41,10 +42,17 @@ except ImportError:         # Windows
     fcntl = None
     import msvcrt
 
-__all__ = ["IndexStore", "INDEX_EXTENSIONS"]
+__all__ = ["IndexStore", "INDEX_EXTENSIONS", "META_EXTENSION", "DOC_LENGTHS_EXTENSION"]
 
-#: Extensions of the files making up an index (``.nindretrolexicon`` only for some writers).
-INDEX_EXTENSIONS = (".nindlexiconindex", ".nindretrolexicon", ".nindtermindex", ".nindlocalindex")
+#: Index metadata written by NindIndexer (JSON: tokenizer options, local index or not).
+META_EXTENSION = ".nindmeta"
+#: Document lengths written by NindIndexer (binary), read by NindEngine instead of the local index.
+DOC_LENGTHS_EXTENSION = ".ninddoclengths"
+#: Extensions of the files making up an index (``.nindretrolexicon`` only for some writers,
+#: ``.nindlocalindex`` only with a local index, the last two only for indexes written by
+#: NindIndexer since it writes them).
+INDEX_EXTENSIONS = (".nindlexiconindex", ".nindretrolexicon", ".nindtermindex", ".nindlocalindex",
+                    META_EXTENSION, DOC_LENGTHS_EXTENSION)
 
 _GENERATION_LOCK = "generation.lock"
 

@@ -77,6 +77,10 @@ for doc_id, score in engine.search("ejcrit nombre", top_k=5):
 
 `index_dir` must already exist; each input file becomes one document,
 identified externally by its position in the list (`0`, `1`, `2`, ...).
+A JSON Lines corpus (pyserini's format) is indexed with
+`indexer.index_jsonl("corpus.jsonl")`. Tokenizer options (each identifier
+split optional, lowercasing) and `local_index=False` (a much smaller index,
+enough for `NindEngine`) are `NindIndexer` arguments.
 To add, replace or remove documents in an existing index (or build one
 file by file), use an incremental update instead of rebuilding:
 

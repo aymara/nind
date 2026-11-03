@@ -70,7 +70,7 @@ TEST_CASE("NindTokenizerTest.LowercaseAndLengthLimits") {
     options.minLength = 2;
     CHECK(tokens("a bc dEf", options) == list("bc", "Ef"));
     options = NindTokenizer::Options();
-    CHECK(tokens(string(255, 'a') + " " + string(256, 'b') + " c").size() == 2);
+    CHECK(tokens(string(254, 'a') + " " + string(255, 'b') + " c").size() == 2);
 }
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindTokenizerTest.SpansPointIntoTheText") {

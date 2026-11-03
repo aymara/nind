@@ -167,8 +167,8 @@ void NindLexiconIndex::addWords(const vector<list<string> > &words,
     for (size_t i = 0; i < words.size(); i++) {
         if (words[i].empty()) throw NindLexiconIndexException("NindLexiconIndex::addWords empty word " + m_fileName);
         for (list<string>::const_iterator swIt = words[i].begin(); swIt != words[i].end(); swIt++)
-            if ((*swIt).length() > 255)
-                throw NindLexiconIndexException("NindLexiconIndex::addWords word longer than 255 bytes " + m_fileName);
+            if ((*swIt).length() > 254)
+                throw NindLexiconIndexException("NindLexiconIndex::addWords word longer than 254 bytes " + m_fileName);
     }
     NindCriticalSection criticalSection(m_file);
     idents.clear();
