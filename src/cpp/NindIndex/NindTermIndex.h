@@ -249,6 +249,8 @@ private:
     //the documents' lengths (setDocumentLengths): by id (dense) or (id, length) by id (sparse)
     std::vector<unsigned int> m_denseLengths;
     std::vector<std::pair<NindDocId, unsigned int> > m_sparseLengths;
+    //a compact block's packed bytes (reused)
+    std::vector<unsigned char> m_packed;
     //a document's length, 0 if unknown
     unsigned int documentLength(const NindDocId ident) const;
 

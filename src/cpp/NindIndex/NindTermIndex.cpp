@@ -20,9 +20,69 @@
 ////////////////////////////////////////////////////////////
 #include "NindTermIndex.h"
 #include <algorithm>
+#include <cstring>
 //#include <iostream>
 using namespace latecon::nindex;
 using namespace std;
+////////////////////////////////////////////////////////////
+namespace {
+//bits needed for value (0 for 0)
+unsigned int bitsOf(const uint64_t value) {
+    unsigned int bits = 0;
+    while (bits < 64 && (value >> bits) != 0) bits++;
+    return bits;
+}
+//values packed with bits bits each, least significant bit first, appended to bytes
+void packBits(const uint64_t *values, const size_t valuesNb, const unsigned int bits, vector<unsigned char> &bytes) {
+    const size_t begin = bytes.size();
+    bytes.resize(begin + (valuesNb * bits + 7) / 8, 0);
+    uint64_t bitPos = 0;
+    for (size_t i = 0; i < valuesNb; i++) {
+        uint64_t value = values[i];
+        for (unsigned int done = 0; done < bits; ) {
+            const unsigned int shift = bitPos % 8;
+            const unsigned int take = min(8 - shift, bits - done);
+            bytes[begin + bitPos / 8] |= (unsigned char)((value & ((1u << take) - 1)) << shift);
+            value >>= take;
+            done += take;
+            bitPos += take;
+        }
+    }
+}
+//valuesNb values of bits bits each, least significant bit first, from bytes (bytesNb of them)
+void unpackBits(const unsigned char *bytes, const size_t bytesNb, const size_t valuesNb, const unsigned int bits,
+                uint64_t *values) {
+    if (bits == 0) {
+        for (size_t i = 0; i < valuesNb; i++) values[i] = 0;
+        return;
+    }
+    //a zero-padded copy: 8-byte loads never go past it
+    unsigned char padded[NindTermIndex::BLOCK_SIZE * 8 + 16];
+    const bool copy = bytesNb + 16 <= sizeof(padded);
+    if (copy) {
+        memcpy(padded, bytes, bytesNb);
+        memset(padded + bytesNb, 0, 16);
+    }
+    if (copy && bits <= 56) {
+        const uint64_t mask = (bits == 64) ? ~0ull : ((1ull << bits) - 1);
+        uint64_t bitPos = 0;
+        for (size_t i = 0; i < valuesNb; i++, bitPos += bits) {
+            uint64_t word;
+            memcpy(&word, padded + bitPos / 8, 8);          //(little-endian hosts)
+            values[i] = (word >> (bitPos % 8)) & mask;
+        }
+        return;
+    }
+    //wide values, or more bytes than a block holds: bit by bit
+    uint64_t bitPos = 0;
+    for (size_t i = 0; i < valuesNb; i++) {
+        uint64_t value = 0;
+        for (unsigned int b = 0; b < bits; b++, bitPos++)
+            if (bytes[bitPos / 8] & (1u << (bitPos % 8))) value |= 1ull << b;
+        values[i] = value;
+    }
+}
+}
 ////////////////////////////////////////////////////////////
 //(definition of the static member: it may be bound by reference)
 const unsigned int NindTermIndex::BLOCK_SIZE;
@@ -64,8 +124,9 @@ const unsigned int NindTermIndex::BLOCK_SIZE;
 #define TAILLE_BUFFER_MINIMUM 128
 //format v2 blocks: <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
 #define FLAG_BLOC 71
+#define FLAG_BLOC_COMPACT 73
 //<flagBloc>(1) <identifiantTerme>(4) <catejgorie>(1) <nbreDocsBloc>(5) = 11
-#define TAILLE_TESTE_BLOC_MAXIMUM 11
+#define TAILLE_TESTE_BLOC_MAXIMUM 18
 //<premierDocRelatif>(9) <dernierDocRelatif>(9) <nbreDocsBloc>(5) <frejquenceMax>(5) <longueurMin>(5)
 //<offsetBloc>(4) <longueurBloc>(4) = 41
 #define TAILLE_DESCRIPTEUR_MAXIMUM 41
@@ -89,7 +150,8 @@ NindTermIndex::NindTermIndex(const std::string &fileNameExtensionLess,
               indirectionBlocSize),
     m_specificsNumber(specificsNumber),
     m_denseLengths(),
-    m_sparseLengths()
+    m_sparseLengths(),
+    m_packed()
 {
 }
 ////////////////////////////////////////////////////////////
@@ -338,11 +400,51 @@ void NindTermIndex::decodeBlock(const unsigned int ident,
                                 vector<Document> &postings) const
 {
     //<flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc> { <identDocRelatif> <frejquenceDoc> }
-    if (in.getInt1() != FLAG_BLOC || in.getInt4() != ident)
+    //or <flagBloc=73> ... bit-packed (see putBlock)
+    const unsigned int flag = in.getInt1();
+    if ((flag != FLAG_BLOC && flag != FLAG_BLOC_COMPACT) || in.getInt4() != ident)
         throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
     in.getInt1();                   //catejgorie (checked by the descriptor's place)
     if (in.getUIntLat() != block.docsNb)
         throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
+    if (flag == FLAG_BLOC_COMPACT) {
+        //(a descriptor's count is at most BLOCK_SIZE for a compact block)
+        if (block.docsNb == 0 || block.docsNb > BLOCK_SIZE)
+            throw NindTermIndexException("NindTermIndex::getTermDef K : " + m_fileName);
+        const size_t docsNb = (size_t)block.docsNb;
+        const unsigned int minFrequency = in.getUIntLat();
+        const unsigned int gapBits = in.getInt1();
+        const unsigned int frequencyBits = in.getInt1();
+        if (gapBits > 64 || frequencyBits > 32)
+            throw NindTermIndexException("NindTermIndex::getTermDef K : " + m_fileName);
+        const unsigned int gapBytes = (unsigned int)(((docsNb - 1) * gapBits + 7) / 8);
+        const unsigned int frequencyBytes = (unsigned int)((docsNb * frequencyBits + 7) / 8);
+        uint64_t gaps[BLOCK_SIZE], frequencies[BLOCK_SIZE];
+        const unsigned char *gapData = in.getBytes(gapBytes);
+        unpackBits(gapData, gapBytes, docsNb - 1, gapBits, gaps);
+        const unsigned char *frequencyData = in.getBytes(frequencyBytes);
+        unpackBits(frequencyData, frequencyBytes, docsNb, frequencyBits, frequencies);
+        if (!in.endOfInBuffer()) throw NindTermIndexException("NindTermIndex::getTermDef J : " + m_fileName);
+        NindDocId identDocument = block.first;
+        unsigned int maxFrequency = 0;
+        const size_t begin = postings.size();
+        postings.resize(begin + docsNb);
+        for (size_t d = 0; d < docsNb; d++) {
+            if (d > 0) {
+                //a gap of gaps[d - 1] + 1, within 64 bits
+                if (gaps[d - 1] >= ~(NindDocId)0 - identDocument)
+                    throw NindTermIndexException("NindTermIndex::getTermDef I : " + m_fileName);
+                identDocument += gaps[d - 1] + 1;
+            }
+            const uint64_t frequency = frequencies[d] + minFrequency;
+            if (frequency > 0xFFFFFFFFull) throw NindTermIndexException("NindTermIndex::getTermDef I : " + m_fileName);
+            if (frequency > maxFrequency) maxFrequency = (unsigned int)frequency;
+            postings[begin + d] = Document(identDocument, (unsigned int)frequency);
+        }
+        if (identDocument != block.last || maxFrequency != block.maxFrequency)
+            throw NindTermIndexException("NindTermIndex::getTermDef J : " + m_fileName);
+        return;
+    }
     NindDocId identDocument = block.first;
     unsigned int maxFrequency = 0;
     for (uint64_t it = 0; it != block.docsNb; it++) {
@@ -593,17 +695,36 @@ void NindTermIndex::putBlock(const unsigned int ident,
                              const Document *documents,
                              const size_t docsNb)
 {
-    //<flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc> { <identDocRelatif> <frejquenceDoc> }
-    m_file.putInt1(FLAG_BLOC);
+    //<flagBloc=73> <identifiantTerme> <catejgorie> <nbreDocsBloc> <frejquenceMin> <bitsEcarts>
+    //<bitsFrejquences> <ecartsPackejs> <frejquencesPackejes>: each gap between consecutive
+    //documents minus 1, each frequency minus the smallest, bit-packed (least significant bit first)
+    uint64_t gaps[BLOCK_SIZE], frequencies[BLOCK_SIZE];
+    if (docsNb == 0 || docsNb > BLOCK_SIZE)
+        throw NindTermIndexException("NindTermIndex::setTermDef bad block size : " + m_fileName);
+    unsigned int minFrequency = documents[0].frequency;
+    for (size_t d = 1; d < docsNb; d++) minFrequency = min(minFrequency, documents[d].frequency);
+    uint64_t maxGap = 0, maxFrequency = 0;
+    for (size_t d = 0; d < docsNb; d++) {
+        if (d > 0) {
+            gaps[d - 1] = documents[d].ident - documents[d - 1].ident - 1;
+            maxGap = max(maxGap, gaps[d - 1]);
+        }
+        frequencies[d] = documents[d].frequency - minFrequency;
+        maxFrequency = max(maxFrequency, frequencies[d]);
+    }
+    const unsigned int gapBits = bitsOf(maxGap), frequencyBits = bitsOf(maxFrequency);
+    vector<unsigned char> &packed = m_packed;
+    packed.clear();
+    packBits(gaps, docsNb - 1, gapBits, packed);
+    packBits(frequencies, docsNb, frequencyBits, packed);
+    m_file.putInt1(FLAG_BLOC_COMPACT);
     m_file.putInt4(ident);
     m_file.putInt1(cg);
     m_file.putUIntLat(docsNb);
-    NindDocId identPrec = documents[0].ident;
-    for (size_t d = 0; d < docsNb; d++) {
-        m_file.putUIntLat64(documents[d].ident - identPrec);
-        m_file.putUIntLat(documents[d].frequency);
-        identPrec = documents[d].ident;
-    }
+    m_file.putUIntLat(minFrequency);
+    m_file.putInt1(gapBits);
+    m_file.putInt1(frequencyBits);
+    if (!packed.empty()) m_file.putBytes(&packed[0], packed.size());
 }
 ////////////////////////////////////////////////////////////
 //brief Write a full term definition as as a list of structures

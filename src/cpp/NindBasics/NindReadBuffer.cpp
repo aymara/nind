@@ -251,6 +251,13 @@ string NindReadBuffer::getString()
 //brief Get a string from internal buffer
 //param length number of bytes to read (bytes, not chars)
 //return read string */
+const unsigned char *NindReadBuffer::getBytes(const unsigned int bytesNb)
+{
+    if ((uint64_t)(m_end - m_ptr) < bytesNb) throw OutReadBufferException("in read buffer (X) " + getFileName());
+    m_ptr += bytesNb;
+    return m_ptr - bytesNb;
+}
+////////////////////////////////////////////////////////////
 string NindReadBuffer::getStringAsBytes(const unsigned char length)
 {
     //lit la chaine
