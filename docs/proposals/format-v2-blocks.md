@@ -343,8 +343,9 @@ are unchanged.
 
 // .nindtermindex
 <dejfinition>           ::= <flagDejfinition=23> <identifiantTerme> <longueurDonnejes> { <catejgorieV2> }
+                            { <bloc> }                       // after the directory, within the definition
 <identifiantTerme>      ::= <Entier4>
-<longueurDonnejes>      ::= <Entier4>
+<longueurDonnejes>      ::= <Entier4>                        // of the directory (the categories), not the blocks
 <catejgorieV2>          ::= <flagCg=67> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
                             ( <postingsEnLigne>              // nbreBlocs = 0
                             | { <descripteurBloc> } )        // nbreBlocs > 0
@@ -360,18 +361,27 @@ are unchanged.
 <nbreDocsBloc>          ::= <EntierULat>
 <frejquenceMax>         ::= <EntierULat>        // largest frequency in the block
 <longueurMin>           ::= <EntierULat>        // shortest document length in the block, 0 = unknown
-<offsetBloc>            ::= <Entier6>
-<longueurBloc>          ::= <EntierULat>
+<offsetBloc>            ::= <Entier4>          // from the definition's first byte (its flag)
+<longueurBloc>          ::= <Entier4>
 <bloc>                  ::= <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
                             { <identDocRelatif> <frejquenceDoc> }      // the first one relative to premierDoc
 <identDocRelatif>       ::= <EntierULat64>
 <frejquenceDoc>         ::= <EntierULat>
 ```
 
-- Blocks are written in the bulk area ("en vrac") like definitions and are
-  addressed only by their descriptor; the indirection still points at the
-  definition (the directory). A block repeats its term and category, so a
-  descriptor pointing at the wrong place is detected.
+- **Blocks are written inside their term's definition, after its directory**
+  (implementation decision, 2026-11-04), at offsets relative to the
+  definition's first byte: the indirection's length covers directory and
+  blocks, so the free-space management, the hole statistics and the merge
+  work unchanged, and a definition moved by a rewrite keeps valid offsets.
+  A search still reads a term's directory, then only the blocks it needs.
+  An update rewrites the whole definition, as in v1: rewriting only the last
+  block, in place, needs slack in the definition (the original design's
+  "extensions"), a writer change that needs no format change. A block
+  repeats its term and category, and its count, first and last documents and
+  max frequency are checked against its descriptor.
+- `<offsetBloc>` and `<longueurBloc>` are fixed-width so that the writer can
+  write the directory first and patch them once the blocks are written.
 - The block size (128 by default) is the writer's: readers only follow the
   descriptors, so blocks of different sizes can coexist (a block split by an
   update holds fewer).

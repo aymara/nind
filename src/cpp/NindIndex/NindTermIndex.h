@@ -125,6 +125,21 @@ private:
                             NindReadBuffer &in,
                             std::vector<Document> &postings,
                             std::vector<size_t> &categoryEnds) const;
+    //format v2: the whole definition (inline postings and blocks) into flat postings, per category
+    //(category, term frequency) if categories isn't null
+    void decodeTermDefV2(const unsigned int ident,
+                         NindReadBuffer &in,
+                         std::vector<Document> &postings,
+                         std::vector<size_t> &categoryEnds,
+                         std::vector<std::pair<unsigned char, unsigned int> > *categories) const;
+    //format v2: forms the definition (directory, then blocks) in the write buffer
+    void writeTermDefV2(const unsigned int ident,
+                        const std::list<struct TermCG> &termDef);
+public:
+    /**\brief number of postings per block of a long list (format v2; a list of at most this many
+    * documents is written inline) */
+    static const unsigned int BLOCK_SIZE = 128;
+private:
 
     unsigned int m_specificsNumber;
 
