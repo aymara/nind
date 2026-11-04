@@ -159,9 +159,7 @@ class NindLexiconindex(NindIndex):
         :param lexiconindexFileName: path to the ``.nindlexiconindex`` file.
         :raises Exception: if the file's pad-file envelope is invalid.
         """
-        NindIndex.__init__(self, lexiconindexFileName)
-        #trouve le modulo = nombreIndirection
-        self.nombreIndirection = self.donneMaxIdentifiant()
+        NindIndex.__init__(self, lexiconindexFileName, lazy=True)
         if native is None:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         base = lexiconindexFileName
@@ -169,6 +167,13 @@ class NindLexiconindex(NindIndex):
         self._native = native.NindLexiconIndex(base, is_writer=False)
 
     #trouve les donnejes 
+    def __getattr__(self, name):
+        # the modulo (nombreIndirection), on first use: only the diagnostic methods need it
+        if name == 'nombreIndirection':
+            self.nombreIndirection = self.donneMaxIdentifiant()
+            return self.nombreIndirection
+        return NindIndex.__getattr__(self, name)
+
     def __donneDonnejes(self, identifiant):
         #lit la définition du mot
         (offsetDejfinition, longueurDejfinition) = self.donneAdresseDejfinition(identifiant)

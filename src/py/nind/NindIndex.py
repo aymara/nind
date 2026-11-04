@@ -104,15 +104,18 @@ class NindIndex(NindPadFile):
     subclasses use it and then decode the definition's bytes themselves.
     """
 
-    def __init__(self, indexFileName):
+    def __init__(self, indexFileName, lazy=False):
         """Open ``indexFileName`` read-only and verify its structure.
 
         :param indexFileName: path to the ``.nind*index`` file.
+        :param lazy: verify the structure on first use rather than now
+            (readers whose lookups go through ``nind._native``, which checks
+            the file itself).
         :raises Exception: if the file's pad-file envelope is invalid.
         """
         #en lecture uniquement
         NindPadFile.__init__(self, indexFileName)
-        self.vejrifieFichier()
+        if not lazy: self.vejrifieFichier()
 
     #donne l'adresse et la longueur de la dejfinition
     def donneAdresseDejfinition(self, identifiant):

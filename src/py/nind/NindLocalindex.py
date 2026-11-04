@@ -157,7 +157,7 @@ class NindLocalindex(NindIndex):
         :raises Exception: if the file's pad-file envelope is invalid, or
             its specifics block has the wrong size.
         """
-        NindIndex.__init__(self, localindexFileName)
+        NindIndex.__init__(self, localindexFileName, lazy=True)
         if native is None:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         self._has_lexicon_identification = lexicon_identification is not None
@@ -167,6 +167,20 @@ class NindLocalindex(NindIndex):
         if base.endswith(NINDLOCALINDEX_EXT): base = base[:-len(NINDLOCALINDEX_EXT)]
         self._native = native.NindLocalIndex(base, is_writer=False,
                                               lexicon_identification=effective_identification)
+  
+    #######################################################################
+    #trouve les donnejes 
+    def __getattr__(self, name):
+        # the table of external -> internal identifiers, on first use: only the diagnostic
+        # methods (and donneidentifiantsExternes, for indexes written without document
+        # lengths) need it; reading every document's header is O(documents) in Python
+        if name in ('docIdTradExtInt', 'maxIdentifiantInterne') and not self.__dict__.get('_tradEnCours'):
+            self._tradEnCours = True
+            self.__construitTradExtInt()
+            return self.__dict__[name]
+        return NindIndex.__getattr__(self, name)
+
+    def __construitTradExtInt(self):
         #rejcupehre l'adresse et la longueur des spejcifiques
         (offsetSpejcifiques, tailleSpejcifiques) = self.donneSpejcifiques()
         if tailleSpejcifiques != TAILLE_SPEJCIFIQUES: 
@@ -188,9 +202,7 @@ class NindLocalindex(NindIndex):
                 raise Exception('%s : %d pas trouvé à %08X'%(self.latFileName, ident, offsetDejfinition+1))
             noDocExterne = self.litNombre4()
             self.docIdTradExtInt[noDocExterne] = noDocInterne       
-  
-    #######################################################################
-    #trouve les donnejes 
+
     def __donneDonnejes(self, identifiant):
         #lit la définition du mot
         (offsetDejfinition, longueurDejfinition) = self.donneAdresseDejfinition(identifiant)
