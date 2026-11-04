@@ -417,8 +417,10 @@ void NindFile::putInt3(const unsigned int int4,
 ////////////////////////////////////////////////////////////
 //brief Put a 4-bytes integer into the internal buffer
 //param int4 integer to write as 4-bytes*/
-void NindFile::putInt4(const unsigned int int4)
+void NindFile::putInt4(const uint64_t int4)
 {
+    //document ids are 64 bits: a v1 field of 4 bytes refuses what it can't hold
+    if (int4 > 0xFFFFFFFFull) throw OutOfBoundException("value over 4 bytes " + m_fileName);
     //petit boutiste
     if (m_wbufferEnd - m_wPtr < 4) throw OutWriteBufferException("in write buffer (F) " + m_fileName);
     m_wPtr += 4;
@@ -448,8 +450,10 @@ void NindFile::putInt5(const uint64_t int8)
 ////////////////////////////////////////////////////////////
 //brief Put an unsigned latecon integer into the internal buffer
 //param int4 unsigned integer to write as latecon integer*/
-void NindFile::putUIntLat(const unsigned int int4)
+void NindFile::putUIntLat(const uint64_t int4)
 {
+    //a latecon integer holds 32 bits: refuses what it can't hold (EntierULat64 is v2's)
+    if (int4 > 0xFFFFFFFFull) throw OutOfBoundException("value over 32 bits as latecon integer " + m_fileName);
     //il faut que ca aille vite pour les petits nombres
     if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (H) " + m_fileName);
     m_wPtr += 1;
