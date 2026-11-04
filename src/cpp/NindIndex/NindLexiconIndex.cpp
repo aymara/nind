@@ -43,9 +43,9 @@ using namespace std;
 // <spejcifique>           ::= <vide>
 ////////////////////////////////////////////////////////////
 #define FLAG_DEJFINITION 13 //<flagDejfinition=13>(1) <identifiantHash>(3) = 4
-#define OFFSET_LONGUEUR 4
+#define OFFSET_LONGUEUR (isFormatV2() ? 5 : 4)       //v2 : <identifiantHash>(4)
 //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> = 7
-#define TAILLE_TESTE_DEJFINITION 7
+#define TAILLE_TESTE_DEJFINITION (isFormatV2() ? 9 : 7)   //v2 : 1 + 4 + 4
 //<flagDejfinition=13>(1) <identifiantHash>(3) <longueurDonnejes>(3) 
 //<longueurMot>(1) <motUtf8>(4) <identifiantS>(4) <nbreComposejs>(3)  = 19
 #define TAILLE_DEJFINITION_MINIMUM 19
@@ -242,9 +242,9 @@ void NindLexiconIndex::readBucket(const unsigned int ident,
     //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
     if (m_file.getInt1() != FLAG_DEJFINITION)
         throw NindLexiconIndexException("NindLexiconIndex::readBucket A : " + m_fileName);
-    if (m_file.getInt3() != ident)
+    if (getDefinitionField(m_file.inBuffer()) != ident)
         throw NindLexiconIndexException("NindLexiconIndex::readBucket B : " + m_fileName);
-    const unsigned int longueurDonnejes = m_file.getInt3();
+    const unsigned int longueurDonnejes = getDefinitionField(m_file.inBuffer());
     m_file.setEndInBuffer(longueurDonnejes);
     while (!m_file.endOfInBuffer()) {
         //<motSimple> <identifiantS> <nbreComposejs> <composejs>
@@ -333,9 +333,9 @@ unsigned int NindLexiconIndex::decodeIdentifiant(const unsigned int ident,
     //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
     if (in.getInt1() != FLAG_DEJFINITION) 
         throw NindLexiconIndexException("NindLexiconIndex::getIdentifiant A : " + m_fileName);
-    if (in.getInt3() != ident) 
+    if (getDefinitionField(in) != ident) 
         throw NindLexiconIndexException("NindLexiconIndex::getIdentifiant B : " + m_fileName);
-    const unsigned int longueurDonnejes = in.getInt3();
+    const unsigned int longueurDonnejes = getDefinitionField(in);
     //positionne la fin de buffer en fonction de la longueur effective des donnees
     in.setEndInBuffer(longueurDonnejes);
     while (!in.endOfInBuffer()) {
@@ -382,9 +382,9 @@ void NindLexiconIndex::getDefinitionWords(const string &motSimple,
         //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
         if (m_file.getInt1() != FLAG_DEJFINITION) 
             throw NindLexiconIndexException("NindLexiconIndex::getDefinitionWords A : " + m_fileName);
-        if (m_file.getInt3() != ident) 
+        if (getDefinitionField(m_file.inBuffer()) != ident) 
             throw NindLexiconIndexException("NindLexiconIndex::getDefinitionWords B : " + m_fileName);
-        const unsigned int longueurDonnejes = m_file.getInt3();
+        const unsigned int longueurDonnejes = getDefinitionField(m_file.inBuffer());
         //positionne la fin de buffer en fonction de la longueur effective des donnees
         m_file.setEndInBuffer(longueurDonnejes);
         while (!m_file.endOfInBuffer()) {
@@ -436,8 +436,8 @@ void NindLexiconIndex::setDefinitionWords(const list<Mot> &dejfinition,
     m_file.createBuffer(tailleMaximum); 
     //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> 
     m_file.putInt1(FLAG_DEJFINITION);
-    m_file.putInt3(ident);
-    m_file.putInt3(0);         //la taille des donnees sera ecrite plus tard, quand elle sera connue
+    putDefinitionField(ident);
+    putDefinitionField(0);         //la taille des donnees sera ecrite plus tard, quand elle sera connue
     for (list<Mot>::const_iterator defIt = dejfinition.begin(); defIt != dejfinition.end(); defIt++) {  
         //<motSimple> <identifiantS> <nbreComposejs>
         m_file.putString((*defIt).motSimple);
@@ -453,7 +453,7 @@ void NindLexiconIndex::setDefinitionWords(const list<Mot> &dejfinition,
     }
     //ecrit la taille reelle du buffer
     const unsigned int longueurDonnejes = m_file.getOutBufferSize() - TAILLE_TESTE_DEJFINITION;
-    m_file.putInt3(longueurDonnejes, OFFSET_LONGUEUR);  //la taille dans la trame
+    putDefinitionFieldAt(longueurDonnejes, OFFSET_LONGUEUR);  //la taille dans la trame
     //calcule le nombre d'extra octets ah mettre dans le buffer pour atteindre la taille minimum
     int extra = m_file.getOutBufferSize() - TAILLE_DEJFINITION_MINIMUM;
     while (extra++ < 0) m_file.putInt1(0);
@@ -481,9 +481,9 @@ void NindLexiconIndex::getEntries(vector<Entry> &entries)
         //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
         if (m_file.getInt1() != FLAG_DEJFINITION)
             throw NindLexiconIndexException("NindLexiconIndex::getEntries A : " + m_fileName);
-        if (m_file.getInt3() != ident)
+        if (getDefinitionField(m_file.inBuffer()) != ident)
             throw NindLexiconIndexException("NindLexiconIndex::getEntries B : " + m_fileName);
-        const unsigned int longueurDonnejes = m_file.getInt3();
+        const unsigned int longueurDonnejes = getDefinitionField(m_file.inBuffer());
         m_file.setEndInBuffer(longueurDonnejes);
         while (!m_file.endOfInBuffer()) {
             //<motSimple> <identifiantS> <nbreComposejs> <composejs>

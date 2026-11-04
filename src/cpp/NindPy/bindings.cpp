@@ -812,6 +812,11 @@ PYBIND11_MODULE(_native, m) {
         }, py::arg("idents"), py::arg("ends"), py::arg("term_ids"), py::arg("positions"),
            py::arg("lengths"), py::arg("file_identification"), py::arg("cg") = 0)
         .def("get_doc_count", &NindLocalIndex::getDocCount)
+        .def("get_doc_ident_pairs", [](NindLocalIndex &self) {
+            std::vector<std::pair<NindDocId, unsigned int> > docIdents;
+            self.getDocIdentPairs(docIdents);
+            return docIdents;
+        })
         .def("get_doc_idents", [](NindLocalIndex &self) {
             std::vector<NindDocId> docIdents;
             self.getDocIdents(docIdents);

@@ -375,18 +375,20 @@ def test_scorer_takes_64_bit_document_ids(tmp_path):
     assert scorer.search  # bound; scoring itself is covered by test_nind_engine
 
 
-def test_v1_writers_refuse_document_ids_over_32_bits(tmp_path):
-    # until the v2 formats, an id the v1 files can't hold is refused, never truncated
-    from array import array
+def test_document_ids_over_32_bits_round_trip(tmp_path):
+    # format v2: 64-bit external document ids in the term and local indexes
     from nind import _native
-    base = str(tmp_path / "v1")
+    base = str(tmp_path / "v2")
     lexicon = _native.NindLexiconIndex(base, is_writer=True, indirection_bloc_size=16)
     lexicon.add_word(["w"])
     identification = lexicon.get_identification()
     del lexicon
     terms = _native.NindTermIndex(base, is_writer=True, lexicon_identification=identification,
                                   specifics_number=0, indirection_bloc_size=16)
-    term = _native.TermCG(0, 1)
-    term.documents = [_native.Document(2 ** 32, 1)]
-    with pytest.raises(_native.NindError, match="value over 32 bits"):
-        terms.set_term_def(1, [term], identification, [])
+    term = _native.TermCG(0, 2)
+    term.documents = [_native.Document(5, 1), _native.Document(2 ** 63 + 9, 1)]
+    terms.set_term_def(1, [term], identification, [])
+    del terms
+    reader = _native.NindTermIndex(base, is_writer=False, lexicon_identification=identification,
+                                   specifics_number=0)
+    assert [d.ident for d in reader.get_term_def(1)[0].documents] == [5, 2 ** 63 + 9]

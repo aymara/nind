@@ -9,6 +9,8 @@ Term ids are assigned by the nind._native writer itself (sequentially, in
 the order words are added), not supplied by the caller, so each test writes
 a list of terms and gets back the resulting {term: ident} mapping.
 """
+import os
+
 from nind.nind_engine import NindIndexer
 from nind.NindLexiconindex import NindLexiconindex
 
@@ -72,6 +74,17 @@ def test_donneIdentification_matches_native_writer(tmp_path):
 def test_structural_analysis_does_not_raise(tmp_path):
     path, _ = write_lexicon(tmp_path, ["alpha", "beta", "gamma"])
     lexicon = NindLexiconindex(path)
-    # analyseFichierLexiconindex re-raises on any structural inconsistency,
-    # so simply not raising is a real integrity check.
+    # analyseFichierIndex (nind._native, both formats) re-raises on any structural
+    # inconsistency, so simply not raising is a real integrity check.
+    assert lexicon.analyseFichierIndex(False) is True
+
+
+def test_python_diagnostics_read_the_v1_golden_files(tmp_path):
+    # the Python per-format diagnostics parse format v1: the golden v1 files written by the C++
+    import shutil
+    golden = os.path.join(os.path.dirname(__file__), "..", "cpp", "unit", "NindIndex", "golden", "v1")
+    for extension in (".nindlexiconindex", ".nindretrolexicon", ".nindtermindex", ".nindlocalindex"):
+        shutil.copy(os.path.join(golden, "golden" + extension), str(tmp_path / ("golden" + extension)))
+    lexicon = NindLexiconindex(str(tmp_path / "golden.nindlexiconindex"))
     lexicon.analyseFichierLexiconindex(False)
+    assert lexicon.donneIdentifiant(["alpha"]) == 1

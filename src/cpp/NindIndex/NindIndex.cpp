@@ -35,8 +35,10 @@ using namespace std;
 // <dejfinition>           ::= { <Octet> }
 // <vide>                  ::= { <Octet> }
 ////////////////////////////////////////////////////////////
-//<offsetDejfinition> <longueurDejfinition> = 8
-#define TAILLE_INDIRECTION 8
+//<offsetDejfinition> <longueurDejfinition> = 8 (v1 : Entier5 Entier3) or 10 (v2 : Entier6 Entier4)
+#define TAILLE_INDIRECTION_V1 8
+#define TAILLE_INDIRECTION_V2 10
+#define TAILLE_INDIRECTION getDataEntrySize()
 //<tailleEntreje>(1) <tailleSpejcifiques>(3) = 4
 #define TAILLE_ENTETE_FIXE 4
 ////////////////////////////////////////////////////////////
@@ -56,9 +58,11 @@ NindIndex::NindIndex(const std::string &fileName,
     NindPadFile(fileName, 
                 isWriter, 
                 lexiconIdentification, 
-                specificsSize, 
-                TAILLE_INDIRECTION, 
-                indirectionBlocSize),
+                specificsSize,
+                TAILLE_INDIRECTION_V2,          //new files: format v2
+                indirectionBlocSize,
+                6,                              //v2: 6-byte <addrBlocSuivant>
+                TAILLE_INDIRECTION_V1),         //v1 files: read (a writer refuses them)
     m_definitionMinimumSize(definitionMinimumSize),
     m_emptyAreas()
 {
@@ -90,8 +94,8 @@ void NindIndex::beginBulk()
         m_file.readBuffer((*it).second * TAILLE_INDIRECTION);
         for (unsigned int i = 0; i < (*it).second; i++) {
             //<offsetDejfinition> <longueurDejfinition>
-            const uint64_t offsetDejfinition = m_file.getInt5();
-            const unsigned int longueurDejfinition = m_file.getInt3();
+            const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
+            const unsigned int longueurDejfinition = getIndirectionLength(m_file.inBuffer());
             m_bulkIndirections.push_back(pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition));
         }
     }
@@ -123,8 +127,8 @@ void NindIndex::endBulk()
             for (unsigned int i = 0; i < nb; i++, ident++) {
                 const pair<uint64_t, unsigned int> entry = (ident < m_bulkIndirections.size()) ?
                     m_bulkIndirections[ident] : pair<uint64_t, unsigned int>(0, 0);
-                m_file.putInt5(entry.first);
-                m_file.putInt3(entry.second);
+                putIndirectionOffset(entry.first);
+                putIndirectionLength(entry.second);
             }
             bulkWrite((*it).first + (uint64_t)first * TAILLE_INDIRECTION, 0, nb * TAILLE_INDIRECTION);
         }
@@ -148,8 +152,8 @@ bool NindIndex::getDefinitionAt(const unsigned int ident,
     if (indirection == 0) return false;
     //<offsetDejfinition> <longueurDejfinition>
     m_file.readAt(indirection, TAILLE_INDIRECTION, buffer);
-    const uint64_t offsetDejfinition = buffer.getInt5();
-    const unsigned int longueurDejfinition = (bytesNb == 0) ? buffer.getInt3() : bytesNb;
+    const uint64_t offsetDejfinition = getIndirectionOffset(buffer);
+    const unsigned int longueurDejfinition = (bytesNb == 0) ? getIndirectionLength(buffer) : bytesNb;
     //si la dejfinition n'a pas encore ete indexe, retourne false
     if (offsetDejfinition == 0) return false;
     m_file.readAt(offsetDejfinition, longueurDejfinition, buffer);
@@ -180,8 +184,8 @@ bool NindIndex::getDefinition(const unsigned int ident,
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     m_file.readBuffer(TAILLE_INDIRECTION);
     //<offsetDejfinition> <longueurDejfinition>
-    const uint64_t offsetDejfinition = m_file.getInt5();
-    const unsigned int longueurDejfinition = (bytesNb == 0) ? m_file.getInt3() : bytesNb;
+    const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
+    const unsigned int longueurDejfinition = (bytesNb == 0) ? getIndirectionLength(m_file.inBuffer()) : bytesNb;
     //si la dejfinition n'a pas encore ete indexe, retourne false
     if (offsetDejfinition == 0) return false;
     //et lit tout ce qui concerne la dejfinition
@@ -207,8 +211,8 @@ void NindIndex::setDefinition(const unsigned int ident)
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     //<offsetDejfinition> <longueurDejfinition> 
     m_file.readBuffer(TAILLE_INDIRECTION);
-    const uint64_t oldOffsetEntry = m_file.getInt5();
-    const unsigned int oldLengthEntry = m_file.getInt3();
+    const uint64_t oldOffsetEntry = getIndirectionOffset(m_file.inBuffer());
+    const unsigned int oldLengthEntry = getIndirectionLength(m_file.inBuffer());
     //le buffer d'ejcriture contient <dejfinition> puis les spejcifiques et l'identification
     if (m_file.getOutBufferSize() < (unsigned int)tailleQueue)
         throw NindIndexException("NindIndex::setDefinition write buffer smaller than specifics : " + m_fileName);
@@ -346,8 +350,8 @@ NindIndex::IndexStats NindIndex::analyseIndex()
         m_file.setPos(indirection, SEEK_SET);
         //<offsetDejfinition> <longueurDejfinition>
         m_file.readBuffer(TAILLE_INDIRECTION);
-        const uint64_t offsetDejfinition = m_file.getInt5();
-        const unsigned int longueurDejfinition = m_file.getInt3();
+        const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
+        const unsigned int longueurDejfinition = getIndirectionLength(m_file.inBuffer());
         //si la dejfinition n'a pas encore ete indexe, n'en tient pas compte
         if (offsetDejfinition != 0) {
             nonVidesList.push_back(pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition));
@@ -374,8 +378,8 @@ void NindIndex::setIndirection(const uint64_t indirection,
     m_file.setPos(indirection, SEEK_SET);
     //<offsetDejfinition> <longueurDejfinition> 
     m_file.createBuffer(TAILLE_INDIRECTION);
-    m_file.putInt5(offsetDejfinition);               // <offsetDejfinition> 
-    m_file.putInt3(longueurDejfinition);             //<longueurDejfinition>
+    putIndirectionOffset(offsetDejfinition);               // <offsetDejfinition> 
+    putIndirectionLength(longueurDejfinition);             //<longueurDejfinition>
     m_file.writeBuffer();                           //ecriture effective sur le fichier      
 }
 ////////////////////////////////////////////////////////////
@@ -391,8 +395,8 @@ void NindIndex::mapEmptySpaces()
         m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
         m_file.readBuffer(TAILLE_INDIRECTION);
         //<offsetDejfinition> <longueurDejfinition> 
-        const uint64_t offsetDejfinition = m_file.getInt5();
-        const unsigned int longueurDejfinition = m_file.getInt3();
+        const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
+        const unsigned int longueurDejfinition = getIndirectionLength(m_file.inBuffer());
         //si la dejfinition n'a pas encore ete indexe, n'en tient pas compte
         if (offsetDejfinition != 0) {
             const pair<uint64_t, unsigned int> nonVide(offsetDejfinition, longueurDejfinition);

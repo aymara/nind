@@ -181,6 +181,9 @@ class NindLocalindex(NindIndex):
         return NindIndex.__getattr__(self, name)
 
     def __construitTradExtInt(self):
+        if self.tailleEntreje == 10:
+            raise NotImplementedError('%s: format v2 file; the Python diagnostics read format v1 only '
+                                      '(nind._native reads both)' % self.latFileName)
         #rejcupehre l'adresse et la longueur des spejcifiques
         (offsetSpejcifiques, tailleSpejcifiques) = self.donneSpejcifiques()
         if tailleSpejcifiques != TAILLE_SPEJCIFIQUES: 
@@ -400,7 +403,8 @@ class NindLocalindex(NindIndex):
 
         :return: a list of ``(noDocExterne, noDocInterne)`` tuples.
         """
-        return list(self.docIdTradExtInt.items())
+        # through nind._native: it reads both formats (the Python table below, format v1 only)
+        return [tuple(pair) for pair in self._native.get_doc_ident_pairs()]
 
     #######################################################################
     #dejcode les donnejes associejes ah un terme

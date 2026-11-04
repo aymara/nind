@@ -42,20 +42,20 @@ using namespace std;
 // <spejcifique>           ::= { <valeur> }
 // <valeur>                ::= <Entier4>
 ////////////////////////////////////////////////////////////
-#define FLAG_DEJFINITION 17
-#define FLAG_CG 61
+#define FLAG_DEJFINITION (isFormatV2() ? 23 : 17)
+#define FLAG_CG (isFormatV2() ? 67 : 61)
 //<flagDejfinition=17>(1) <identifiantTerme>(4) = 5
 #define OFFSET_LONGUEUR 5
 //<flagDejfinition=17>(1) <identifiantTerme>(4) <longueurDonnejes>(3) = 8
-#define TAILLE_TESTE_DEJFINITION 8
+#define TAILLE_TESTE_DEJFINITION (isFormatV2() ? 9 : 8)   //v2 : 1 + 4 + 4
 //<flagDejfinition=17>(1) <identifiantTerme>(4) <longueurDonnejes>(3) <flagCg>(1) <catejgorie>(1) <frejquenceTerme>(1) 
 //<nbreDocs>(1) <identDocRelatif>(5) <frejquenceDoc>(1) = 18
 //le minimum doit prendre en compte le maximum dans la numejrotation !
 #define TAILLE_DEJFINITION_MINIMUM 18
 //<flagCg>(1) <catejgorie>(1) <frejquenceTerme>(3) <nbreDocs>(3) = 8
-#define TAILLE_TESTE_DEJFINITION_MAXIMUM 8
+#define TAILLE_TESTE_DEJFINITION_MAXIMUM (isFormatV2() ? 25 : 8)   //v2 : 1 + 1 + 9 + 9 + 5
 //<identDocRelatif>(3) <frejquenceDoc>(2) = 5
-#define TAILLE_DOC_MAXIMUM 5
+#define TAILLE_DOC_MAXIMUM (isFormatV2() ? 14 : 5)   //v2 : 9 + 5
 //taille minimum du buffer d'ecriture
 #define TAILLE_BUFFER_MINIMUM 128
 ////////////////////////////////////////////////////////////
@@ -117,7 +117,7 @@ void NindTermIndex::decodeTermDef(const unsigned int ident,
     const unsigned int identTerme = in.getInt4();
     if (identTerme != ident) 
         throw NindTermIndexException("NindTermIndex::getTermDef B : " + m_fileName);
-    const unsigned int longueurDonnejes = in.getInt3();
+    const unsigned int longueurDonnejes = getDefinitionField(in);
     //positionne la fin de buffer en fonction de la longueur effective des donnejesTerme
     in.setEndInBuffer(longueurDonnejes);
     //<flagCg> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
@@ -125,16 +125,24 @@ void NindTermIndex::decodeTermDef(const unsigned int ident,
         if (in.getInt1() != FLAG_CG) 
             throw NindTermIndexException("NindTermIndex::getTermDef C : " + m_fileName);
         const unsigned char catejgorie = in.getInt1();
-        const unsigned int frejquenceTerme = in.getUIntLat();
-        const unsigned int nbreDocs = in.getUIntLat();
-        termDef.push_back(TermCG(catejgorie, frejquenceTerme));
+        const uint64_t frejquenceTerme = getCountField(in);
+        const uint64_t nbreDocs = getCountField(in);
+        if (frejquenceTerme > 0xFFFFFFFFull)
+            throw NindTermIndexException("NindTermIndex::getTermDef term frequency over 32 bits : " + m_fileName);
+        //v2 : <nbreBlocs> (0 : postings inline)
+        if (isFormatV2() && in.getUIntLat() != 0)
+            throw NindTermIndexException("NindTermIndex::getTermDef blocks not supported yet : " + m_fileName);
+        termDef.push_back(TermCG(catejgorie, (unsigned int)frejquenceTerme));
         struct TermCG &termCG = termDef.back();
         list<Document> &documents = termCG.documents;
         NindDocId identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
-        for (unsigned int it = 0; it != nbreDocs; it++) {
+        for (uint64_t it = 0; it != nbreDocs; it++) {
             //<identDocRelatif> <frejquenceDoc>
-            identDocument += in.getUIntLat();
-            if (identDocument > NIND_DOC_ID_MAX_V1)
+            const uint64_t delta = getCountField(in);
+            if (delta > ~(NindDocId)0 - identDocument)
+                throw NindTermIndexException("NindTermIndex::getTermDef D : " + m_fileName);
+            identDocument += delta;
+            if (!isFormatV2() && identDocument > NIND_DOC_ID_MAX_V1)
                 throw NindTermIndexException("NindTermIndex::getTermDef D : " + m_fileName);
             const unsigned int frejquenceDoc = in.getUIntLat();
             documents.push_back(Document(identDocument, frejquenceDoc));
@@ -184,21 +192,26 @@ void NindTermIndex::decodeTermPostings(const unsigned int ident,
     const unsigned int identTerme = in.getInt4();
     if (identTerme != ident)
         throw NindTermIndexException("NindTermIndex::getTermPostings B : " + m_fileName);
-    const unsigned int longueurDonnejes = in.getInt3();
+    const unsigned int longueurDonnejes = getDefinitionField(in);
     in.setEndInBuffer(longueurDonnejes);
     //<flagCg> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
     while (!in.endOfInBuffer()) {
         if (in.getInt1() != FLAG_CG)
             throw NindTermIndexException("NindTermIndex::getTermPostings C : " + m_fileName);
         in.getInt1();                       //catejgorie
-        in.getUIntLat();                    //frejquenceTerme
-        const unsigned int nbreDocs = in.getUIntLat();
+        getCountField(in);                  //frejquenceTerme
+        const uint64_t nbreDocs = getCountField(in);
+        if (isFormatV2() && in.getUIntLat() != 0)
+            throw NindTermIndexException("NindTermIndex::getTermPostings blocks not supported yet : " + m_fileName);
         //nbreDocs comes from the file: no reserve on it, every read is bounded by the buffer
         NindDocId identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
-        for (unsigned int it = 0; it != nbreDocs; it++) {
+        for (uint64_t it = 0; it != nbreDocs; it++) {
             //<identDocRelatif> <frejquenceDoc>
-            identDocument += in.getUIntLat();
-            if (identDocument > NIND_DOC_ID_MAX_V1)
+            const uint64_t delta = getCountField(in);
+            if (delta > ~(NindDocId)0 - identDocument)
+                throw NindTermIndexException("NindTermIndex::getTermPostings D : " + m_fileName);
+            identDocument += delta;
+            if (!isFormatV2() && identDocument > NIND_DOC_ID_MAX_V1)
                 throw NindTermIndexException("NindTermIndex::getTermPostings D : " + m_fileName);
             const unsigned int frejquenceDoc = in.getUIntLat();
             postings.push_back(Document(identDocument, frejquenceDoc));
@@ -261,25 +274,28 @@ void NindTermIndex::setTermDef(const unsigned int ident,
     //<flagDejfinition=17> <identifiantTerme> <longueurDonnejes> <donnejesTerme>
     m_file.putInt1(FLAG_DEJFINITION);
     m_file.putInt4(ident);
-    m_file.putInt3(0);         //la taille des donnees sera ecrite plus tard, quand elle sera connue
+    putDefinitionField(0);     //la taille des donnees sera ecrite plus tard, quand elle sera connue
     for (list<struct TermCG>::const_iterator it1 = termDef.begin(); it1 != termDef.end(); it1++) {
         //<flagCg> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
         m_file.putInt1(FLAG_CG);
         m_file.putInt1((*it1).cg);
-        m_file.putUIntLat((*it1).frequency);
+        putCountField((*it1).frequency);
         const list<struct Document> &documents = (*it1).documents;
-        m_file.putUIntLat(documents.size());
+        putCountField(documents.size());
+        if (isFormatV2()) m_file.putUIntLat(0);       //<nbreBlocs> : postings inline
         NindDocId identPrec = 0;                 //pour mettre les identifiants de documents en relatif
         for (list<struct Document>::const_iterator it2 = documents.begin(); it2 != documents.end(); it2++) {
-            //<identDocRelatif> <frejquenceDoc>
-            m_file.putUIntLat((*it2).ident - identPrec);
+            //<identDocRelatif> <frejquenceDoc> (documents in increasing order)
+            if ((*it2).ident < identPrec)
+                throw NindTermIndexException("NindTermIndex::setTermDef documents not in increasing order : " + m_fileName);
+            putCountField((*it2).ident - identPrec);
             m_file.putUIntLat((*it2).frequency);
             identPrec = (*it2).ident;
         }
     }
     //ecrit la taille reelle du buffer
     const unsigned int longueurDonnejes = m_file.getOutBufferSize() - TAILLE_TESTE_DEJFINITION;
-    m_file.putInt3(longueurDonnejes, OFFSET_LONGUEUR);  //la taille dans la trame
+    putDefinitionFieldAt(longueurDonnejes, OFFSET_LONGUEUR);  //la taille dans la trame
     //calcule le nombre d'extra octets ah mettre dans le buffer pour atteindre la taille minimum
     int extra = m_file.getOutBufferSize() - TAILLE_DEJFINITION_MINIMUM;
     while (extra++ < 0) m_file.putInt1(0);

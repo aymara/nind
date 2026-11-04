@@ -124,7 +124,9 @@ def test_search_bm25_parameters(engine):
 
 
 def test_underlying_files_are_structurally_consistent(engine):
-    engine.lexicon.analyseFichierLexiconindex(False)   # raises on inconsistency
+    # (the files are format v2: the structural analysis through nind._native; the Python
+    # per-format diagnostics, format v1 only, are tested on the v1 golden files)
+    engine.lexicon.analyseFichierIndex(False)   # raises on inconsistency
     assert engine.term_index.analyseFichierIndex(False) is True
     assert engine.local_index.analyseFichierIndex(False) is True
 
@@ -1029,8 +1031,9 @@ def test_opening_an_engine_parses_nothing_in_python(tmp_path):
         assert "entriesBlocksMap" not in reader.__dict__
     assert "docIdTradExtInt" not in snapshot.local_index.__dict__
     assert "nombreIndirection" not in snapshot.lexicon.__dict__
-    # ... and still is, on demand
-    assert len(snapshot.local_index.docIdTradExtInt) == 3
-    assert snapshot.lexicon.nombreIndirection > 0
-    assert snapshot.term_index.entriesBlocksMap
-    snapshot.term_index.analyseFichierIndex(False)
+    # ... and on demand the Python diagnostics refuse the format v2 files cleanly (they parse v1)
+    assert snapshot.term_index.analyseFichierIndex(False) is True      # (through nind._native)
+    with pytest.raises(NotImplementedError, match="format v2"):
+        snapshot.term_index.entriesBlocksMap
+    with pytest.raises(NotImplementedError, match="format v2"):
+        snapshot.local_index.docIdTradExtInt

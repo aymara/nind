@@ -107,6 +107,10 @@ public:
     *\param docIdents receives the idents, in increasing order */
     void getDocIdents(std::vector<NindDocId> &docIdents);
 
+    /**\brief List the (external, internal) idents of all documents of the collection
+    *\param docIdents receives the pairs, in increasing external ident order */
+    void getDocIdentPairs(std::vector<std::pair<NindDocId, unsigned int> > &docIdents);
+
     /**\brief number of documents in the collection 
      * \return number of documents in the collection */
     unsigned int getDocCount() ; 
