@@ -1,0 +1,1 @@
+{"format": 1, "tokenizer": {"split_camel_case": true, "split_underscore": true, "split_digits": true, "lowercase": false, "min_length": 1, "max_length": 254}, "local_index": false}

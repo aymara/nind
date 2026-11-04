@@ -1107,3 +1107,41 @@ def test_engine_search_prunes_when_k_is_small_for_the_corpus(tmp_path, monkeypat
     for query, everything in zip(queries, exhaustive):
         for k in (1, 10, 100):
             assert engine.search(query, top_k=k) == everything[:k], (query, k)
+
+
+# the texts of the format v1 indexes in tst/py/data/v1 (written by NindIndexer before format v2,
+# named "n0".."n7"; see tst/py/data/v1/README.md)
+V1_TEXTS = ["the quick brown fox", "jumps over the lazy dog", "the dog sleeps", "a fox and a dog",
+            "quick quick quick", "lazy afternoon in the sun", "brown bread and brown sugar", "sun and moon"]
+V1_QUERIES = ["the dog", "quick", "brown sun", "moon unknown", "a a fox", "lazy the"]
+
+
+@pytest.mark.parametrize("layout", ["with-local", "without-local"])
+def test_a_format_v1_index_is_read_then_migrated_by_its_first_update(tmp_path, layout):
+    # indexes written by nind before format v2: read as they are, rebuilt in format v2 by the
+    # first update (document ids and names kept)
+    import shutil
+    index_dir = tmp_path / "v1"
+    shutil.copytree(os.path.join(os.path.dirname(__file__), "data", "v1", layout), str(index_dir))
+    kwargs = {} if layout == "with-local" else {"local_index": False}
+    names = ["n%d" % i for i in range(len(V1_TEXTS))]
+    reference_indexer, reference = build_with(tmp_path, "reference", V1_TEXTS, kwargs, doc_names=names)
+    engine = NindEngine(str(index_dir))
+    assert not engine._snapshot.lexicon._native.is_format_v2()
+    for query in V1_QUERIES:
+        assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
+        assert engine.search(query, top_k=2, doc_names=True) == reference.search(query, top_k=2, doc_names=True)
+    # an update: migrated, then updated
+    more = write_texts(tmp_path / "more", ["a new dog", "the sun"])
+    for indexer in (NindIndexer(str(index_dir), prefix="corpus", **kwargs), reference_indexer):
+        with indexer.update() as update:
+            update.add_file(more[0], name="m0")
+            update.add_file(more[1], name="n5")        # replaces document 5
+            update.remove(2)
+    for query in V1_QUERIES + ["new", "sun"]:
+        assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
+    snapshot = engine._snapshot
+    assert snapshot.lexicon._native.is_format_v2() and snapshot.term_index._native.is_format_v2()
+    if snapshot.local_index is not None:
+        assert snapshot.local_index._native.is_format_v2()
+    assert engine.doc_id("m0") == reference.doc_id("m0") and engine.doc_name(5) == "n5"

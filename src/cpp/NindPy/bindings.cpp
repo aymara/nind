@@ -808,6 +808,7 @@ PYBIND11_MODULE(_native, m) {
         .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
+        .def("is_format_v2", &NindIndex::isFormatV2)
         .def("get_word_id", [](NindLexiconIndex &self, const std::list<std::string> &components) {
             // a reader: thread-safe const path, GIL released; a writer: the sequential API
             if (self.isWriter()) return self.getWordId(components);
@@ -882,6 +883,7 @@ PYBIND11_MODULE(_native, m) {
         .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
+        .def("is_format_v2", &NindIndex::isFormatV2)
         .def("set_term_def", &NindTermIndex::setTermDef,
              py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"),
              py::call_guard<py::gil_scoped_release>())
@@ -982,6 +984,7 @@ PYBIND11_MODULE(_native, m) {
         .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
+        .def("is_format_v2", &NindIndex::isFormatV2)
         .def("set_local_def", &NindLocalIndex::setLocalDef,
              py::arg("ident"), py::arg("local_def"), py::arg("file_identification"),
              py::call_guard<py::gil_scoped_release>())

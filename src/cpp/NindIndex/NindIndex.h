@@ -69,9 +69,11 @@ public:
     *\return true if in bulk mode */
     bool isBulk() const { return m_isBulk; }
 
-protected:
-    /**\brief true for a file of format v2 (10-byte indirections), false for v1 (8) */
+    /**\brief true for a file of format v2 (10-byte indirections), false for v1 (8): a v1 file is
+    * read, but a writer refuses to extend it (rebuild it, e.g. with NindIndexMerge) */
     bool isFormatV2() const { return getDataEntrySize() == 10; }
+
+protected:
 
     //the fields of an indirection, as wide as the file's format
     uint64_t getIndirectionOffset(NindReadBuffer &in) const {

@@ -784,6 +784,7 @@ class IndexUpdate:
     def _commit(self):
         pending = self._pending
         vocabulary = sorted({token for tokens in pending.values() if tokens for token in tokens})
+        self._migrate_from_v1()
         lexicon, term_index, local_index = self._open_writers(len(vocabulary), len(pending))
         # the previous postings of every replaced or removed document go
         removed = defaultdict(set)
@@ -895,11 +896,27 @@ class IndexUpdate:
         # index is rebuilt (term ids change, document ids don't) with twice as many buckets as words
         if self._words_nb <= self.LEXICON_MAX_LOAD * self._modulo:
             return
+        self._rebuild(2 * self._words_nb)
+
+    def _migrate_from_v1(self):
+        # an index written before format v2 is read, but its writers refuse to extend it: the copy
+        # is first rebuilt in format v2 (term ids change, document ids don't)
+        if not os.path.exists(self._base + ".nindlexiconindex"):
+            return                                  # a new index
+        lexicon = native.NindLexiconIndex(self._base, is_writer=False)
+        if lexicon.is_format_v2():
+            return
+        words_nb = lexicon.get_identification().lexicon_words_nb
+        del lexicon
+        self._rebuild(max(self.LEXICON_MIN_BUCKETS, 2 * words_nb))
+
+    def _rebuild(self, lexicon_buckets):
+        # the generation's index, rebuilt in place by a merge of itself (in the current format)
         rebuild_dir = tempfile.mkdtemp(prefix=".rebuild-", dir=os.path.dirname(self._base))
         try:
             rebuilt = os.path.join(rebuild_dir, os.path.basename(self._base))
             native.merge_indexes([self._base], rebuilt, with_retrolexicon=self._with_retrolexicon,
-                                 lexicon_indirection_bloc_size=2 * self._words_nb)
+                                 lexicon_indirection_bloc_size=lexicon_buckets)
             for extension in INDEX_EXTENSIONS:
                 if os.path.exists(rebuilt + extension):
                     os.replace(rebuilt + extension, self._base + extension)
