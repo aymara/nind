@@ -18,6 +18,7 @@
 #include <pybind11/operators.h>
 #include <sstream>
 #include <map>
+#include <functional>
 #include <vector>
 #include <algorithm>
 #include <cstdint>
@@ -348,6 +349,9 @@ public:
         }
         m_docIds.assign(docIds.data, docIds.data + docIds.size);
         m_lengths.assign(lengths.data, lengths.data + lengths.size);
+        m_minLength = 0;
+        for (size_t i = 0; i < m_lengths.size(); i++)
+            if (i == 0 || m_lengths[i] < m_minLength) m_minLength = m_lengths[i];
     }
 
     // the documents with a positive score for the query terms (in query order, repeats
@@ -355,68 +359,44 @@ public:
     std::vector<std::pair<uint64_t, double> > search(const NindTermIndex &termIndex,
                                                      const std::vector<unsigned int> &termIds,
                                                      const double k1, const double b,
-                                                     const long topK) const
+                                                     const long topK, const bool prune) const
     {
         py::gil_scoped_release release;
         // scratch arrays and read buffer from the pool: concurrent searches each get their own
         ScratchLease lease(*this);
         NindReadBuffer &buffer = lease.scratch->buffer;
         std::vector<double> &scores = lease.scratch->scores;
-        std::vector<uint32_t> &stamps = lease.scratch->stamps;
-        uint32_t &stamp = lease.scratch->stamp;
         if (scores.size() != m_docsNb) scores.assign(m_docsNb, 0.0);
         std::vector<uint32_t> touched;          // positions whose score isn't 0 any more
 
-        // the postings of each distinct term, read once: df, then (position, frequency)
-        // of the documents of the corpus, first category a document is in only
-        std::unordered_map<unsigned int, size_t> distinct;      //term id -> index in dfs, postings
-        std::vector<uint64_t> dfs;
-        std::vector<std::vector<std::pair<uint32_t, uint32_t> > > postings;
-        std::vector<NindTermIndex::Document> read;
-        std::vector<size_t> categoryEnds;
+        // the query's distinct terms; per occurrence (query order, repeats included) its term
+        std::vector<unsigned int> distinctIds;
+        std::vector<size_t> occurrences;
+        std::unordered_map<unsigned int, size_t> distinct;
         for (size_t t = 0; t < termIds.size(); t++) {
             if (termIds[t] == 0) continue;
-            const auto found = distinct.insert(std::make_pair(termIds[t], postings.size()));
-            const size_t index = found.first->second;
-            if (found.second) {
-                postings.push_back(std::vector<std::pair<uint32_t, uint32_t> >());
-                termIndex.getTermPostings(termIds[t], read, categoryEnds, buffer);
-                // df counts the documents of every category
-                dfs.push_back((uint64_t)read.size());
-                std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings.back();
-                termPostings.reserve(read.size());
-                const bool severalCategories = categoryEnds.size() > 1;
-                if (severalCategories) {
-                    if (stamps.size() != m_docsNb) stamps.assign(m_docsNb, 0);
-                    if (++stamp == 0) {         // wrapped: forget every mark
-                        std::fill(stamps.begin(), stamps.end(), 0);
-                        stamp = 1;
-                    }
-                }
-                for (size_t i = 0; i < read.size(); i++) {
-                    const uint32_t position = positionOf(read[i].ident);
-                    if (position == NO_POSITION) continue;
-                    if (severalCategories) {
-                        if (stamps[position] == stamp) continue;    // already in a previous category
-                        stamps[position] = stamp;
-                    }
-                    termPostings.push_back(std::make_pair(position, (uint32_t)read[i].frequency));
-                }
-            }
-            const double df = (double)dfs[index];
-            //same operations, in the same order, as NindEngine._bm25_score
-            const double idf = std::log(((double)((int64_t)m_docsNb - (int64_t)dfs[index]) + 0.5) / (df + 0.5) + 1.0);
-            const std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[index];
+            const auto found = distinct.insert(std::make_pair(termIds[t], distinctIds.size()));
+            if (found.second) distinctIds.push_back(termIds[t]);
+            occurrences.push_back(found.first->second);
+        }
+        // per distinct term: its idf and the postings to score, (position, frequency): every posting
+        // (exhaustive), or only those of the blocks that may reach the top k (block-max pruning)
+        std::vector<double> idfs;
+        std::vector<std::vector<std::pair<uint32_t, uint32_t> > > postings;
+        bool pruned = false;
+        if (prune && topK > 0 && k1 >= 0 && b >= 0 && b <= 1 && !distinctIds.empty())
+            pruned = collectPruned(termIndex, distinctIds, occurrences, k1, b, (size_t)topK, buffer, scores, idfs, postings);
+        if (!pruned) collectAll(termIndex, distinctIds, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
+        // the scores, term occurrence by term occurrence in query order (as NindEngine._bm25_score)
+        for (size_t o = 0; o < occurrences.size(); o++) {
+            const double idf = idfs[occurrences[o]];
+            const std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[occurrences[o]];
             for (size_t i = 0; i < termPostings.size(); i++) {
                 if (termPostings[i].second == 0) continue;
-                const double tf = termPostings[i].second;
                 const uint32_t position = termPostings[i].first;
-                const double docLength = m_lengths[position];
-                const double numerator = tf * (k1 + 1);
-                const double denominator = tf + k1 * (1 - b + b * (docLength / m_avgDocLength));
                 double &score = scores[position];
                 if (score == 0.0) touched.push_back(position);
-                score += idf * (numerator / denominator);
+                score += contribution(idf, termPostings[i].second, m_lengths[position], k1, b);
             }
         }
         //(score, position) of the documents with a positive score; scores reset for the next search
@@ -439,6 +419,218 @@ public:
     size_t docsNb() const { return m_docsNb; }
 
 private:
+    // one term's BM25 contribution: the same operations, in the same order, everywhere (scores and
+    // bounds; -ffp-contract=off): each operation is monotonic, so a bound computed at a larger tf
+    // and a smaller length is never below a contribution
+    double contribution(const double idf, const double tf, const double docLength,
+                        const double k1, const double b) const {
+        const double numerator = tf * (k1 + 1);
+        const double denominator = tf + k1 * (1 - b + b * (docLength / m_avgDocLength));
+        return idf * (numerator / denominator);
+    }
+    double idfOf(const uint64_t df) const {
+        //same operations, in the same order, as NindEngine._bm25_score
+        return std::log(((double)((int64_t)m_docsNb - (int64_t)df) + 0.5) / ((double)df + 0.5) + 1.0);
+    }
+
+    // every posting of every term (several categories: a document's first one only)
+    void collectAll(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
+                    NindReadBuffer &buffer, std::vector<uint32_t> &stamps, uint32_t &stamp,
+                    std::vector<double> &idfs,
+                    std::vector<std::vector<std::pair<uint32_t, uint32_t> > > &postings) const
+    {
+        idfs.clear();
+        postings.assign(distinctIds.size(), std::vector<std::pair<uint32_t, uint32_t> >());
+        std::vector<NindTermIndex::Document> read;
+        std::vector<size_t> categoryEnds;
+        for (size_t t = 0; t < distinctIds.size(); t++) {
+            termIndex.getTermPostings(distinctIds[t], read, categoryEnds, buffer);
+            // df counts the documents of every category
+            idfs.push_back(idfOf((uint64_t)read.size()));
+            std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[t];
+            termPostings.reserve(read.size());
+            const bool severalCategories = categoryEnds.size() > 1;
+            if (severalCategories) {
+                if (stamps.size() != m_docsNb) stamps.assign(m_docsNb, 0);
+                if (++stamp == 0) {         // wrapped: forget every mark
+                    std::fill(stamps.begin(), stamps.end(), 0);
+                    stamp = 1;
+                }
+            }
+            for (size_t i = 0; i < read.size(); i++) {
+                const uint32_t position = positionOf(read[i].ident);
+                if (position == NO_POSITION) continue;
+                if (severalCategories) {
+                    if (stamps[position] == stamp) continue;    // already in a previous category
+                    stamps[position] = stamp;
+                }
+                termPostings.push_back(std::make_pair(position, (uint32_t)read[i].frequency));
+            }
+        }
+    }
+
+    // A term's postings as segments: a block of a long list, or a single posting of a short one,
+    // with an upper bound of the contribution of any document in it
+    struct Segment {
+        uint64_t first, last;           //document range
+        double bound;
+        size_t block;                   //index in the category's blocks, or NO_BLOCK (posting `posting`)
+        size_t posting;
+    };
+    static const size_t NO_BLOCK = (size_t)-1;
+    struct TermState {
+        bool present;
+        NindTermIndex::TermDirectory directory;
+        uint64_t df;
+        double idf;
+        std::vector<Segment> segments;  //by document range (blocks, or single postings, are disjoint, ordered)
+        TermState(): present(false), directory(), df(0), idf(0), segments() {}
+    };
+    // the largest bound of the term's segments overlapping [first, last] (0: none)
+    static double maxOverlap(const TermState &term, const uint64_t first, const uint64_t last) {
+        const std::vector<Segment> &segments = term.segments;
+        size_t low = 0, high = segments.size();
+        while (low < high) {                    // first segment ending at or after first
+            const size_t middle = low + (high - low) / 2;
+            if (segments[middle].last < first) low = middle + 1;
+            else high = middle;
+        }
+        double bound = 0.0;
+        for (size_t i = low; i < segments.size() && segments[i].first <= last; i++)
+            if (segments[i].bound > bound) bound = segments[i].bound;
+        return bound;
+    }
+    // Block-max pruning, exact: the postings of the blocks whose documents may reach the top k.
+    // 1) a lower bound theta of the k-th score: the partial scores over the rarest terms (their
+    //    postings read whole, up to PRUNING_BUDGET); 2) a block (or posting) of term t is skipped if, in query
+    //    order, its bound for t plus, for every other term, the largest bound of that term's segments
+    //    overlapping the block's document range, is below theta: none of its documents can reach the
+    //    top k, and every document that does keeps every contribution (identical scores and ranks).
+    //    false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0,
+    //    fewer than topK candidates with a positive score.
+    static const uint64_t PRUNING_BUDGET = 65536;
+    bool collectPruned(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
+                       const std::vector<size_t> &occurrences, const double k1, const double b,
+                       const size_t topK, NindReadBuffer &buffer, std::vector<double> &scores, std::vector<double> &idfs,
+                       std::vector<std::vector<std::pair<uint32_t, uint32_t> > > &postings) const
+    {
+        // the shortest document of the corpus: the bound's length when a block doesn't know its own
+        const double shortest = m_minLength;
+        std::vector<TermState> terms(distinctIds.size());
+        for (size_t t = 0; t < distinctIds.size(); t++) {
+            TermState &term = terms[t];
+            term.present = termIndex.getTermDirectory(distinctIds[t], term.directory, buffer);
+            if (!term.present) continue;
+            if (term.directory.categories.size() != 1) return false;
+            const NindTermIndex::TermDirectory::Category &category = term.directory.categories[0];
+            term.df = category.docsNb;
+            term.idf = idfOf(term.df);
+            if (!(term.idf > 0)) return false;
+            if (!category.blocks.empty()) {
+                for (size_t i = 0; i < category.blocks.size(); i++) {
+                    const NindTermIndex::Block &block = category.blocks[i];
+                    const double length = std::max((double)block.minLength, shortest);
+                    term.segments.push_back(Segment{block.first, block.last,
+                        contribution(term.idf, block.maxFrequency, length, k1, b), i, 0});
+                }
+            }
+            else {
+                for (size_t i = 0; i < category.inlinePostings.size(); i++) {
+                    const NindTermIndex::Document &posting = category.inlinePostings[i];
+                    const uint32_t position = positionOf(posting.ident);
+                    const double bound = (position == NO_POSITION || posting.frequency == 0) ? 0.0 :
+                        contribution(term.idf, posting.frequency, m_lengths[position], k1, b);
+                    term.segments.push_back(Segment{posting.ident, posting.ident, bound, NO_BLOCK, i});
+                }
+            }
+        }
+        //1) theta: the k-th largest partial score over the rarest terms (up to PRUNING_BUDGET postings),
+        //   in query order. A partial score is never above the full one (adding a non-negative
+        //   contribution never decreases a floating-point sum), so theta is never above the k-th score.
+        //   Those terms' postings are kept whole for the scoring.
+        std::vector<size_t> byDf;
+        for (size_t t = 0; t < terms.size(); t++) if (terms[t].present) byDf.push_back(t);
+        std::stable_sort(byDf.begin(), byDf.end(), [&](const size_t x, const size_t y) { return terms[x].df < terms[y].df; });
+        std::vector<bool> whole(terms.size(), false);
+        idfs.assign(distinctIds.size(), 0.0);
+        postings.assign(distinctIds.size(), std::vector<std::pair<uint32_t, uint32_t> >());
+        std::vector<NindTermIndex::Document> read;
+        uint64_t budget = 0;
+        for (size_t i = 0; i < byDf.size(); i++) {
+            const size_t t = byDf[i];
+            if (i > 0 && budget + terms[t].df > PRUNING_BUDGET) break;
+            budget += terms[t].df;
+            whole[t] = true;
+            const NindTermIndex::TermDirectory::Category &category = terms[t].directory.categories[0];
+            read.assign(category.inlinePostings.begin(), category.inlinePostings.end());
+            if (!category.blocks.empty())
+                termIndex.getTermBlocks(distinctIds[t], terms[t].directory, 0, 0, category.blocks.size(), read, buffer);
+            for (size_t p = 0; p < read.size(); p++) {
+                const uint32_t position = positionOf(read[p].ident);
+                if (position != NO_POSITION) postings[t].push_back(std::make_pair(position, (uint32_t)read[p].frequency));
+            }
+        }
+        //(in the scores scratch array, reset right after: all zero again for the scoring)
+        std::vector<uint32_t> partialTouched;
+        for (size_t o = 0; o < occurrences.size(); o++) {
+            const size_t t = occurrences[o];
+            if (!whole[t]) continue;
+            for (size_t p = 0; p < postings[t].size(); p++) {
+                if (postings[t][p].second == 0) continue;
+                double &score = scores[postings[t][p].first];
+                if (score == 0.0) partialTouched.push_back(postings[t][p].first);
+                score += contribution(terms[t].idf, postings[t][p].second, m_lengths[postings[t][p].first], k1, b);
+            }
+        }
+        std::vector<double> partialScores;
+        partialScores.reserve(partialTouched.size());
+        for (size_t i = 0; i < partialTouched.size(); i++) {
+            if (scores[partialTouched[i]] > 0) partialScores.push_back(scores[partialTouched[i]]);
+            scores[partialTouched[i]] = 0.0;
+        }
+        if (partialScores.size() < topK) return false;
+        std::nth_element(partialScores.begin(), partialScores.begin() + (topK - 1), partialScores.end(),
+                         std::greater<double>());
+        const double theta = partialScores[topK - 1];
+        //2) the other terms: the segments that may reach theta, their postings read (contiguous blocks at once)
+        for (size_t t = 0; t < terms.size(); t++) {
+            TermState &term = terms[t];
+            if (!term.present) continue;
+            idfs[t] = term.idf;
+            if (whole[t]) continue;
+            std::vector<size_t> keptBlocks;
+            std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[t];
+            for (size_t i = 0; i < term.segments.size(); i++) {
+                const Segment &segment = term.segments[i];
+                double bound = 0.0;
+                for (size_t o = 0; o < occurrences.size(); o++) {
+                    if (occurrences[o] == t) bound += segment.bound;
+                    else if (terms[occurrences[o]].present) bound += maxOverlap(terms[occurrences[o]], segment.first, segment.last);
+                }
+                if (bound < theta) continue;
+                if (segment.block == NO_BLOCK) {
+                    const NindTermIndex::Document &posting = term.directory.categories[0].inlinePostings[segment.posting];
+                    const uint32_t position = positionOf(posting.ident);
+                    if (position != NO_POSITION) termPostings.push_back(std::make_pair(position, (uint32_t)posting.frequency));
+                }
+                else keptBlocks.push_back(segment.block);
+            }
+            // runs of consecutive blocks: one read each
+            for (size_t i = 0; i < keptBlocks.size(); ) {
+                size_t j = i + 1;
+                while (j < keptBlocks.size() && keptBlocks[j] == keptBlocks[j - 1] + 1) j++;
+                read.clear();
+                termIndex.getTermBlocks(distinctIds[t], term.directory, 0, keptBlocks[i], keptBlocks[j - 1] + 1, read, buffer);
+                for (size_t p = 0; p < read.size(); p++) {
+                    const uint32_t position = positionOf(read[p].ident);
+                    if (position != NO_POSITION) termPostings.push_back(std::make_pair(position, (uint32_t)read[p].frequency));
+                }
+                i = j;
+            }
+        }
+        return true;
+    }
+
     uint32_t positionOf(const uint64_t docId) const {
         if (!m_dense.empty() || m_sparse.empty())
             return docId < m_dense.size() ? m_dense[docId] : NO_POSITION;
@@ -450,6 +642,7 @@ private:
 
     std::vector<uint64_t> m_docIds;     //position -> document id
     std::vector<uint32_t> m_lengths;    //position -> length
+    uint32_t m_minLength;               //the shortest document
     std::vector<uint32_t> m_dense;      //document id -> position (NO_POSITION: none), or empty
     std::vector<std::pair<uint64_t, uint32_t> > m_sparse;   //(document id, position), by id, when not dense
     size_t m_docsNb;
@@ -990,7 +1183,8 @@ PYBIND11_MODULE(_native, m) {
             return new Bm25Scorer(docIdsView(docIds, "doc_ids"), uintView(lengths, "lengths"), avgDocLength);
         }), py::arg("doc_ids"), py::arg("lengths"), py::arg("avg_doc_len"))
         .def("search", &Bm25Scorer::search, py::arg("term_index"), py::arg("term_ids"),
-             py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1)
+             py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1,
+             py::arg("prune") = false)
         .def_property_readonly("docs_nb", &Bm25Scorer::docsNb);
 
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")

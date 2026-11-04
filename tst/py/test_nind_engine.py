@@ -1037,3 +1037,27 @@ def test_opening_an_engine_parses_nothing_in_python(tmp_path):
         snapshot.term_index.entriesBlocksMap
     with pytest.raises(NotImplementedError, match="format v2"):
         snapshot.local_index.docIdTradExtInt
+
+
+def test_block_max_pruning_returns_the_exhaustive_top_k(tmp_path):
+    # Bm25Scorer.search(prune=True) skips the blocks that can't reach the top k: the results
+    # (scores, ties in index order) must be exactly the exhaustive search's (opt-in: not faster
+    # than the exhaustive top k yet, see docs/proposals/format-v2-blocks.md)
+    rng = random.Random(11)
+    vocabulary = ["z%d" % i for i in range(400)]
+    weights = [1.0 / (i + 1) for i in range(len(vocabulary))]        # Zipf-like: a few very frequent words
+    texts = [" ".join(rng.choices(vocabulary, weights, k=rng.randint(3, 60))) for _ in range(3000)]
+    texts[17] = texts[5]                                               # equal scores: ties
+    _, engine = build_with(tmp_path, "zipf", texts, indexer_kwargs={"local_index": False})
+    queries = ["z0", "z0 z1", "z0 z1 z2 z3", "z399", "z0 z250", "z1 z1 z7", "z5 z0 z2 z300 z9"]
+    queries += [" ".join(rng.choices(vocabulary, weights, k=rng.randint(1, 6))) for _ in range(200)]
+    queries += [" ".join(rng.sample(vocabulary, rng.randint(1, 5))) for _ in range(100)]
+    snapshot = engine._snapshot
+    term_index = snapshot.term_index._native
+    for query in queries:
+        term_ids = [snapshot.term_id(t) or 0 for t in engine.tokenize(query)]
+        everything = snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, -1)
+        for k in (1, 3, 10, 50):
+            pruned = snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k, prune=True)
+            assert pruned == everything[:k], (query, k)
+            assert snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k) == everything[:k], (query, k)
