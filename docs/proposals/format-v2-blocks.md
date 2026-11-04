@@ -198,7 +198,7 @@ applies well before the limits:
 | skipping blocks in top-k search | as soon as queries contain frequent terms: FiQA (57k documents) already scores ~146k postings per query, most of which block-max skipping would avoid |
 | updates that rewrite the last block, not the whole list | any index that's updated: the 438 s / 16.8 GB on MS MARCO becomes roughly (terms touched) × (one block), orders of magnitude less I/O |
 | bounded read buffers, one `pread` per block | any index with long lists (memory no longer grows with the corpus per read) |
-| a merge that copies blocks instead of re-encoding them (shards cover disjoint, ordered document ranges: only a block's first id changes) | any sharded build, i.e. the way to use hundreds of cores |
+| a merge that copies block bodies instead of re-encoding them (documents keep their ids, and a body is relative to its block's first document: only the small header, with the merged term id, is rewritten) | any sharded build, i.e. the way to use hundreds of cores |
 | parallel decoding/scoring of one query's blocks across cores | large corpora on many-core machines |
 | no 16 MiB / 16.7M-document / 16.7M-bucket ceilings | ~10M documents (stopwords kept) to ~100M (without) |
 
@@ -218,18 +218,22 @@ two formats.
 
 ## Migration
 
-1. **Readers next.** v2 readers accept v1 files (entry size 8, flag 17) and v2
-   files (entry size 10, flag 23), in C++ and in `nind._native`. Amose gets a
-   reader that opens both before any v2 file exists.
-0. **Reconcile the v1 grammar with the code** (principle 2), then write the
+Decided (2026-11-04): **writers write v2 by default**; readers read v1 and v2.
+Amose follows as needed (or keeps an older nind for v1).
+
+1. **Reconcile the v1 grammar with the code** (principle 2), then write the
    v2 grammar, before any code.
-2. **Then writers.** `NindIndexer`, `IndexUpdate`, `IndexBuilder` and
-   `NindIndexMerge` write v2 only. Conversion: rebuild the v2 term index from
-   the v1 lexicon and local index, which are the source of truth
-   (principle 3); for indexes without a local index, `NindIndexMerge`
-   reading v1 and writing v2 (`nind._native.merge_indexes([old], new)`).
-   The same rebuild is the recovery tool for a damaged term index.
-3. **Diagnostics** (`dumpeFichier`, `afficheTerme`, ...) move to
+2. **Readers read both**: v1 files (entry size 8, flag 17) and v2 files
+   (entry size 10, flag 23), in C++ and in `nind._native`.
+3. **Writers write v2**: `NindIndexer`, `IndexUpdate`, `IndexBuilder`,
+   `NindIndexMerge` and the C++ writers Amose uses. An existing v1 file
+   reopened by a writer is refused (it can't grow v2 definitions): rebuild
+   it. Conversion: rebuild the v2 term index from the v1 lexicon and local
+   index, which are the source of truth (principle 3); for indexes without a
+   local index, `NindIndexMerge` reading v1 and writing v2
+   (`nind._native.merge_indexes([old], new)`). The same rebuild is the
+   recovery tool for a damaged term index.
+4. **Diagnostics** (`dumpeFichier`, `afficheTerme`, ...) move to
    `nind._native` like the rest of the low-level API (see "Planned follow-up
    work" in CLAUDE.md), with a native **`verify`**: it walks every structure
    of an index and checks its invariants (flags, bounds, counts matching
@@ -237,41 +241,35 @@ two formats.
    files paired by their identification). That's the offline tool the
    original design used to tell whether a fault comes from indexing or from
    search (LAT2016.JYS.463, §8.3), without a second decoder.
-
-## Testing and measuring
-
-- Unit tests per field width and per path: inline vs. blocked categories, a
-  two-level directory, appending to the last block, removing from a middle
-  block, holes reused.
-- Robustness: extend the `*RobustnessTest.cpp` corruption sweeps to v2 files.
-  Descriptor offsets, lengths and counts are read from the file, so each must
-  be bounded against the file size and the buffer, as v1 fields are.
-- A term over 16 MiB (`NindTermIndexTest.DefinitionOver16MiBIsRefused` today)
-  must round-trip in v2.
-- **Golden files**: a few small v1 and v2 files, written once and checked
-  into `tst/` byte for byte. A writer must reproduce them exactly (an
-  accidental format change, or a writer and reader sharing a bug, breaks
-  the test), and v2 readers must read the v1 ones.
-- `verify` accepts every file the writers produce and rejects every
-  corrupted one from the sweeps.
-- **Idempotent incremental indexing** (LAT2016.JYS.463, §4.7, as a test):
-  indexing a corpus as overlapping parts, in any order, gives the same index
-  as indexing it at once. Sparse external ids too (CLEF-like numbering).
-- **Rebuild**: a term index rebuilt from the lexicon and local index equals
-  the one written incrementally.
-- `bench/retrieval/`, before and after: parity (rankings identical to bm25s),
-  index size, build time, query latency at k = 10 and 1000, and update cost on
-  MS MARCO and its prefixes; then a corpus over 16.7M documents with a local
-  index.
+5. **Golden files**: the v1 set (`tst/cpp/unit/NindIndex/golden/v1`) stays,
+   read-only (v2 readers must decode it); a v2 set is written and checked
+   both ways (writers reproduce it, readers decode it).
 
 ## Decisions (2026-11-04)
 
-1. **Document ids are 64 bits.** 32 bits would cap an index at 4.29G
-   documents, below the 10G target.
+1. **External document ids are 64 bits** (the application's numbering, in
+   postings, the local index's `<identifiantExterne>`, `.ninddocnames`,
+   `.ninddoclengths`). **The internal numbering stays 32 bits**: the local
+   index's `<identifiantDoc>`, `NindIndex`'s identifiers (its indirection
+   numbering), `Bm25Scorer`'s positions. So **one index holds at most
+   4.29G documents**; beyond that, several indexes (see "Possible
+   evolutions").
 2. **Blocks of 128 postings** by default (a build-time parameter stored in
    the file's specifics; 256 to be measured).
 3. **Block statistics: max term frequency and min document length.** More
    can be added later under a new flag.
+4. **Writers write v2 by default** (see Migration).
+
+## Possible evolutions
+
+- **64-bit internal numbering**, for one index over 4.29G documents: the
+  local index's `<identifiantDoc>` (`Entier8`), `NindIndex`'s identifiers
+  (`getEntryPos`, the indirection numbering: 64-bit identifiers, and the
+  indirection blocks' `<nombreIndex>` counts summing past 2^32), and
+  `Bm25Scorer`'s positions (`uint64_t`, its per-document arrays then
+  beyond 4.29G entries, so a bounded accumulator rather than N-sized arrays,
+  see the inventory). The lexicon and term index keep 32-bit word
+  identifiers. Not needed while one index stays under 4.29G documents.
 
 ## Implementation inventory
 
@@ -395,15 +393,19 @@ measured against the previous one (`bench/retrieval/`):
    wrappers stop parsing the envelope; the diagnostics keep working on v1.
 2. **Reconcile the v1 grammar comments with the code**, then write the v2
    grammar (this document's section 2 made precise), with `EntierULat64`.
-3. **64-bit document ids** (still the v1 term and local formats: ids above
-   2^32 refused there): `NindDocId`, the C++ structures, Python arrays,
-   `NINDDL02`, the new `NindDocNames` version.
+3. **64-bit external document ids** (the v1 formats refuse ids above 2^32):
+   `NindDocId`, the C++ structures, Python arrays, `NINDDL02`, the new
+   `NindDocNames` version.
 4. **The v2 envelope** (entry size 10; 4-byte local document and lexicon
-   bucket numbers; 4-byte lengths): v2 readers read v1 and v2, writers write
-   v2. Golden v2 files.
+   bucket numbers; 4-byte lengths): readers read v1 and v2, writers write v2.
+   The v1 golden files stay as a reader test; golden v2 files.
 5. **Blocks in the term index** (flag 23): writers, readers, `getTermPostings`
-   over blocks, in-place updates of the last block, `NindIndexMerge` copying
-   blocks, `NindAmose`.
+   over blocks, in-place updates of the last block, `NindIndexMerge`
+   (copying block bodies, rewriting their headers: a block repeats its term
+   id, renumbered by the merge), `NindAmose`.
+   A writer reopening a file must know the blocks' areas: the free-space
+   management (`findNewArea`/`vacateOldArea`) and the hole statistics
+   (`chercheVides`) only know the areas indirections point at.
 6. **Block-max top-k in `Bm25Scorer`**, results identical to today's.
 7. **Migration** (rebuild of v1 indexes), native `verify`, the diagnostics.
 
@@ -411,7 +413,7 @@ measured against the previous one (`bench/retrieval/`):
 
 1. **Build memory** (not part of the format): `NindIndexer` keeps ~17 bytes
    per token in memory (8.8 GB for MS MARCO). Sharded builds plus a
-   block-copying merge would bound it per shard.
+   merge copying block bodies would bound it per shard.
 2. **The author's other documents**: LAT2014.JYS.440 (*nind, indexation
    post-S2*, the main design), LAT2015.JYS.448 (the Amose adaptation),
    LAT2017.JYS.468 (*synchronisation des lecteurs par les fichiers*),
