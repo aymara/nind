@@ -182,6 +182,9 @@ public:
     /**\brief Get a 5-bytes integer from internal buffer
     *\return 8-bytes integer */
     uint64_t getInt5();
+    uint64_t getInt6();
+    uint64_t getInt8();
+    uint64_t getUIntLat64();
         
     /**\brief Get an unsigned latecon integer from internal buffer
     *\return 4-bytes unsigned integer */
@@ -243,11 +246,20 @@ public:
     /**\brief Put a 5-bytes integer into the internal buffer
     *\param int8 long integer to write as 5-bytes*/
     void putInt5(const uint64_t int8);
+    //big-endian 6 bytes (format v2's offsets: refuses a value over 6 bytes)
+    void putInt6(const uint64_t int8);
+    //big-endian 8 bytes (format v2's external document ids)
+    void putInt8(const uint64_t int8);
+    //little-endian 4 bytes at an offset of the buffer (format v2's lengths, patched once known)
+    void putInt4(const uint64_t int4,
+                 const unsigned int offset);
 
     /**\brief Put an unsigned latecon integer into the internal buffer
     *\param int4 unsigned integer to write as latecon integer*/
     //(64-bit parameter: a value over 32 bits throws OutOfBoundException instead of being truncated)
     void putUIntLat(const uint64_t int4);
+    //EntierULat64 (format v2): an EntierULat below 2^32, else 0xF8 + 8 bytes big-endian
+    void putUIntLat64(const uint64_t int8);
 
     /**\brief Put a signed latecon integer into the internal buffer
     *\param int4 signed integer to write as latecon integer*/

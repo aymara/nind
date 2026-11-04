@@ -89,7 +89,10 @@ public:
     unsigned int getInt4();
     signed int getSInt4();
     uint64_t getInt5();
+    uint64_t getInt6();             //big-endian, format v2's offsets
+    uint64_t getInt8();             //big-endian, format v2's external document ids
     unsigned int getUIntLat();
+    uint64_t getUIntLat64();        //EntierULat64 (format v2): EntierULat below 2^32, else 0xF8 + Entier8
     signed int getSIntLat();
     std::string getString();
     std::string getStringAsBytes(const unsigned char length);

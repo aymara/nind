@@ -35,6 +35,62 @@ TEST_CASE("NindFileTest.BufferedRoundTripOfAllIntegerWidths") {
     reader.close();
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindFileTest.FormatV2IntegersRoundTrip") {
+    // Entier6, Entier8, EntierULat64, Entier4 patched at an offset
+    TestTempDir tmp;
+    const string path = tmp.file("v2.bin");
+    const uint64_t lat64[] = {0, 127, 0xFFFFFFFFull, 0x100000000ull, 0xFFFFFFFFFFFFFFFFull};
+    NindFile writer(path);
+    REQUIRE(writer.open("wb"));
+    writer.createBuffer(128);
+    writer.putInt4(0);                                  //patched below
+    writer.putInt6(0xFFFFFFFFFFFFull);
+    writer.putInt6(0x123456789ABCull);
+    writer.putInt8(0xFFFFFFFFFFFFFFFFull);
+    writer.putInt8(0x0102030405060708ull);
+    for (size_t i = 0; i < 5; i++) writer.putUIntLat64(lat64[i]);
+    writer.putInt4(0xDEADBEEFull, 0);
+    CHECK_THROWS_AS(writer.putInt6(0x1000000000000ull), OutOfBoundException);
+    CHECK_THROWS_AS(writer.putInt4(0x100000000ull, 0), OutOfBoundException);
+    const unsigned int written = writer.getOutBufferSize();
+    // EntierULat64: 5 bytes up to 2^32 - 1, then 0xF8 + 8 bytes
+    CHECK_EQ(4u + 6 + 6 + 8 + 8 + (1 + 1 + 5 + 9 + 9), written);
+    writer.writeBuffer();
+    writer.close();
+
+    NindFile reader(path);
+    REQUIRE(reader.open("rb"));
+    reader.setPos(0, SEEK_SET);
+    reader.readBuffer(written);
+    CHECK_EQ(0xDEADBEEFu, reader.getInt4());
+    CHECK_EQ(0xFFFFFFFFFFFFull, reader.getInt6());
+    CHECK_EQ(0x123456789ABCull, reader.getInt6());
+    CHECK_EQ(0xFFFFFFFFFFFFFFFFull, reader.getInt8());
+    CHECK_EQ(0x0102030405060708ull, reader.getInt8());
+    for (size_t i = 0; i < 5; i++) CHECK_EQ(lat64[i], reader.getUIntLat64());
+    CHECK(reader.endOfInBuffer());
+    reader.close();
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindFileTest.UIntLat64RejectsANonCanonicalForm") {
+    // 0xF8 + 8 bytes holding a value under 2^32 isn't how a writer writes it: a corrupt file
+    TestTempDir tmp;
+    const string path = tmp.file("lat64.bin");
+    NindFile writer(path);
+    REQUIRE(writer.open("wb"));
+    writer.createBuffer(16);
+    writer.putInt1(0xF8);
+    writer.putInt8(5);
+    writer.writeBuffer();
+    writer.close();
+    NindFile reader(path);
+    REQUIRE(reader.open("rb"));
+    reader.setPos(0, SEEK_SET);
+    reader.readBuffer(9);
+    CHECK_THROWS_AS(reader.getUIntLat64(), OutReadBufferException);
+    reader.close();
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindFileTest.ValuesTooLargeForTheirFieldAreRefused") {
     // a value over a field's width used to be written truncated (a corrupt file); with 64-bit
     // document ids, every v1 field refuses what it can't hold

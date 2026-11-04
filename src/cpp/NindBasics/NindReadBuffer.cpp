@@ -155,6 +155,34 @@ uint64_t NindReadBuffer::getInt5()
     return (static_cast<uint64_t>(m_ptr[-5]) << 32) | be4(m_ptr - 4);
 }
 ////////////////////////////////////////////////////////////
+uint64_t NindReadBuffer::getInt6()
+{
+    //gros boutiste
+    if (m_end - m_ptr < 6) throw OutReadBufferException("in read buffer (F6) " + getFileName());
+    m_ptr += 6;
+    return (static_cast<uint64_t>(be2(m_ptr - 6)) << 32) | be4(m_ptr - 4);
+}
+////////////////////////////////////////////////////////////
+uint64_t NindReadBuffer::getInt8()
+{
+    //gros boutiste
+    if (m_end - m_ptr < 8) throw OutReadBufferException("in read buffer (F8) " + getFileName());
+    m_ptr += 8;
+    return (static_cast<uint64_t>(be4(m_ptr - 8)) << 32) | be4(m_ptr - 4);
+}
+////////////////////////////////////////////////////////////
+uint64_t NindReadBuffer::getUIntLat64()
+{
+    //EntierULat64 : 0xF8 (11111000, refusej par getUIntLat) suivi de 8 octets, sinon un EntierULat
+    if (m_end - m_ptr < 1) throw OutReadBufferException("in read buffer (G64) " + getFileName());
+    if (m_ptr[0] != 0xF8) return getUIntLat();
+    m_ptr += 1;
+    const uint64_t value = getInt8();
+    //forme canonique : une valeur sous 2^32 s'ejcrit en EntierULat
+    if (value <= 0xFFFFFFFFull) throw OutReadBufferException("in read buffer (H64) " + getFileName());
+    return value;
+}
+////////////////////////////////////////////////////////////
 //brief Get an unsigned latecon integer from internal buffer
 //return 4-bytes unsigned integer */
 unsigned int NindReadBuffer::getUIntLat()
