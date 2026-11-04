@@ -483,7 +483,8 @@ private:
     // Scores are accumulated in another order than NindEngine._bm25_score: every comparison with
     // theta has a margin far above the rounding errors, and the candidates kept are scored again,
     // exactly, in query order (identical scores and ranks).
-    // false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0.
+    // false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0, a
+    // long list without blocks (format v1).
     static constexpr double PRUNING_MARGIN = 1e-9;
     static const size_t ESSENTIAL_READ_AHEAD = 16;      //blocks read at once from an essential list
     struct MaxScoreTerm {
@@ -534,6 +535,8 @@ private:
             const NindTermIndex::TermDirectory::Category &category = term.directory.categories[0];
             term.idf = idfOf(category.docsNb);
             if (!(term.idf > 0)) return false;
+            //a format v1 file: every list inline, a long one would be read whole as one block
+            if (category.blocks.empty() && category.inlinePostings.size() > NindTermIndex::BLOCK_SIZE) return false;
             for (size_t o = 0; o < occurrences.size(); o++) if (occurrences[o] == d) term.multiplicity++;
             if (!category.blocks.empty()) {
                 term.blocksNb = category.blocks.size();

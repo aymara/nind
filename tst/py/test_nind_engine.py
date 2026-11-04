@@ -989,7 +989,11 @@ def answers(engine):
     return [(engine.search(q, top_k=20), engine.bm25_score(q, 3), engine.get_df(q.split()[0])) for q in CONCURRENCY_QUERIES]
 
 
-def test_concurrent_searches_answer_like_sequential_ones(tmp_path):
+@pytest.mark.parametrize("pruning", [False, True])
+def test_concurrent_searches_answer_like_sequential_ones(tmp_path, monkeypatch, pruning):
+    if pruning:         # (block-max MaxScore: the native scorer's other path)
+        from nind import nind_engine
+        monkeypatch.setattr(nind_engine, "PRUNING_DOCS_PER_RESULT", 1)
     _, engine = build_with(tmp_path, "concurrent", concurrency_corpus(1))
     expected = answers(engine)
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1062,6 +1066,31 @@ def test_block_max_pruning_returns_the_exhaustive_top_k(tmp_path):
             assert pruned == everything[:k], (query, k)
             assert snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k) == everything[:k], (query, k)
 
+
+
+def test_block_max_pruning_on_a_format_v1_term_index():
+    # format v1 (every list inline, read-only): the same results as the exhaustive search
+    import itertools
+    from array import array
+    golden = os.path.join(os.path.dirname(__file__), "..", "cpp", "unit", "NindIndex", "golden", "v1", "golden")
+    term_index = native.NindTermIndex(golden, is_writer=False, lexicon_identification=native.Identification(0, 0),
+                                      specifics_number=2)
+    terms = {}
+    for ident in range(1, 13):
+        definition = term_index.get_term_def(ident)
+        if definition:
+            terms[ident] = definition
+    doc_ids = sorted({d.ident for definition in terms.values() for category in definition for d in category.documents})
+    lengths = [1 + doc_id % 17 for doc_id in doc_ids]
+    scorer = native.Bm25Scorer(array('Q', doc_ids), array('I', lengths), sum(lengths) / len(lengths))
+    single = [ident for ident, definition in terms.items() if len(definition) == 1]
+    assert len(single) >= 3
+    queries = [[i] for i in terms] + [list(q) for q in itertools.combinations(terms, 2)]
+    queries += [list(q) for q in itertools.combinations(single, 3)] + [[single[0], single[0], single[1]]]
+    for query in queries:
+        everything = scorer.search(term_index, query, 1.2, 0.75, -1)
+        for k in (1, 2, 3, 5):
+            assert scorer.search(term_index, query, 1.2, 0.75, k, prune=True) == everything[:k], (query, k)
 
 
 def test_engine_search_prunes_when_k_is_small_for_the_corpus(tmp_path, monkeypatch):

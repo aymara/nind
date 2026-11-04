@@ -443,10 +443,15 @@ dynamic **block-max MaxScore**, document at a time
   query order. The results are identical (scores and ties) to the exhaustive
   search on FiQA, MS MARCO 1M and 4M, at k = 10 and k = 1000.
 - **Fallback to the exhaustive search**: a term in several categories, an
-  idf ≤ 0, k ≤ 0, k1 < 0, or b outside [0, 1].
+  idf ≤ 0, k ≤ 0, k1 < 0, b outside [0, 1], or a long list without blocks.
+  The last one can only come from a format v1 file: v2 writers keep at most
+  128 postings inline. Such a list would otherwise be read whole as a single
+  block.
 
 The native scorer's search times (µs per query, single thread, MS MARCO without
-stopwords):
+stopwords). Each row's four numbers come from the same run. Absolute times vary
+by about 20% between runs on this machine (the first version's figures above
+come from another run):
 
 | corpus | top 10, exhaustive | top 10, MaxScore | top 1000, exhaustive | top 1000, MaxScore |
 |---|---|---|---|---|
