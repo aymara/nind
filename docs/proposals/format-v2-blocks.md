@@ -513,6 +513,15 @@ target sizes. It loses only where a corpus has few documents per result
 (FiQA, 1,920 documents per result or fewer). The threshold of 4,000
 documents per result is consistent with every measurement and is kept.
 
+**Bit-packed blocks** (flag 73, nind 3.1). The same corpora, rebuilt; native
+scorer, ms per query, 500 queries, ULat blocks → packed blocks. The results
+are identical:
+
+| MS MARCO, stopwords removed | index size | exhaustive | MaxScore top 10 | MaxScore top 100 | MaxScore top 1000 |
+|---|---|---|---|---|---|
+| 4M | 480 → 396 MB (−18%) | 10.4 → 8.4 | 3.27 → 2.44 (−25%) | 5.33 → 4.07 | 8.11 → 6.61 |
+| 8.8M | 1039 → 849 MB (−18%) | 26.0 → 21.7 | 6.24 → 4.89 (−22%) | 10.6 → 8.07 | 16.4 → 12.1 (−26%) |
+
 Still open:
 
 - **Faster large k.** Use the exhaustive search below a document count, or

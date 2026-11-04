@@ -18,7 +18,8 @@ of 3.0.0 (format v2).
   lengths side files rewritten whole; and a first update after a build
   rewrites its touched terms whole (builds leave no room: an option to leave
   some?).
-- [ ] Bit-packed blocks (Lucene-like): faster decoding than varints.
+- [x] Bit-packed blocks (flag 73): 18% smaller index, MaxScore 19–26% faster
+  (nind ≥ 3.1 needed to read them).
 - [ ] Everything in the C++ API (Amose and other clients use it directly):
   move `Bm25Scorer` (block-max MaxScore) and `IndexBuilder` out of
   `src/cpp/NindPy/bindings.cpp` into the `NindIndex` library, and
