@@ -335,7 +335,13 @@ class NindEngine:
     Safe to use while the index is being rebuilt, and from several threads:
     each call answers from one complete build of the index, and switches to
     a newer build as soon as one is published - nothing to reopen or close.
-    Calls from several threads are serialized.
+    Calls from several threads run in parallel (the native reads are
+    thread-safe and release the GIL); a call started before a new build is
+    published finishes on the build it started with. The low-level objects
+    returned by :attr:`lexicon`, :attr:`term_index` and :attr:`local_index`
+    are thread-safe for their lookups (``donneIdentifiant``,
+    ``donneListeTermesCG``, ``donneListeTermes``), not for their diagnostic
+    methods (``dumpeFichier``, ``afficheTerme``...).
     """
 
     def __init__(self, index_dir, prefix=None):
@@ -352,21 +358,34 @@ class NindEngine:
         """
         self.index_dir = index_dir
         self._store = IndexStore(index_dir, prefix or IndexStore.find_prefix(index_dir))
-        self._lock = threading.RLock()
-        self._depth = 0
-        self._snapshot, self._version = self._store.open_current(_Snapshot)
+        # (snapshot, version), replaced as a whole when a new build is published
+        self._state = self._store.open_current(_Snapshot)
+        self._switch_lock = threading.Lock()
+        # the snapshot of the outermost public call running in each thread (nested calls reuse it)
+        self._calls = threading.local()
+
+    @property
+    def _snapshot(self):
+        return self._state[0]
 
     @contextlib.contextmanager
     def _session(self):
-        # outermost public call: switch to a newly published build, then answer from one snapshot
-        with self._lock:
-            self._depth += 1
-            try:
-                if self._depth == 1 and self._store.current_version() != self._version:
-                    self._snapshot, self._version = self._store.open_current(_Snapshot)
-                yield self._snapshot
-            finally:
-                self._depth -= 1
+        calls = self._calls
+        if getattr(calls, "snapshot", None) is not None:
+            # a public call inside another one, in this thread: same snapshot
+            yield calls.snapshot
+            return
+        # outermost public call: switch to a newly published build (one stat when there's none),
+        # then answer from one snapshot; other threads' calls run meanwhile on theirs
+        if self._store.current_version() != self._state[1]:
+            with self._switch_lock:
+                if self._store.current_version() != self._state[1]:
+                    self._state = self._store.open_current(_Snapshot)
+        calls.snapshot = self._state[0]
+        try:
+            yield calls.snapshot
+        finally:
+            calls.snapshot = None
 
     @property
     def lexicon(self):

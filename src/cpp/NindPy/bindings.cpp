@@ -34,6 +34,8 @@
 #include <unordered_map>
 #include <cmath>
 #include <mutex>
+#include <thread>
+#include <memory>
 #include "NindExceptions.h"
 ////////////////////////////////////////////////////////////
 namespace py = pybind11;
@@ -261,6 +263,12 @@ private:
     uint32_t m_maxTermId;
 };
 
+// The thread-safe (const) reads of readers each use a buffer of their own (see NindFile::readAt):
+// a local one for a single lookup, the pooled scratch's for a search. Not a thread_local: in a
+// dynamically loaded module, every access to one may cost a __tls_get_addr call, and with
+// link-time optimization the compiler recomputed its address in the decoding loops (11% of a
+// search's instructions).
+
 // Okapi BM25 over the postings of a term index: see the Bm25Scorer binding below.
 // Flat arrays only: documents are numbered by their position in the corpus order (dense table
 // from document id, or binary search when ids are too sparse for one), scores are accumulated
@@ -273,7 +281,7 @@ public:
     // the documents of the corpus, in the order that breaks score ties
     Bm25Scorer(const UIntView &docIds, const UIntView &lengths, const double avgDocLength):
         m_docIds(), m_lengths(), m_dense(), m_sparse(), m_docsNb(docIds.size), m_avgDocLength(avgDocLength),
-        m_mutex(), m_scores(), m_stamps(), m_stamp(0)
+        m_poolMutex(), m_pool()
     {
         if (docIds.size != lengths.size) throw py::value_error("doc_ids and lengths must have the same length");
         if (docIds.size >= NO_POSITION) throw py::value_error("too many documents");
@@ -304,20 +312,18 @@ public:
 
     // the documents with a positive score for the query terms (in query order, repeats
     // included, 0 = unknown term), by decreasing score, at most topK if topK >= 0
-    std::vector<std::pair<uint32_t, double> > search(NindTermIndex &termIndex,
+    std::vector<std::pair<uint32_t, double> > search(const NindTermIndex &termIndex,
                                                      const std::vector<unsigned int> &termIds,
                                                      const double k1, const double b,
                                                      const long topK) const
     {
         py::gil_scoped_release release;
-        // the scratch arrays of this scorer, or private ones if another search holds them
-        std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
-        std::vector<double> localScores;
-        std::vector<uint32_t> localStamps;
-        uint32_t localStamp = 0;
-        std::vector<double> &scores = lock.owns_lock() ? m_scores : localScores;
-        std::vector<uint32_t> &stamps = lock.owns_lock() ? m_stamps : localStamps;
-        uint32_t &stamp = lock.owns_lock() ? m_stamp : localStamp;
+        // scratch arrays and read buffer from the pool: concurrent searches each get their own
+        ScratchLease lease(*this);
+        NindReadBuffer &buffer = lease.scratch->buffer;
+        std::vector<double> &scores = lease.scratch->scores;
+        std::vector<uint32_t> &stamps = lease.scratch->stamps;
+        uint32_t &stamp = lease.scratch->stamp;
         if (scores.size() != m_docsNb) scores.assign(m_docsNb, 0.0);
         std::vector<uint32_t> touched;          // positions whose score isn't 0 any more
 
@@ -334,7 +340,7 @@ public:
             const size_t index = found.first->second;
             if (found.second) {
                 postings.push_back(std::vector<std::pair<uint32_t, uint32_t> >());
-                termIndex.getTermPostings(termIds[t], read, categoryEnds);
+                termIndex.getTermPostings(termIds[t], read, categoryEnds, buffer);
                 // df counts the documents of every category
                 dfs.push_back((uint64_t)read.size());
                 std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings.back();
@@ -407,11 +413,40 @@ private:
     std::vector<std::pair<uint32_t, uint32_t> > m_sparse;   //(document id, position), by id, when not dense
     size_t m_docsNb;
     double m_avgDocLength;
-    // scratch arrays reused by successive searches (all zero / unmarked between searches)
-    mutable std::mutex m_mutex;
-    mutable std::vector<double> m_scores;
-    mutable std::vector<uint32_t> m_stamps;
-    mutable uint32_t m_stamp;
+    // scratch arrays reused by successive searches (all zero / unmarked between searches): a
+    // pool, so that concurrent searches each have their own; at most one per hardware thread kept
+    struct Scratch {
+        std::vector<double> scores;
+        std::vector<uint32_t> stamps;
+        uint32_t stamp;
+        NindReadBuffer buffer;          //for the term index's const reads
+        Scratch(): scores(), stamps(), stamp(0), buffer() {}
+    };
+    struct ScratchLease {
+        const Bm25Scorer &scorer;
+        std::unique_ptr<Scratch> scratch;
+        explicit ScratchLease(const Bm25Scorer &s): scorer(s), scratch() {
+            {
+                std::lock_guard<std::mutex> lock(scorer.m_poolMutex);
+                if (!scorer.m_pool.empty()) {
+                    scratch = std::move(scorer.m_pool.back());
+                    scorer.m_pool.pop_back();
+                }
+            }
+            if (!scratch) scratch.reset(new Scratch());
+        }
+        ~ScratchLease() {
+            // only clean scratch arrays go back (an exception may have left scores behind)
+            if (!scratch) return;
+            if (std::uncaught_exception()) return;
+            scratch->buffer.shrink();       //a large definition's storage isn't kept
+            std::lock_guard<std::mutex> lock(scorer.m_poolMutex);
+            const size_t maxKept = std::max(1u, std::thread::hardware_concurrency());
+            if (scorer.m_pool.size() < maxKept) scorer.m_pool.push_back(std::move(scratch));
+        }
+    };
+    mutable std::mutex m_poolMutex;
+    mutable std::vector<std::unique_ptr<Scratch> > m_pool;
 };
 }
 ////////////////////////////////////////////////////////////
@@ -506,7 +541,13 @@ PYBIND11_MODULE(_native, m) {
         .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
-        .def("get_word_id", static_cast<unsigned int (NindLexiconIndex::*)(const std::list<std::string> &)>(&NindLexiconIndex::getWordId), py::arg("components"))
+        .def("get_word_id", [](NindLexiconIndex &self, const std::list<std::string> &components) {
+            // a reader: thread-safe const path, GIL released; a writer: the sequential API
+            if (self.isWriter()) return self.getWordId(components);
+            py::gil_scoped_release release;
+            NindReadBuffer buffer;
+            return self.getWordId(components, buffer);
+        }, py::arg("components"))
         .def("get_identification", &NindLexiconIndex::getIdentification)
         .def("get_modulo", &NindLexiconIndex::getModulo)
         .def("get_components", [](NindLexiconIndex &self, unsigned int ident) -> py::object {
@@ -554,7 +595,14 @@ PYBIND11_MODULE(_native, m) {
              py::arg("indirection_bloc_size") = 0)
         .def("get_term_def", [](NindTermIndex &self, unsigned int ident) -> py::object {
             std::list<NindTermIndex::TermCG> termDef;
-            if (!self.getTermDef(ident, termDef)) return py::none();
+            bool found;
+            if (self.isWriter()) found = self.getTermDef(ident, termDef);
+            else {
+                py::gil_scoped_release release;
+                NindReadBuffer buffer;
+                found = self.getTermDef(ident, termDef, buffer);
+            }
+            if (!found) return py::none();
             return py::cast(termDef);
         }, py::arg("ident"))
         .def("get_specific_words", [](NindTermIndex &self) {
@@ -642,7 +690,14 @@ PYBIND11_MODULE(_native, m) {
              py::arg("lexicon_identification"), py::arg("indirection_bloc_size") = 0)
         .def("get_local_def", [](NindLocalIndex &self, unsigned int ident) -> py::object {
             std::list<NindLocalIndex::Term> localDef;
-            if (!self.getLocalDef(ident, localDef)) return py::none();
+            bool found;
+            if (self.isWriter()) found = self.getLocalDef(ident, localDef);
+            else {
+                py::gil_scoped_release release;
+                NindReadBuffer buffer;
+                found = self.getLocalDef(ident, localDef, buffer);
+            }
+            if (!found) return py::none();
             return py::cast(localDef);
         }, py::arg("ident"))
         .def("get_local_length", [](NindLocalIndex &self, unsigned int ident) -> py::object {
@@ -881,7 +936,8 @@ PYBIND11_MODULE(_native, m) {
     // ---- Bm25Scorer -------------------------------------------------------
     // Okapi BM25 search driven by the postings of the query terms (only the documents
     // containing them are scored). Built once per index from its documents' lengths;
-    // search() reads the term index (not thread-safe: one search at a time per reader)
+    // search() reads the term index on its thread-safe path (NindFile::readAt): several threads
+    // can search one reader at once, each with its own scratch arrays (one pool per scorer)
     // with the GIL released.
     py::class_<Bm25Scorer>(m, "Bm25Scorer")
         .def(py::init([](const py::buffer &docIds, const py::buffer &lengths, double avgDocLength) {

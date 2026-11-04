@@ -12,6 +12,7 @@ the run's working directory.
   with the hash-map scorer before `453caeb` (the "before" numbers).
 - `report.md`, `report.csv`: every column, per dataset (`driver.py --report-only`).
 - `report-compact.md`: the columns of the README tables.
+- `concurrency.jsonl`: `concurrency.py` before/after the thread-safe readers (README section 5).
 - `extrapolation.md`: `extrapolate.py` on the stopword-free MS MARCO sizes,
   every system.
 

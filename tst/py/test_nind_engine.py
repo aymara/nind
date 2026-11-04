@@ -965,3 +965,55 @@ def test_document_names_are_stored_compactly(tmp_path):
     names_file = generations(tmp_path / "jsonl")[0] / "corpus.ninddocnames"
     # consecutive document ids aren't stored: 8 bytes per document plus the names
     assert names_file.stat().st_size == 20 + 4 + 8 * 2000 + sum(len(r["id"]) for r in records)
+
+
+# -- concurrent searches ----------------------------------------------------------
+
+from concurrent.futures import ThreadPoolExecutor
+
+
+def concurrency_corpus(seed, n=400):
+    rng = random.Random(seed)
+    words = ["c%d" % i for i in range(60)]
+    return [" ".join(rng.choice(words[:rng.randint(5, 60)]) for _ in range(rng.randint(1, 40))) for _ in range(n)]
+
+
+CONCURRENCY_QUERIES = ["c0", "c1 c2", "c3 c3 c4", "c59 unknown", "c10 c20 c30 c40 c50"] + \
+    ["c%d c%d" % (i, i + 7) for i in range(0, 50, 3)]
+
+
+def answers(engine):
+    """Everything a query computes: the results, and a few scores and statistics."""
+    return [(engine.search(q, top_k=20), engine.bm25_score(q, 3), engine.get_df(q.split()[0])) for q in CONCURRENCY_QUERIES]
+
+
+def test_concurrent_searches_answer_like_sequential_ones(tmp_path):
+    _, engine = build_with(tmp_path, "concurrent", concurrency_corpus(1))
+    expected = answers(engine)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for got in pool.map(lambda _: answers(engine), range(64)):
+            assert got == expected
+
+
+def test_concurrent_searches_while_a_new_build_is_published(tmp_path):
+    # every call answers from one build: the old one or the new one, never a mix
+    indexer, engine = build_with(tmp_path, "switch", concurrency_corpus(2))
+    old = [engine.search(q, top_k=20) for q in CONCURRENCY_QUERIES]
+    new_texts = concurrency_corpus(3)
+    # the new build, computed apart
+    _, reference = build_with(tmp_path, "reference", new_texts)
+    new = [reference.search(q, top_k=20) for q in CONCURRENCY_QUERIES]
+    assert old != new
+
+    def one_pass(_):
+        return [engine.search(q, top_k=20) for q in CONCURRENCY_QUERIES]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(one_pass, i) for i in range(200)]
+        indexer.index_files(write_texts(tmp_path / "switch-new", new_texts))
+        results = [f.result() for f in futures]
+    for passes in results:
+        for i, result in enumerate(passes):
+            assert result in (old[i], new[i])
+    # once published, every new call answers from the new build
+    assert one_pass(0) == new

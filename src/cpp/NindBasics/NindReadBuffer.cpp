@@ -43,8 +43,8 @@ void NindReadBuffer::clear()
 unsigned char *NindReadBuffer::prepare(const unsigned int bytesNb)
 {
     clear();
-    //rejutilise la place si elle suffit et n'est pas trop grande, sinon la remplace
-    if (bytesNb > m_capacity || m_capacity > MAX_KEPT_CAPACITY) {
+    //rejutilise la place si elle suffit (shrink() libehre une grande place)
+    if (bytesNb > m_capacity) {
         delete [] m_storage;
         m_storage = 0;
         m_capacity = 0;

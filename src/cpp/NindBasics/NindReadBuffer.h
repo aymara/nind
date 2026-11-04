@@ -25,8 +25,8 @@ namespace latecon {
 * Every decoder checks the bytes it reads are inside the buffer (OutReadBufferException).
 * NindFile owns one for its sequential reads; a thread-safe read (NindFile::readAt) fills one
 * owned by its caller, so concurrent reads of one file don't share a buffer.
-* Capacity is reused from one read to the next up to MAX_KEPT_CAPACITY; a larger buffer is
-* freed by the next prepare() or by shrink(). Not copyable. */
+* Capacity is reused from one read to the next; shrink() frees it if larger than
+* MAX_KEPT_CAPACITY (for buffers kept between calls). Not copyable. */
 class DLLExportLexicon NindReadBuffer {
 public:
     /**\brief largest capacity kept between reads (bytes) */

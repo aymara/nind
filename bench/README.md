@@ -436,6 +436,37 @@ corpus keeps MS MARCO's statistics, and **ignore format limits** (see below):
   hit's stored `docid` and building one Java object per hit for pyjnius: k=10
   is the comparable figure.
 
+## 5. Concurrent searches (`bench/retrieval/concurrency.py`)
+
+Queries per second of one `NindEngine` shared by 1 to 16 threads
+(`ThreadPoolExecutor`), on indexes built by `worker.py` (FiQA and the 1M-passage
+MS MARCO prefix, stopwords removed; 2000 queries, k=10, after a warm-up):
+
+```bash
+bench-env/bin/python bench/retrieval/concurrency.py WORK/fiqa-stop/nind/index data/fiqa-stop/queries.tsv \
+    [--threads 1 2 4 8 16] [--queries 2000]
+```
+
+Before: `NindEngine` serialized every call (one lock; the native readers
+weren't thread-safe). After: the thread-safe readers
+(`docs/proposals/thread-safe-readers.md`): positioned reads into per-call
+buffers, the GIL released during every native read, `Bm25Scorer` scratch arrays
+from a pool. Same laptop as section 4 (20 hardware threads):
+
+| threads | FiQA before | FiQA after | p99 after (ms) | MS MARCO 1M before | MS MARCO 1M after | p99 after (ms) |
+|---|---|---|---|---|---|---|
+| 1 | 1846 | 1815 | 1.4 | 600 | 591 | 6.9 |
+| 2 | 1965 | 3745 | 1.4 | 594 | 985 | 7.7 |
+| 4 | 1922 | 6095 | 2.3 | 585 | 1509 | 9.7 |
+| 8 | 1823 | 8619 | 3.2 | 553 | 1774 | 19.3 |
+| 16 | 1836 | 9750 | 4.6 | 572 | 1925 | 31.7 |
+
+Single-thread throughput is unchanged; 16 threads give 5.4x on FiQA and 3.3x
+on MS MARCO 1M, where each concurrent search scores into its own array of
+1M documents (memory bandwidth); the tail latency drops from hundreds of
+milliseconds (calls queuing behind the lock) to a few. Raw results:
+`bench/retrieval/results/2026-11-04/concurrency.jsonl`.
+
 ## Notes
 
 - `gbuild.sh` installs binaries with an empty RPATH (see the top-level
