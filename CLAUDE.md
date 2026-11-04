@@ -123,6 +123,8 @@ Binary file formats are specified in EBNF grammar (see README). The Python packa
 
 ## Planned follow-up work
 
+The current to-do list, kept up to date, is `docs/TODO.md`; the items below are the detailed notes behind some of them.
+
 **Extend `nind._native` to cover the remaining per-format diagnostics.** The shared structural-diagnostic base (`NindPadFile.analyseFichierPadFile`/`NindIndex.analyseFichierIndex`) is already migrated (`NindPadFile::analysePadFile`/`NindIndex::analyseIndex` in C++, bound as `analyse_pad_file`/`analyse_index`, both returning structured stats objects — `PadFileStats`, `IndexStats`, `HoleStats`, `BlockStats`, `Repartition` — that Python formats/prints exactly as before). None of the following exist in C++ today; each needs the same treatment (new C++ method returning a small structured-data object in the style of the existing `TermCG`/`Document`/`Term`/`Localisation`/`PadFileStats`/`IndexStats` bindings, bound in `src/cpp/NindPy/bindings.cpp`, then the Python method rewritten to source its data from the native call while keeping today's print/write-to-file formatting unchanged):
 
 - `NindLexiconIndex` (backs `NindLexiconindex.py`): `analyseFichierLexiconindex`'s own per-bucket/compound-word stats (beyond the now-native `analyseFichierIndex` base it calls first), `dumpeFichier`, `debogueIndex`, `donneCollisions`, `donneMax`, `donneClef`.
