@@ -120,8 +120,8 @@ def main():
 # <dejfinitionMot>        ::= <motComposej> | <motSimple>
 # <motComposej>           ::= <flagComposej=31> <identifiantA> <identifiantS>
 # <flagComposej=31>       ::= <Entier1>
-# <identifiantA>          ::= <Entier3>
-# <identifiantS>          ::= <Entier3>
+# <identifiantA>          ::= <Entier4>
+# <identifiantS>          ::= <Entier4>
 # <motSimple>             ::= <flagSimple=37> <longueurMotUtf8> <adresseMotUtf8>
 # <flagSimple=37>         ::= <Entier1>
 # <longueurMotUtf8>       ::= <Entier1>
