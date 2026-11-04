@@ -218,6 +218,7 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         sort(shardTerms.begin(), shardTerms.end());
         NindTermIndex termIndex(targetName, true, identification, specificsNumber,
                                 m_options.termIndirectionBlocSize ? m_options.termIndirectionBlocSize : stats.wordsNb + 1);
+        termIndex.setDocumentLengths(m_options.documentLengths);
         termIndex.beginBulk();
         size_t first = 0;
         while (first < shardTerms.size()) {

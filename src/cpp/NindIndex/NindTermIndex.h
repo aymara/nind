@@ -156,6 +156,13 @@ public:
     void setSpecificWords(const std::list<unsigned int> &specifics,
                           const Identification &fileIdentification);
 
+    /**\brief (writer, format v2) The documents' lengths, for each block's <longueurMin>: the
+    * shortest length of its documents, 0 (unknown) if one of them has no length here (or no
+    * lengths were given). They must be the lengths a search scores with: a top-k search bounds
+    * the block's contributions with it.
+    *\param lengths (document, length) pairs, in any order (a document given twice: its last one) */
+    void setDocumentLengths(const std::vector<std::pair<NindDocId, unsigned int> > &lengths);
+
 private:
     void decodeTermDef(const unsigned int ident,
                        NindReadBuffer &in,
@@ -190,6 +197,12 @@ public:
 private:
 
     unsigned int m_specificsNumber;
+
+    //the documents' lengths (setDocumentLengths): by id (dense) or (id, length) by id (sparse)
+    std::vector<unsigned int> m_denseLengths;
+    std::vector<std::pair<NindDocId, unsigned int> > m_sparseLengths;
+    //a document's length, 0 if unknown
+    unsigned int documentLength(const NindDocId ident) const;
 
     //brief write specifics footer and identification into write buffer
     //param specifics list of specific unsigned int

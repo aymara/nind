@@ -19,6 +19,7 @@
 // GNU Less General Public License for more details.
 ////////////////////////////////////////////////////////////
 #include "NindTermIndex.h"
+#include <algorithm>
 //#include <iostream>
 using namespace latecon::nindex;
 using namespace std;
@@ -86,7 +87,9 @@ NindTermIndex::NindTermIndex(const std::string &fileNameExtensionLess,
               specificsNumber * 4,
               TAILLE_DEJFINITION_MINIMUM, 
               indirectionBlocSize),
-    m_specificsNumber(specificsNumber)
+    m_specificsNumber(specificsNumber),
+    m_denseLengths(),
+    m_sparseLengths()
 {
 }
 ////////////////////////////////////////////////////////////
@@ -510,13 +513,17 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
             const size_t begin = b * BLOCK_SIZE;
             const size_t end = (begin + BLOCK_SIZE < docsNb) ? begin + BLOCK_SIZE : docsNb;
             unsigned int maxFrequency = 0;
-            for (size_t d = begin; d < end; d++)
+            //the shortest document, 0 if one is unknown (or no lengths)
+            unsigned int minLength = (m_denseLengths.empty() && m_sparseLengths.empty()) ? 0 : ~0u;
+            for (size_t d = begin; d < end; d++) {
                 if (documents[d].frequency > maxFrequency) maxFrequency = documents[d].frequency;
+                if (minLength != 0) minLength = min(minLength, documentLength(documents[d].ident));
+            }
             m_file.putUIntLat64(documents[begin].ident - previousLast);
             m_file.putUIntLat64(documents[end - 1].ident - documents[begin].ident);
             m_file.putUIntLat(end - begin);
             m_file.putUIntLat(maxFrequency);
-            m_file.putUIntLat(0);                   //<longueurMin> : unknown here
+            m_file.putUIntLat(minLength);           //<longueurMin>
             pending.push_back(Pending{categoryDocuments.size() - 1, (*it1).cg, begin, end, m_file.getOutBufferSize()});
             m_file.putInt4(0);                      //<offsetBloc>, patched below
             m_file.putInt4(0);                      //<longueurBloc>, patched below
@@ -656,5 +663,41 @@ void NindTermIndex::writeSpecificsAndIdentification(const list<unsigned int> &sp
     for(list<unsigned int>::const_iterator specIt = specifics.begin(); specIt != specifics.end(); specIt++)
         m_file.putInt4(*specIt);
     writeIdentification(fileIdentification);
+}
+////////////////////////////////////////////////////////////
+//brief (writer) the documents' lengths, for the blocks' <longueurMin>
+void NindTermIndex::setDocumentLengths(const vector<pair<NindDocId, unsigned int> > &lengths)
+{
+    m_denseLengths.clear();
+    m_sparseLengths.clear();
+    if (lengths.empty()) return;
+    NindDocId maxIdent = 0;
+    for (size_t i = 0; i < lengths.size(); i++) maxIdent = max(maxIdent, lengths[i].first);
+    //dense when the ids are (about) consecutive: a table by id
+    if (maxIdent < 2 * (NindDocId)lengths.size() + 1024) {
+        m_denseLengths.assign((size_t)maxIdent + 1, 0);
+        for (size_t i = 0; i < lengths.size(); i++) m_denseLengths[(size_t)lengths[i].first] = lengths[i].second;
+        return;
+    }
+    m_sparseLengths = lengths;
+    stable_sort(m_sparseLengths.begin(), m_sparseLengths.end(),
+                [](const pair<NindDocId, unsigned int> &a, const pair<NindDocId, unsigned int> &b) { return a.first < b.first; });
+    //a document given twice: its last length
+    vector<pair<NindDocId, unsigned int> > unique;
+    for (size_t i = 0; i < m_sparseLengths.size(); i++) {
+        if (!unique.empty() && unique.back().first == m_sparseLengths[i].first) unique.back() = m_sparseLengths[i];
+        else unique.push_back(m_sparseLengths[i]);
+    }
+    m_sparseLengths.swap(unique);
+}
+////////////////////////////////////////////////////////////
+//a document's length, 0 if unknown
+unsigned int NindTermIndex::documentLength(const NindDocId ident) const
+{
+    if (!m_denseLengths.empty()) return ident < m_denseLengths.size() ? m_denseLengths[(size_t)ident] : 0;
+    const vector<pair<NindDocId, unsigned int> >::const_iterator it = lower_bound(m_sparseLengths.begin(), m_sparseLengths.end(),
+        pair<NindDocId, unsigned int>(ident, 0),
+        [](const pair<NindDocId, unsigned int> &a, const pair<NindDocId, unsigned int> &b) { return a.first < b.first; });
+    return (it != m_sparseLengths.end() && it->first == ident) ? it->second : 0;
 }
 ////////////////////////////////////////////////////////////

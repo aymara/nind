@@ -1185,3 +1185,43 @@ def test_documents_with_64_bit_ids_are_replaced_and_removed(tmp_path, local_inde
         assert sorted(t.term for t in local.get_local_def(big)) == sorted(local.get_term_idents(big))
         assert local.get_local_def(2 ** 64 - 1) is None
     assert native.verify_index(engine._snapshot.base, cross_check=True).ok
+
+
+def assert_blocks_hold_their_shortest_document(engine):
+    # every block's min_length is its documents' shortest length (the lengths the engine scores with)
+    engine.search("common")                 # (switches to the last published build)
+    snapshot = engine._snapshot
+    term_index = snapshot.term_index._native
+    lengths = snapshot._doc_lengths
+    blocks = 0
+    for term_id in range(1, snapshot.lexicon._native.get_identification().lexicon_words_nb + 1):
+        for category in term_index.get_term_directory(term_id) or ():
+            if not category.blocks:
+                continue
+            postings = [d.ident for d in term_index.get_term_def(term_id)[0].documents]
+            for block in category.blocks:
+                docs = [d for d in postings if block.first <= d <= block.last]
+                assert len(docs) == block.docs_nb
+                assert block.min_length == min(lengths[d] for d in docs), (term_id, block.first)
+                blocks += 1
+    assert native.verify_index(snapshot.base, cross_check=True).ok
+    return blocks
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"shards": 3, "workers": 2}])
+def test_blocks_hold_their_shortest_document(tmp_path, kwargs):
+    # format v2 <longueurMin>: written by builds, sharded builds and updates (a top-k search
+    # bounds a block's contributions with it)
+    rng = random.Random(3)
+    texts = ["common " + " ".join(rng.choice(["x", "y", "z", "w%d" % i]) for _ in range(rng.randint(1, 30)))
+             for i in range(700)]
+    indexer, engine = build_with(tmp_path, "minlen", texts, **kwargs)
+    assert assert_blocks_hold_their_shortest_document(engine) >= 5     # "common": 6 blocks at least
+    # documents made shorter (the shortest of their blocks), one removed, one added
+    short = write_texts(tmp_path / "short", ["common", "common x"])
+    with indexer.update() as update:
+        update.add_file(short[0], doc_id=200)
+        update.add_file(short[1], doc_id=450)
+        update.remove(10)
+        update.add_file(short[1], doc_id=5000)
+    assert assert_blocks_hold_their_shortest_document(engine) >= 5

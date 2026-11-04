@@ -103,6 +103,16 @@ DocIdsView docIdsView(const py::buffer &buffer, const char *name)
     view.size = size;
     return view;
 }
+// (document, length) pairs from two buffers of the same size (ids 'I' or 'Q', lengths 'I')
+std::vector<std::pair<NindDocId, unsigned int> > docLengthPairs(const py::buffer &docIds, const py::buffer &lengths)
+{
+    const DocIdsView ids = docIdsView(docIds, "doc_ids");
+    const UIntView lens = uintView(lengths, "lengths");
+    if (ids.size != lens.size) throw py::value_error("doc_ids and lengths must have the same length");
+    std::vector<std::pair<NindDocId, unsigned int> > pairs(ids.size);
+    for (size_t i = 0; i < ids.size; i++) pairs[i] = std::make_pair((NindDocId)ids.data[i], lens.data[i]);
+    return pairs;
+}
 // validates a batch's end offsets: ascending, the last one == itemsNb
 void checkEnds(const UIntView &ends, const size_t itemsNb, const char *name)
 {
@@ -231,6 +241,16 @@ public:
     {
         py::gil_scoped_release release;
         const std::list<unsigned int> noSpecifics;
+        //0) the documents' lengths (their tokens: what NindEngine scores with), for the blocks
+        {
+            std::vector<std::pair<NindDocId, unsigned int> > lengths(m_docIds.size());
+            size_t previous = 0;
+            for (size_t d = 0; d < m_docIds.size(); d++) {
+                lengths[d] = std::make_pair((NindDocId)m_docIds[d], (unsigned int)(m_docEnds[d] - previous));
+                previous = m_docEnds[d];
+            }
+            termIndex.setDocumentLengths(lengths);
+        }
         //1) occurrences of each term in each document, counted per document
         std::vector<uint32_t> counts(m_maxTermId + 1, 0);
         std::vector<uint32_t> touched;
@@ -875,11 +895,40 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("frequency", &NindTermIndex::TermCG::frequency)
         .def_readwrite("documents", &NindTermIndex::TermCG::documents);
 
+    // format v2 blocks, as a term's directory describes them (get_term_directory)
+    py::class_<NindTermIndex::Block>(m, "Block")
+        .def_readonly("first", &NindTermIndex::Block::first)
+        .def_readonly("last", &NindTermIndex::Block::last)
+        .def_readonly("docs_nb", &NindTermIndex::Block::docsNb)
+        .def_readonly("max_frequency", &NindTermIndex::Block::maxFrequency)
+        .def_readonly("min_length", &NindTermIndex::Block::minLength)
+        .def_readonly("offset", &NindTermIndex::Block::offset)
+        .def_readonly("length", &NindTermIndex::Block::length);
+    py::class_<NindTermIndex::TermDirectory::Category>(m, "DirectoryCategory")
+        .def_readonly("cg", &NindTermIndex::TermDirectory::Category::cg)
+        .def_readonly("frequency", &NindTermIndex::TermDirectory::Category::frequency)
+        .def_readonly("docs_nb", &NindTermIndex::TermDirectory::Category::docsNb)
+        .def_readonly("inline_postings", &NindTermIndex::TermDirectory::Category::inlinePostings)
+        .def_readonly("blocks", &NindTermIndex::TermDirectory::Category::blocks);
+
     py::class_<NindTermIndex>(m, "NindTermIndex")
         .def(py::init<const std::string &, bool, const NindPadFile::Identification &, unsigned int, unsigned int>(),
              py::arg("file_name_extensionless"), py::arg("is_writer"),
              py::arg("lexicon_identification"), py::arg("specifics_number"),
              py::arg("indirection_bloc_size") = 0)
+        // a term's directory (format v2: blocks' descriptors, not their postings; v1: every
+        // posting inline), per category; None if the term has no definition
+        .def("get_term_directory", [](const NindTermIndex &self, unsigned int ident) -> py::object {
+            NindTermIndex::TermDirectory directory;
+            bool found;
+            {
+                py::gil_scoped_release release;
+                NindReadBuffer buffer;
+                found = self.getTermDirectory(ident, directory, buffer);
+            }
+            if (!found) return py::none();
+            return py::cast(directory.categories);
+        }, py::arg("ident"))
         .def("get_term_def", [](NindTermIndex &self, unsigned int ident) -> py::object {
             std::list<NindTermIndex::TermCG> termDef;
             bool found;
@@ -964,6 +1013,11 @@ PYBIND11_MODULE(_native, m) {
         }, py::arg("idents"), py::arg("ends"), py::arg("doc_ids"), py::arg("frequencies"),
            py::arg("file_identification"), py::arg("cg") = 0,
            py::arg("specifics") = std::list<unsigned int>())
+        // (writer) the documents' lengths (doc_ids 'I' or 'Q', lengths 'I'), for the blocks'
+        // <longueurMin>: the lengths a search scores with
+        .def("set_document_lengths", [](NindTermIndex &self, const py::buffer &docIds, const py::buffer &lengths) {
+            self.setDocumentLengths(docLengthPairs(docIds, lengths));
+        }, py::arg("doc_ids"), py::arg("lengths"))
         .def("get_file_name", &NindPadFile::getFileName)
         .def("analyse_pad_file", &NindPadFile::analysePadFile)
         .def("analyse_index", &NindIndex::analyseIndex);
@@ -1101,8 +1155,11 @@ PYBIND11_MODULE(_native, m) {
     m.def("merge_indexes", [](const std::vector<std::string> &shards, const std::string &target,
                               const bool withRetrolexicon, const unsigned int lexiconIndirectionBlocSize,
                               const unsigned int retroIndirectionBlocSize, const unsigned int termIndirectionBlocSize,
-                              const unsigned int localIndirectionBlocSize) {
+                              const unsigned int localIndirectionBlocSize, const py::object &docIds,
+                              const py::object &docLengths) {
         NindIndexMerge::Options options;
+        if (!docIds.is_none() || !docLengths.is_none())
+            options.documentLengths = docLengthPairs(docIds.cast<py::buffer>(), docLengths.cast<py::buffer>());
         options.withRetrolexicon = withRetrolexicon;
         options.lexiconIndirectionBlocSize = lexiconIndirectionBlocSize;
         options.retroIndirectionBlocSize = retroIndirectionBlocSize;
@@ -1112,7 +1169,8 @@ PYBIND11_MODULE(_native, m) {
         return NindIndexMerge(shards, options).merge(target);
     }, py::arg("shards"), py::arg("target"), py::arg("with_retrolexicon") = false,
        py::arg("lexicon_indirection_bloc_size") = 0, py::arg("retro_indirection_bloc_size") = 0,
-       py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0);
+       py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0,
+       py::arg("doc_ids") = py::none(), py::arg("doc_lengths") = py::none());
 
     // ---- NindIndexVerify ------------------------------------------------
     py::class_<NindIndexVerify::Report>(m, "VerifyReport")

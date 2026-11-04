@@ -220,6 +220,11 @@ _DOC_LENGTHS_MAGIC = b"NINDDL02"
 _DOC_LENGTHS_MAGIC_V1 = b"NINDDL01"
 
 
+def _lengths_arrays(lengths):
+    """(doc ids, lengths) arrays of a doc id -> length dict, for the native writers."""
+    return array('Q', lengths.keys()), array('I', lengths.values())
+
+
 def _write_doc_lengths(base, lengths):
     """Write ``{document id: length in tokens}`` (documents of length 0 are left out)."""
     doc_ids = array('Q', sorted(doc_id for doc_id, length in lengths.items() if length))
@@ -812,6 +817,13 @@ class IndexUpdate:
             for term, freq in Counter(tokens or ()).items():
                 added[term_to_id[term]][doc_id] = freq
         doc_ids = sorted(pending)
+        for doc_id, tokens in pending.items():
+            if tokens:
+                self._lengths[doc_id] = len(tokens)
+            else:
+                self._lengths.pop(doc_id, None)
+        # the documents' lengths after the update: the rewritten blocks' shortest document
+        term_index.set_document_lengths(*_lengths_arrays(self._lengths))
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(self._update_term_index, term_index, removed, added, identification)]
             if local_index is not None:
@@ -823,11 +835,6 @@ class IndexUpdate:
             writer.end_bulk()
         self._modulo = lexicon.get_modulo()
         self._words_nb = identification.lexicon_words_nb
-        for doc_id, tokens in pending.items():
-            if tokens:
-                self._lengths[doc_id] = len(tokens)
-            else:
-                self._lengths.pop(doc_id, None)
         _write_doc_lengths(self._base, self._lengths)
         _write_meta(self._base, self._tokenizer_options, self._local)
         if self._names or self._had_names:
@@ -922,8 +929,9 @@ class IndexUpdate:
         rebuild_dir = tempfile.mkdtemp(prefix=".rebuild-", dir=os.path.dirname(self._base))
         try:
             rebuilt = os.path.join(rebuild_dir, os.path.basename(self._base))
+            doc_ids, lengths = _lengths_arrays(self._lengths)
             native.merge_indexes([self._base], rebuilt, with_retrolexicon=self._with_retrolexicon,
-                                 lexicon_indirection_bloc_size=lexicon_buckets)
+                                 lexicon_indirection_bloc_size=lexicon_buckets, doc_ids=doc_ids, doc_lengths=lengths)
             for extension in INDEX_EXTENSIONS:
                 if os.path.exists(rebuilt + extension):
                     os.replace(rebuilt + extension, self._base + extension)
@@ -1250,11 +1258,12 @@ class NindIndexer:
                            for i in range(shards)]
                 for future in futures:
                     future.result()
-            native.merge_indexes(shard_bases, base)
             # disjoint documents: the shards' lengths together
             lengths = {}
             for shard_base in shard_bases:
                 lengths.update(_read_doc_lengths(shard_base))
+            doc_ids, doc_lengths = _lengths_arrays(lengths)
+            native.merge_indexes(shard_bases, base, doc_ids=doc_ids, doc_lengths=doc_lengths)
             _write_doc_lengths(base, lengths)
         finally:
             shutil.rmtree(shard_dir, ignore_errors=True)
