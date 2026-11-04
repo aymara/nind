@@ -66,6 +66,40 @@ UIntView uintView(const py::buffer &buffer, const char *name)
     const size_t size = static_cast<size_t>(info.shape[0]);
     return UIntView{std::move(info), data, size};
 }
+// document ids from Python: a buffer of 64-bit (array('Q')) or 32-bit (array('I')) unsigned ints,
+// copied as 64-bit ids (NindDocId)
+struct DocIdsView {
+    std::vector<uint64_t> values;
+    const uint64_t *data;
+    size_t size;
+};
+DocIdsView docIdsView(const py::buffer &buffer, const char *name)
+{
+    py::buffer_info info = buffer.request();
+    const std::string &format = info.format;
+    const bool native = format.size() == 1 || format[0] == '<' || format[0] == '=' || format[0] == '@';
+    const char code = format.empty() ? 0 : format.back();
+    const bool isUInt32 = info.itemsize == 4 && native && (code == 'I' || code == 'L');
+    const bool isUInt64 = info.itemsize == 8 && native && (code == 'Q' || code == 'L' || code == 'K');
+    if (!isUInt32 && !isUInt64)
+        throw py::value_error(std::string(name) + ": expected a buffer of 64-bit or 32-bit unsigned ints (e.g. array('Q')), got format '" + format + "'");
+    if (info.ndim != 1 || (info.shape[0] > 1 && info.strides[0] != info.itemsize))
+        throw py::value_error(std::string(name) + ": expected a 1-D contiguous buffer");
+    DocIdsView view;
+    const size_t size = static_cast<size_t>(info.shape[0]);
+    view.values.resize(size);
+    if (isUInt64) {
+        const uint64_t *data = static_cast<const uint64_t *>(info.ptr);
+        std::copy(data, data + size, view.values.begin());
+    }
+    else {
+        const uint32_t *data = static_cast<const uint32_t *>(info.ptr);
+        std::copy(data, data + size, view.values.begin());
+    }
+    view.data = view.values.data();
+    view.size = size;
+    return view;
+}
 // validates a batch's end offsets: ascending, the last one == itemsNb
 void checkEnds(const UIntView &ends, const size_t itemsNb, const char *name)
 {
@@ -79,11 +113,11 @@ void checkEnds(const UIntView &ends, const size_t itemsNb, const char *name)
         throw py::value_error(std::string(name) + ": last end offset must equal the data length");
 }
 // one term definition from its [begin, end) slice of (docIds, freqs)
-std::list<NindTermIndex::TermCG> buildTermDef(const uint32_t *docIds, const uint32_t *freqs,
+std::list<NindTermIndex::TermCG> buildTermDef(const uint64_t *docIds, const uint32_t *freqs,
                                                const size_t begin, const size_t end,
                                                const unsigned char cg)
 {
-    std::vector<std::pair<uint32_t, uint32_t> > postings(end - begin);
+    std::vector<std::pair<uint64_t, uint32_t> > postings(end - begin);
     for (size_t i = begin; i < end; i++) postings[i - begin] = std::make_pair(docIds[i], freqs[i]);
     if (!std::is_sorted(postings.begin(), postings.end())) std::sort(postings.begin(), postings.end());
     std::list<NindTermIndex::TermCG> termDef;
@@ -130,6 +164,10 @@ py::bytes uintBytes(const std::vector<uint32_t> &values)
 {
     return py::bytes(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(uint32_t));
 }
+py::bytes uint64Bytes(const std::vector<uint64_t> &values)
+{
+    return py::bytes(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(uint64_t));
+}
 
 // Builds the term and local index files of a corpus from its documents, given as
 // chunks of term ids (in document order): see the IndexBuilder binding below.
@@ -139,13 +177,13 @@ public:
 
     // documents firstDocId, firstDocId + 1... : document i is localIds[ends[i-1]:ends[i]],
     // local id x being the term idMap[x]
-    void addDocuments(const uint32_t firstDocId, const UIntView &ends, const UIntView &localIds,
+    void addDocuments(const uint64_t firstDocId, const UIntView &ends, const UIntView &localIds,
                       const UIntView &idMap)
     {
         checkEnds(ends, localIds.size, "ends");
         if (ends.size != 0 && !m_docIds.empty() && firstDocId <= m_docIds.back())
             throw py::value_error("documents must be added in increasing id order");
-        if (ends.size != 0 && (uint64_t)firstDocId + ends.size - 1 > std::numeric_limits<uint32_t>::max())
+        if (ends.size != 0 && firstDocId > std::numeric_limits<uint64_t>::max() - (ends.size - 1))
             throw py::value_error("document id out of range");
         for (size_t i = 0; i < idMap.size; i++) {
             if (idMap.data[i] == 0) throw py::value_error("id_map: 0 is not a valid term id");
@@ -162,7 +200,7 @@ public:
             if (termId > m_maxTermId) m_maxTermId = termId;
         }
         for (size_t i = 0; i < ends.size; i++) {
-            m_docIds.push_back(firstDocId + (uint32_t)i);
+            m_docIds.push_back(firstDocId + (uint64_t)i);
             m_docEnds.push_back(base + ends.data[i]);
         }
     }
@@ -192,7 +230,8 @@ public:
         //2) postings by term (CSR), documents in increasing id order
         for (size_t t = 1; t < postingsNb.size(); t++) postingsNb[t] += postingsNb[t - 1];
         std::vector<size_t> fill(postingsNb.begin(), postingsNb.end() - 1);
-        std::vector<uint32_t> postingDocs(postingsNb.back()), postingFreqs(postingsNb.back());
+        std::vector<uint64_t> postingDocs(postingsNb.back());
+        std::vector<uint32_t> postingFreqs(postingsNb.back());
         begin = 0;
         for (size_t d = 0; d < m_docIds.size(); d++) {
             for (size_t i = begin; i < m_docEnds[d]; i++) {
@@ -240,7 +279,7 @@ public:
         }
     }
 
-    // (document ids, lengths in tokens), as uint32 bytes
+    // (document ids as uint64 bytes, lengths in tokens as uint32 bytes)
     py::tuple docLengths() const
     {
         std::vector<uint32_t> lengths(m_docIds.size());
@@ -249,7 +288,7 @@ public:
             lengths[d] = (uint32_t)(m_docEnds[d] - begin);
             begin = m_docEnds[d];
         }
-        return py::make_tuple(uintBytes(m_docIds), uintBytes(lengths));
+        return py::make_tuple(uint64Bytes(m_docIds), uintBytes(lengths));
     }
 
     size_t docsNb() const { return m_docIds.size(); }
@@ -257,7 +296,7 @@ public:
     uint32_t maxTermId() const { return m_maxTermId; }
 
 private:
-    std::vector<uint32_t> m_docIds;     //in increasing order
+    std::vector<uint64_t> m_docIds;     //in increasing order (external document ids, 64 bits)
     std::vector<size_t> m_docEnds;      //document d is m_tokens[m_docEnds[d-1]:m_docEnds[d]]
     std::vector<uint32_t> m_tokens;     //term ids
     uint32_t m_maxTermId;
@@ -279,16 +318,17 @@ const uint64_t DENSE_SLACK = 1u << 20;          // a dense table up to 2 N + 1M 
 class Bm25Scorer {
 public:
     // the documents of the corpus, in the order that breaks score ties
-    Bm25Scorer(const UIntView &docIds, const UIntView &lengths, const double avgDocLength):
+    // document ids: 64 bits (NindDocId); positions: 32 bits (at most 4.29G documents per index)
+    Bm25Scorer(const DocIdsView &docIds, const UIntView &lengths, const double avgDocLength):
         m_docIds(), m_lengths(), m_dense(), m_sparse(), m_docsNb(docIds.size), m_avgDocLength(avgDocLength),
         m_poolMutex(), m_pool()
     {
         if (docIds.size != lengths.size) throw py::value_error("doc_ids and lengths must have the same length");
         if (docIds.size >= NO_POSITION) throw py::value_error("too many documents");
-        uint32_t maxId = 0;
+        uint64_t maxId = 0;
         for (size_t i = 0; i < docIds.size; i++) maxId = std::max(maxId, docIds.data[i]);
         // a document id given twice: its last position counts (and only it is scored)
-        if (docIds.size != 0 && (uint64_t)maxId < 2 * (uint64_t)docIds.size + DENSE_SLACK) {
+        if (docIds.size != 0 && maxId < 2 * (uint64_t)docIds.size + DENSE_SLACK) {
             m_dense.assign((size_t)maxId + 1, NO_POSITION);
             for (size_t i = 0; i < docIds.size; i++) m_dense[docIds.data[i]] = (uint32_t)i;
         }
@@ -296,9 +336,9 @@ public:
             m_sparse.reserve(docIds.size);
             for (size_t i = 0; i < docIds.size; i++) m_sparse.push_back(std::make_pair(docIds.data[i], (uint32_t)i));
             std::stable_sort(m_sparse.begin(), m_sparse.end(),
-                             [](const std::pair<uint32_t, uint32_t> &a, const std::pair<uint32_t, uint32_t> &b)
+                             [](const std::pair<uint64_t, uint32_t> &a, const std::pair<uint64_t, uint32_t> &b)
                              { return a.first < b.first; });
-            std::vector<std::pair<uint32_t, uint32_t> > unique;
+            std::vector<std::pair<uint64_t, uint32_t> > unique;
             unique.reserve(m_sparse.size());
             for (size_t i = 0; i < m_sparse.size(); i++) {
                 if (!unique.empty() && unique.back().first == m_sparse[i].first) unique.back() = m_sparse[i];
@@ -312,7 +352,7 @@ public:
 
     // the documents with a positive score for the query terms (in query order, repeats
     // included, 0 = unknown term), by decreasing score, at most topK if topK >= 0
-    std::vector<std::pair<uint32_t, double> > search(const NindTermIndex &termIndex,
+    std::vector<std::pair<uint64_t, double> > search(const NindTermIndex &termIndex,
                                                      const std::vector<unsigned int> &termIds,
                                                      const double k1, const double b,
                                                      const long topK) const
@@ -391,7 +431,7 @@ public:
         //decreasing score, then the order of the corpus
         const size_t kept = (topK >= 0 && (size_t)topK < ranked.size()) ? (size_t)topK : ranked.size();
         std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
-        std::vector<std::pair<uint32_t, double> > result(kept);
+        std::vector<std::pair<uint64_t, double> > result(kept);
         for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
         return result;
     }
@@ -399,19 +439,19 @@ public:
     size_t docsNb() const { return m_docsNb; }
 
 private:
-    uint32_t positionOf(const uint32_t docId) const {
+    uint32_t positionOf(const uint64_t docId) const {
         if (!m_dense.empty() || m_sparse.empty())
             return docId < m_dense.size() ? m_dense[docId] : NO_POSITION;
         const auto it = std::lower_bound(m_sparse.begin(), m_sparse.end(), docId,
-                                         [](const std::pair<uint32_t, uint32_t> &a, const uint32_t id)
+                                         [](const std::pair<uint64_t, uint32_t> &a, const uint64_t id)
                                          { return a.first < id; });
         return (it != m_sparse.end() && it->first == docId) ? it->second : NO_POSITION;
     }
 
-    std::vector<uint32_t> m_docIds;     //position -> document id
+    std::vector<uint64_t> m_docIds;     //position -> document id
     std::vector<uint32_t> m_lengths;    //position -> length
     std::vector<uint32_t> m_dense;      //document id -> position (NO_POSITION: none), or empty
-    std::vector<std::pair<uint32_t, uint32_t> > m_sparse;   //(document id, position), by id, when not dense
+    std::vector<std::pair<uint64_t, uint32_t> > m_sparse;   //(document id, position), by id, when not dense
     size_t m_docsNb;
     double m_avgDocLength;
     // scratch arrays reused by successive searches (all zero / unmarked between searches): a
@@ -575,7 +615,7 @@ PYBIND11_MODULE(_native, m) {
     // ---- NindTermIndex ------------------------------------------------
     py::class_<NindTermIndex::Document>(m, "Document")
         .def(py::init<>())
-        .def(py::init<unsigned int, unsigned int>(), py::arg("ident"), py::arg("frequency"))
+        .def(py::init<NindDocId, unsigned int>(), py::arg("ident"), py::arg("frequency"))
         .def_readwrite("ident", &NindTermIndex::Document::ident)
         .def_readwrite("frequency", &NindTermIndex::Document::frequency)
         .def("__repr__", [](const NindTermIndex::Document &d) {
@@ -629,7 +669,7 @@ PYBIND11_MODULE(_native, m) {
                                        const py::buffer &docIds, const py::buffer &frequencies,
                                        const NindPadFile::Identification &fileIdentification,
                                        unsigned char cg, const std::list<unsigned int> &specifics) {
-            const UIntView ids = uintView(docIds, "doc_ids");
+            const DocIdsView ids = docIdsView(docIds, "doc_ids");
             const UIntView freqs = uintView(frequencies, "frequencies");
             if (ids.size != freqs.size)
                 throw py::value_error("doc_ids and frequencies must have the same length");
@@ -649,7 +689,7 @@ PYBIND11_MODULE(_native, m) {
                                         unsigned char cg, const std::list<unsigned int> &specifics) {
             const UIntView terms = uintView(idents, "idents");
             const UIntView termEnds = uintView(ends, "ends");
-            const UIntView ids = uintView(docIds, "doc_ids");
+            const DocIdsView ids = docIdsView(docIds, "doc_ids");
             const UIntView freqs = uintView(frequencies, "frequencies");
             if (ids.size != freqs.size)
                 throw py::value_error("doc_ids and frequencies must have the same length");
@@ -751,7 +791,7 @@ PYBIND11_MODULE(_native, m) {
                                          const py::buffer &positions, const py::buffer &lengths,
                                          const NindPadFile::Identification &fileIdentification,
                                          unsigned char cg) {
-            const UIntView docs = uintView(idents, "idents");
+            const DocIdsView docs = docIdsView(idents, "idents");
             const UIntView docEnds = uintView(ends, "ends");
             const UIntView terms = uintView(termIds, "term_ids");
             const UIntView pos = uintView(positions, "positions");
@@ -773,7 +813,7 @@ PYBIND11_MODULE(_native, m) {
            py::arg("lengths"), py::arg("file_identification"), py::arg("cg") = 0)
         .def("get_doc_count", &NindLocalIndex::getDocCount)
         .def("get_doc_idents", [](NindLocalIndex &self) {
-            std::vector<unsigned int> docIdents;
+            std::vector<NindDocId> docIdents;
             self.getDocIdents(docIdents);
             return docIdents;
         })
@@ -880,7 +920,7 @@ PYBIND11_MODULE(_native, m) {
     // the builder: they can run concurrently, each on its own writer).
     py::class_<IndexBuilder>(m, "IndexBuilder")
         .def(py::init<>())
-        .def("add_documents", [](IndexBuilder &self, uint32_t firstDocId, const py::buffer &ends,
+        .def("add_documents", [](IndexBuilder &self, uint64_t firstDocId, const py::buffer &ends,
                                  const py::buffer &termIds, const py::buffer &idMap) {
             self.addDocuments(firstDocId, uintView(ends, "ends"), uintView(termIds, "term_ids"),
                               uintView(idMap, "id_map"));
@@ -901,18 +941,17 @@ PYBIND11_MODULE(_native, m) {
         // writes a new file (never overwrites one); ValueError on a repeated ident or name
         .def_static("write", [](const std::string &fileName, const py::buffer &docIds,
                                 const std::vector<std::string> &names) {
-            const UIntView ids = uintView(docIds, "doc_ids");
-            const std::vector<uint32_t> idents(ids.data, ids.data + ids.size);
+            const DocIdsView ids = docIdsView(docIds, "doc_ids");
             py::gil_scoped_release release;
-            NindDocNames::write(fileName, idents, names);
+            NindDocNames::write(fileName, ids.values, names);
         }, py::arg("file_name"), py::arg("doc_ids"), py::arg("names"))
-        .def("name", [](const NindDocNames &self, uint32_t docId) -> py::object {
+        .def("name", [](const NindDocNames &self, uint64_t docId) -> py::object {
             std::string name;
             if (!self.getName(docId, name)) return py::none();
             return py::str(name);
         }, py::arg("doc_id"))
         // the names of many documents (None for a document without name)
-        .def("names", [](const NindDocNames &self, const std::vector<uint32_t> &docIds) {
+        .def("names", [](const NindDocNames &self, const std::vector<uint64_t> &docIds) {
             py::list result;
             std::string name;
             for (size_t i = 0; i < docIds.size(); i++) {
@@ -922,16 +961,16 @@ PYBIND11_MODULE(_native, m) {
             return result;
         }, py::arg("doc_ids"))
         .def("doc_id", [](const NindDocNames &self, const std::string &name) -> py::object {
-            uint32_t docId = 0;
+            NindDocId docId = 0;
             if (!self.getDocIdent(name, docId)) return py::none();
             return py::int_(docId);
         }, py::arg("name"))
-        // every (document, name): (doc ids as uint32 bytes, names), in increasing doc id order
+        // every (document, name): (doc ids as uint64 bytes, names), in increasing doc id order
         .def("entries", [](const NindDocNames &self) {
-            std::vector<uint32_t> docIds;
+            std::vector<NindDocId> docIds;
             std::vector<std::string> names;
             self.getEntries(docIds, names);
-            return py::make_tuple(uintBytes(docIds), names);
+            return py::make_tuple(uint64Bytes(docIds), names);
         })
         .def("__len__", &NindDocNames::size);
 
@@ -943,7 +982,7 @@ PYBIND11_MODULE(_native, m) {
     // with the GIL released.
     py::class_<Bm25Scorer>(m, "Bm25Scorer")
         .def(py::init([](const py::buffer &docIds, const py::buffer &lengths, double avgDocLength) {
-            return new Bm25Scorer(uintView(docIds, "doc_ids"), uintView(lengths, "lengths"), avgDocLength);
+            return new Bm25Scorer(docIdsView(docIds, "doc_ids"), uintView(lengths, "lengths"), avgDocLength);
         }), py::arg("doc_ids"), py::arg("lengths"), py::arg("avg_doc_len"))
         .def("search", &Bm25Scorer::search, py::arg("term_index"), py::arg("term_ids"),
              py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1)

@@ -339,3 +339,54 @@ def test_merge_indexes_rejects_overlapping_shards_and_existing_target(tmp_path):
     assert not list(tmp_path.glob("merged.*"))      # nothing written, no partial index left
     with pytest.raises(native.NindError):
         native.merge_indexes([str(tmp_path / "shard0")], str(tmp_path / "shard1"))
+
+
+# -- 64-bit document ids ------------------------------------------------------------
+
+def test_document_names_take_64_bit_ids_and_read_the_32_bit_format(tmp_path):
+    from array import array
+    import struct
+    from nind import _native
+    big = [3, 2 ** 32 + 7, 2 ** 63 + 1, 2 ** 64 - 1]
+    path = str(tmp_path / "big.ninddocnames")
+    _native.NindDocNames.write(path, array('Q', big), ["a", "b", "c", "d"])
+    names = _native.NindDocNames(path)
+    assert [names.name(d) for d in big] == ["a", "b", "c", "d"]
+    assert names.doc_id("c") == 2 ** 63 + 1
+    ids, got = names.entries()
+    assert list(array('Q', ids)) == big and got == ["a", "b", "c", "d"]
+    # a NINDDN01 file (4-byte idents), as written before: still read
+    v1 = str(tmp_path / "v1.ninddocnames")
+    with open(v1, "wb") as f:
+        # magic, flags (idents given), count 2, first ident, idents 5 9, offsets 0 1 3, by name 0 1, names
+        f.write(b"NINDDN01" + struct.pack("<IIIII", 1, 2, 5, 5, 9) + struct.pack("<III", 0, 1, 3)
+                + struct.pack("<II", 0, 1) + b"xyz")
+    old = _native.NindDocNames(v1)
+    assert old.name(5) == "x" and old.name(9) == "yz" and old.doc_id("yz") == 9
+
+
+def test_scorer_takes_64_bit_document_ids(tmp_path):
+    # the BM25 scorer maps sparse 64-bit ids to positions (binary search), and returns them
+    from array import array
+    from nind import _native
+    ids = array('Q', [2 ** 40 + 1, 2 ** 40 + 5, 2 ** 63])
+    scorer = _native.Bm25Scorer(ids, array('I', [3, 3, 3]), 3.0)
+    assert scorer.docs_nb == 3
+    assert scorer.search  # bound; scoring itself is covered by test_nind_engine
+
+
+def test_v1_writers_refuse_document_ids_over_32_bits(tmp_path):
+    # until the v2 formats, an id the v1 files can't hold is refused, never truncated
+    from array import array
+    from nind import _native
+    base = str(tmp_path / "v1")
+    lexicon = _native.NindLexiconIndex(base, is_writer=True, indirection_bloc_size=16)
+    lexicon.add_word(["w"])
+    identification = lexicon.get_identification()
+    del lexicon
+    terms = _native.NindTermIndex(base, is_writer=True, lexicon_identification=identification,
+                                  specifics_number=0, indirection_bloc_size=16)
+    term = _native.TermCG(0, 1)
+    term.documents = [_native.Document(2 ** 32, 1)]
+    with pytest.raises(_native.NindError, match="value over 32 bits"):
+        terms.set_term_def(1, [term], identification, [])

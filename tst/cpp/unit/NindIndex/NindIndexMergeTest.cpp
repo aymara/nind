@@ -127,7 +127,7 @@ Content readContent(const string &base) {
         }
     }
     NindLocalIndex localIndex(base, false, identification);
-    vector<unsigned int> docIdents;
+    vector<NindDocId> docIdents;
     localIndex.getDocIdents(docIdents);
     for (size_t i = 0; i < docIdents.size(); i++) {
         list<Term> localDef;
@@ -206,10 +206,10 @@ TEST_CASE("NindIndexMerge.LocalIndexListsItsDocuments") {
     Corpus corpus = sampleCorpus();
     buildIndex(base, corpus);
     NindLocalIndex localIndex(base, false, NindIndex::Identification(0, 0));
-    vector<unsigned int> docIdents;
+    vector<NindDocId> docIdents;
     localIndex.getDocIdents(docIdents);
     const unsigned int expected[] = {1, 2, 3, 5, 8, 13};
-    CHECK(docIdents == vector<unsigned int>(expected, expected + 6));
+    CHECK(docIdents == vector<NindDocId>(expected, expected + 6));
 }
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindIndexMerge.MergedIndexHasTheContentOfASingleIndexOfAllDocuments") {

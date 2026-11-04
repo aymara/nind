@@ -23,14 +23,21 @@ using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
 namespace {
-const char MAGIC[8] = {'N', 'I', 'N', 'D', 'D', 'N', '0', '1'};
+//NINDDN01: 4-byte document idents (read only); NINDDN02: 8-byte (64-bit NindDocId), written
+const char MAGIC_V1[8] = {'N', 'I', 'N', 'D', 'D', 'N', '0', '1'};
+const char MAGIC_V2[8] = {'N', 'I', 'N', 'D', 'D', 'N', '0', '2'};
 //<magic> <flags> <nombre> <premierIdent>
-const size_t HEADER_SIZE = 20;
+const size_t HEADER_SIZE_V1 = 20;
+const size_t HEADER_SIZE_V2 = 24;
 const uint32_t FLAG_IDENTS = 1;
 
 void put4(vector<unsigned char> &bytes, const uint32_t value)
 {
     for (int i = 0; i < 4; i++) bytes.push_back((unsigned char)(value >> (8 * i)));
+}
+void put8(vector<unsigned char> &bytes, const uint64_t value)
+{
+    for (int i = 0; i < 8; i++) bytes.push_back((unsigned char)(value >> (8 * i)));
 }
 
 struct NameLess {
@@ -42,7 +49,7 @@ struct NameLess {
 ////////////////////////////////////////////////////////////
 //brief Write the names of documents into a new file
 void NindDocNames::write(const string &fileName,
-                         const vector<uint32_t> &docIdents,
+                         const vector<NindDocId> &docIdents,
                          const vector<string> &names)
 {
     if (docIdents.size() != names.size())
@@ -56,7 +63,7 @@ void NindDocNames::write(const string &fileName,
     stable_sort(order.begin(), order.end(), [&docIdents](const uint32_t a, const uint32_t b) {
         return docIdents[a] < docIdents[b]; });
     vector<string> sortedNames(count);
-    vector<uint32_t> sortedIdents(count);
+    vector<NindDocId> sortedIdents(count);
     for (uint32_t i = 0; i < count; i++) {
         sortedIdents[i] = docIdents[order[i]];
         sortedNames[i] = names[order[i]];
@@ -71,14 +78,13 @@ void NindDocNames::write(const string &fileName,
         if (sortedNames[byName[i]] == sortedNames[byName[i - 1]])
             throw invalid_argument("NindDocNames::write: duplicate document name: " + sortedNames[byName[i]]);
     }
-    const bool dense = count == 0 ||
-        (uint64_t)sortedIdents.back() - sortedIdents.front() + 1 == (uint64_t)count;
-    //the file
-    vector<unsigned char> bytes(MAGIC, MAGIC + sizeof(MAGIC));
+    const bool dense = count == 0 || sortedIdents.back() - sortedIdents.front() == (uint64_t)count - 1;
+    //the file (NINDDN02: 8-byte idents)
+    vector<unsigned char> bytes(MAGIC_V2, MAGIC_V2 + sizeof(MAGIC_V2));
     put4(bytes, dense ? 0 : FLAG_IDENTS);
     put4(bytes, count);
-    put4(bytes, count ? sortedIdents.front() : 0);
-    if (!dense) for (uint32_t i = 0; i < count; i++) put4(bytes, sortedIdents[i]);
+    put8(bytes, count ? sortedIdents.front() : 0);
+    if (!dense) for (uint32_t i = 0; i < count; i++) put8(bytes, sortedIdents[i]);
     uint64_t offset = 0;
     put4(bytes, 0);
     for (uint32_t i = 0; i < count; i++) {
@@ -105,6 +111,7 @@ NindDocNames::NindDocNames(const string &fileName):
     m_size(0),
     m_hasIdents(false),
     m_firstIdent(0),
+    m_identWidth(8),
     m_identsPos(0), m_offsetsPos(0), m_byNamePos(0), m_namesPos(0)
 {
     FILE *file = fopen(fileName.c_str(), "rb");
@@ -119,22 +126,33 @@ NindDocNames::NindDocNames(const string &fileName):
     fclose(file);
     if (!ok) throw ReadFileException(fileName);
     //nothing read from the file is trusted: every size is checked against the file's size
-    if (m_bytes.size() < HEADER_SIZE || memcmp(m_bytes.data(), MAGIC, sizeof(MAGIC)) != 0)
-        throw FormatFileException(fileName);
+    if (m_bytes.size() < HEADER_SIZE_V1) throw FormatFileException(fileName);
+    size_t headerSize;
+    if (memcmp(m_bytes.data(), MAGIC_V2, sizeof(MAGIC_V2)) == 0) {
+        m_identWidth = 8;
+        headerSize = HEADER_SIZE_V2;
+    }
+    else if (memcmp(m_bytes.data(), MAGIC_V1, sizeof(MAGIC_V1)) == 0) {
+        m_identWidth = 4;
+        headerSize = HEADER_SIZE_V1;
+    }
+    else throw FormatFileException(fileName);
+    if (m_bytes.size() < headerSize) throw FormatFileException(fileName);
     const uint32_t flags = read4(8);
     if ((flags & ~FLAG_IDENTS) != 0) throw FormatFileException(fileName);
     m_hasIdents = (flags & FLAG_IDENTS) != 0;
     const uint64_t count = read4(12);
-    m_firstIdent = read4(16);
-    //idents (if any), offsets, parNom: 4 bytes each
-    const uint64_t arrays = (m_hasIdents ? count : 0) + (count + 1) + count;
-    if (HEADER_SIZE + 4 * arrays > m_bytes.size()) throw FormatFileException(fileName);
+    m_firstIdent = readIdent(16);
+    //idents (if any): m_identWidth bytes each; offsets, parNom: 4 bytes each
+    const uint64_t arraysBytes = (m_hasIdents ? m_identWidth * count : 0) + 4 * (count + 1) + 4 * count;
+    if (headerSize + arraysBytes > m_bytes.size()) throw FormatFileException(fileName);
     m_size = (size_t)count;
-    m_identsPos = HEADER_SIZE;
-    m_offsetsPos = m_identsPos + (m_hasIdents ? 4 * m_size : 0);
+    m_identsPos = headerSize;
+    m_offsetsPos = m_identsPos + (m_hasIdents ? m_identWidth * m_size : 0);
     m_byNamePos = m_offsetsPos + 4 * (m_size + 1);
     m_namesPos = m_byNamePos + 4 * m_size;
-    if (!m_hasIdents && m_size != 0 && (uint64_t)m_firstIdent + m_size - 1 > 0xFFFFFFFFu)
+    const uint64_t maxIdent = (m_identWidth == 4) ? 0xFFFFFFFFull : ~(uint64_t)0;
+    if (!m_hasIdents && m_size != 0 && (uint64_t)(m_size - 1) > maxIdent - m_firstIdent)
         throw FormatFileException(fileName);
     //offsets: from 0, increasing, the last one the end of the file
     if (read4(m_offsetsPos) != 0) throw FormatFileException(fileName);
@@ -144,7 +162,8 @@ NindDocNames::NindDocNames(const string &fileName):
     if (m_namesPos + (uint64_t)read4(m_offsetsPos + 4 * m_size) != m_bytes.size()) throw FormatFileException(fileName);
     //idents strictly increasing
     for (size_t i = 1; i < m_size && m_hasIdents; i++) {
-        if (read4(m_identsPos + 4 * i) <= read4(m_identsPos + 4 * (i - 1))) throw FormatFileException(fileName);
+        if (readIdent(m_identsPos + m_identWidth * i) <= readIdent(m_identsPos + m_identWidth * (i - 1)))
+            throw FormatFileException(fileName);
     }
     //name order: ranks within bounds, names strictly increasing (so unique, and a permutation)
     for (size_t i = 0; i < m_size; i++) {
@@ -157,22 +176,22 @@ NindDocNames::NindDocNames(const string &fileName):
 }
 ////////////////////////////////////////////////////////////
 //brief get the name of a document
-bool NindDocNames::getName(const uint32_t docIdent,
+bool NindDocNames::getName(const NindDocId docIdent,
                            string &name) const
 {
     size_t rank;
     if (!m_hasIdents) {
-        if (docIdent < m_firstIdent || (uint64_t)docIdent - m_firstIdent >= m_size) return false;
-        rank = docIdent - m_firstIdent;
+        if (docIdent < m_firstIdent || docIdent - m_firstIdent >= m_size) return false;
+        rank = (size_t)(docIdent - m_firstIdent);
     }
     else {
         size_t low = 0, high = m_size;
         while (low < high) {
             const size_t middle = low + (high - low) / 2;
-            if (read4(m_identsPos + 4 * middle) < docIdent) low = middle + 1;
+            if (readIdent(m_identsPos + m_identWidth * middle) < docIdent) low = middle + 1;
             else high = middle;
         }
-        if (low == m_size || read4(m_identsPos + 4 * low) != docIdent) return false;
+        if (low == m_size || readIdent(m_identsPos + m_identWidth * low) != docIdent) return false;
         rank = low;
     }
     const pair<size_t, size_t> span = nameAt(rank);
@@ -182,7 +201,7 @@ bool NindDocNames::getName(const uint32_t docIdent,
 ////////////////////////////////////////////////////////////
 //brief get the document of a name
 bool NindDocNames::getDocIdent(const string &name,
-                               uint32_t &docIdent) const
+                               NindDocId &docIdent) const
 {
     size_t low = 0, high = m_size;
     while (low < high) {
@@ -198,7 +217,7 @@ bool NindDocNames::getDocIdent(const string &name,
 }
 ////////////////////////////////////////////////////////////
 //brief every (document, name), in increasing document ident order
-void NindDocNames::getEntries(vector<uint32_t> &docIdents,
+void NindDocNames::getEntries(vector<NindDocId> &docIdents,
                               vector<string> &names) const
 {
     docIdents.resize(m_size);
@@ -216,9 +235,18 @@ uint32_t NindDocNames::read4(const size_t offset) const
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 ////////////////////////////////////////////////////////////
-uint32_t NindDocNames::docIdentAt(const size_t rank) const
+NindDocId NindDocNames::readIdent(const size_t offset) const
 {
-    return m_hasIdents ? read4(m_identsPos + 4 * rank) : m_firstIdent + (uint32_t)rank;
+    if (m_identWidth == 4) return read4(offset);
+    const unsigned char *p = m_bytes.data() + offset;
+    NindDocId value = 0;
+    for (int i = 7; i >= 0; i--) value = (value << 8) | p[i];
+    return value;
+}
+////////////////////////////////////////////////////////////
+NindDocId NindDocNames::docIdentAt(const size_t rank) const
+{
+    return m_hasIdents ? readIdent(m_identsPos + m_identWidth * rank) : m_firstIdent + (NindDocId)rank;
 }
 ////////////////////////////////////////////////////////////
 pair<size_t, size_t> NindDocNames::nameAt(const size_t rank) const

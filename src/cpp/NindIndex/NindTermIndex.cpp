@@ -130,10 +130,12 @@ void NindTermIndex::decodeTermDef(const unsigned int ident,
         termDef.push_back(TermCG(catejgorie, frejquenceTerme));
         struct TermCG &termCG = termDef.back();
         list<Document> &documents = termCG.documents;
-        unsigned int identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
+        NindDocId identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
         for (unsigned int it = 0; it != nbreDocs; it++) {
             //<identDocRelatif> <frejquenceDoc>
             identDocument += in.getUIntLat();
+            if (identDocument > NIND_DOC_ID_MAX_V1)
+                throw NindTermIndexException("NindTermIndex::getTermDef D : " + m_fileName);
             const unsigned int frejquenceDoc = in.getUIntLat();
             documents.push_back(Document(identDocument, frejquenceDoc));
         }
@@ -192,10 +194,12 @@ void NindTermIndex::decodeTermPostings(const unsigned int ident,
         in.getUIntLat();                    //frejquenceTerme
         const unsigned int nbreDocs = in.getUIntLat();
         //nbreDocs comes from the file: no reserve on it, every read is bounded by the buffer
-        unsigned int identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
+        NindDocId identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
         for (unsigned int it = 0; it != nbreDocs; it++) {
             //<identDocRelatif> <frejquenceDoc>
             identDocument += in.getUIntLat();
+            if (identDocument > NIND_DOC_ID_MAX_V1)
+                throw NindTermIndexException("NindTermIndex::getTermPostings D : " + m_fileName);
             const unsigned int frejquenceDoc = in.getUIntLat();
             postings.push_back(Document(identDocument, frejquenceDoc));
         }
@@ -265,7 +269,7 @@ void NindTermIndex::setTermDef(const unsigned int ident,
         m_file.putUIntLat((*it1).frequency);
         const list<struct Document> &documents = (*it1).documents;
         m_file.putUIntLat(documents.size());
-        unsigned int identPrec = 0;             //pour mettre les identifiants de documents en relatif
+        NindDocId identPrec = 0;                 //pour mettre les identifiants de documents en relatif
         for (list<struct Document>::const_iterator it2 = documents.begin(); it2 != documents.end(); it2++) {
             //<identDocRelatif> <frejquenceDoc>
             m_file.putUIntLat((*it2).ident - identPrec);

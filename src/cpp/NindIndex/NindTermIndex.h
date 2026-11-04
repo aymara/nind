@@ -22,6 +22,7 @@
 #define NindTermIndex_H
 ////////////////////////////////////////////////////////////
 #include "NindIndex.h"
+#include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
 #include <stdio.h>
@@ -51,10 +52,10 @@ public:
 
     /**\brief Structures to hold datas of a term */
     struct Document {
-        unsigned int ident;
+        NindDocId ident;                //external document identifier (64 bits; the v1 format stores 32)
         unsigned int frequency;
         Document(): ident(0), frequency(0) {}
-        Document(const unsigned int id, const unsigned int freq): ident(id), frequency(freq) {}
+        Document(const NindDocId id, const unsigned int freq): ident(id), frequency(freq) {}
         ~Document() {}
         bool operator< (const Document &doc2) { return (this->ident < doc2.ident); }
     };

@@ -18,6 +18,7 @@
 #define NindDocNames_H
 ////////////////////////////////////////////////////////////
 #include "NindCommonExport.h"
+#include "NindBasics/NindDocId.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -27,12 +28,12 @@ namespace latecon {
     namespace nindex {
 ////////////////////////////////////////////////////////////
 /**\brief The names of the documents of an index (file <name>.ninddocnames).
-* <fichier>        ::= <magic="NINDDN01"> <flags> <nombre> <premierIdent>
+* <fichier>        ::= <magic="NINDDN02"> <flags> <nombre> <premierIdent>
 *                      [ <idents> ] <offsets> <parNom> <noms>
 * <flags>          ::= <Entier4>    bit 0 : idents given (otherwise premierIdent, premierIdent + 1...)
 * <nombre>         ::= <Entier4>    number of documents
-* <premierIdent>   ::= <Entier4>
-* <idents>         ::= { <Entier4> }    nombre idents, strictly increasing
+* <premierIdent>   ::= <Entier8>    (64-bit NindDocId; <Entier4> in NINDDN01, still read)
+* <idents>         ::= { <Entier8> }    nombre idents, strictly increasing (<Entier4> in NINDDN01)
 * <offsets>        ::= { <Entier4> }    nombre + 1 offsets into <noms>, the first 0, increasing
 * <parNom>         ::= { <Entier4> }    the documents' ranks in increasing name order (byte order)
 * <noms>           ::= { <Octet> }      the names (UTF-8), in document order
@@ -47,7 +48,7 @@ public:
     * or the names are too long together (4 GiB)
     *\throws OpenFileException or WriteFileException on I/O errors (the file is then removed) */
     static void write(const std::string &fileName,
-                      const std::vector<uint32_t> &docIdents,
+                      const std::vector<NindDocId> &docIdents,
                       const std::vector<std::string> &names);
 
     /**\brief Read the names of an index
@@ -62,7 +63,7 @@ public:
     *\param docIdent document ident
     *\param name receives its name
     *\return true if the document has a name */
-    bool getName(const uint32_t docIdent,
+    bool getName(const NindDocId docIdent,
                  std::string &name) const;
 
     /**\brief get the document of a name
@@ -70,17 +71,18 @@ public:
     *\param docIdent receives the document ident
     *\return true if a document has that name */
     bool getDocIdent(const std::string &name,
-                     uint32_t &docIdent) const;
+                     NindDocId &docIdent) const;
 
     /**\brief every (document, name), in increasing document ident order
     *\param docIdents receives the documents
     *\param names receives their names */
-    void getEntries(std::vector<uint32_t> &docIdents,
+    void getEntries(std::vector<NindDocId> &docIdents,
                     std::vector<std::string> &names) const;
 
 private:
     uint32_t read4(const size_t offset) const;
-    uint32_t docIdentAt(const size_t rank) const;
+    NindDocId readIdent(const size_t offset) const;
+    NindDocId docIdentAt(const size_t rank) const;
     //the name of the document of rank rank: (offset into m_bytes, length)
     std::pair<size_t, size_t> nameAt(const size_t rank) const;
     //compares the name of rank rank with name (like std::string::compare)
@@ -90,7 +92,8 @@ private:
     std::vector<unsigned char> m_bytes;     //the whole file
     size_t m_size;
     bool m_hasIdents;
-    uint32_t m_firstIdent;
+    NindDocId m_firstIdent;
+    size_t m_identWidth;            //4 (NINDDN01) or 8 (NINDDN02) bytes per ident
     size_t m_identsPos, m_offsetsPos, m_byNamePos, m_namesPos;
 };
 ////////////////////////////////////////////////////////////

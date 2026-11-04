@@ -181,6 +181,13 @@ def _uint_array(data):
     return values
 
 
+def _doc_id_array(data):
+    """Document ids (64 bits, NindDocId) from the bytes of a native uint64 vector."""
+    values = array('Q')
+    values.frombytes(data)
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Index metadata and document lengths, stored next to the nind files
 # ---------------------------------------------------------------------------
@@ -203,12 +210,14 @@ def _read_meta(base):
     return meta
 
 
-_DOC_LENGTHS_MAGIC = b"NINDDL01"
+# NINDDL02: 8-byte document ids (64-bit NindDocId), 4-byte lengths; NINDDL01 (4-byte ids) still read
+_DOC_LENGTHS_MAGIC = b"NINDDL02"
+_DOC_LENGTHS_MAGIC_V1 = b"NINDDL01"
 
 
 def _write_doc_lengths(base, lengths):
     """Write ``{document id: length in tokens}`` (documents of length 0 are left out)."""
-    doc_ids = array('I', sorted(doc_id for doc_id, length in lengths.items() if length))
+    doc_ids = array('Q', sorted(doc_id for doc_id, length in lengths.items() if length))
     values = array('I', (lengths[doc_id] for doc_id in doc_ids))
     if sys.byteorder == "big":
         doc_ids.byteswap()
@@ -227,14 +236,20 @@ def _read_doc_lengths(base):
     except FileNotFoundError:
         return None
     header = len(_DOC_LENGTHS_MAGIC) + 4
-    if len(data) < header or not data.startswith(_DOC_LENGTHS_MAGIC):
+    if data.startswith(_DOC_LENGTHS_MAGIC):
+        doc_ids, id_size = array('Q'), 8
+    elif data.startswith(_DOC_LENGTHS_MAGIC_V1):
+        doc_ids, id_size = array('I'), 4
+    else:
+        raise ValueError("Corrupt %s" % (base + DOC_LENGTHS_EXTENSION))
+    if len(data) < header:
         raise ValueError("Corrupt %s" % (base + DOC_LENGTHS_EXTENSION))
     (count,) = struct.unpack_from("<I", data, len(_DOC_LENGTHS_MAGIC))
-    if len(data) != header + 8 * count:
+    if len(data) != header + (id_size + 4) * count:
         raise ValueError("Corrupt %s" % (base + DOC_LENGTHS_EXTENSION))
-    doc_ids, values = array('I'), array('I')
-    doc_ids.frombytes(data[header:header + 4 * count])
-    values.frombytes(data[header + 4 * count:])
+    values = array('I')
+    doc_ids.frombytes(data[header:header + id_size * count])
+    values.frombytes(data[header + id_size * count:])
     if sys.byteorder == "big":
         doc_ids.byteswap()
         values.byteswap()
@@ -244,7 +259,7 @@ def _read_doc_lengths(base):
 def _write_doc_names(base, names):
     """Write ``{document id: name}`` (names: unique strings; other values are converted with str)."""
     doc_ids = sorted(names)
-    native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('I', doc_ids),
+    native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('Q', doc_ids),
                               [name if isinstance(name, str) else str(name) for name in map(names.__getitem__, doc_ids)])
 
 
@@ -293,7 +308,7 @@ class _Snapshot:
         self.total_docs = len(self.doc_ids)
         total_len = sum(lengths.values())
         self.avg_doc_len = total_len / self.total_docs if self.total_docs else 0
-        self.scorer = native.Bm25Scorer(array('I', self.doc_ids), array('I', (lengths[d] for d in self.doc_ids)),
+        self.scorer = native.Bm25Scorer(array('Q', self.doc_ids), array('I', (lengths[d] for d in self.doc_ids)),
                                         self.avg_doc_len)
         self.doc_names = _read_doc_names(base)
 
@@ -559,8 +574,9 @@ class _CancelUpdate(Exception):
 def _check_doc_id(doc_id):
     import operator
     doc_id = operator.index(doc_id)
-    if not 0 <= doc_id <= 0xFFFFFFFF:
-        raise ValueError("document id out of range (0 .. 2**32-1): %d" % doc_id)
+    # 64-bit external ids (NindDocId); the v1 index formats store 32 bits and refuse larger ones
+    if not 0 <= doc_id <= 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("document id out of range (0 .. 2**64-1): %d" % doc_id)
     return doc_id
 
 
@@ -651,7 +667,7 @@ class IndexUpdate:
         self._names = {}
         if names is not None:
             doc_ids, doc_names = names.entries()
-            self._names = dict(zip(_uint_array(doc_ids), doc_names))
+            self._names = dict(zip(_doc_id_array(doc_ids), doc_names))
         self._ids_by_name = {name: doc_id for doc_id, name in self._names.items()}
         return self
 
@@ -838,7 +854,7 @@ class IndexUpdate:
     @staticmethod
     def _update_term_index(term_index, removed, added, identification):
         # every touched term is rewritten whole: previous postings, minus removed documents, plus added ones
-        idents, ends, doc_ids, freqs = array('I'), array('I'), array('I'), array('I')
+        idents, ends, doc_ids, freqs = array('I'), array('I'), array('Q'), array('I')
         for term_id in sorted(removed.keys() | added.keys()):
             postings = {}
             for term_cg in term_index.get_term_def(term_id) or ():
@@ -856,7 +872,7 @@ class IndexUpdate:
 
     @staticmethod
     def _update_local_index(local_index, doc_ids, pending, term_to_id, identification):
-        idents, ends, term_ids, positions = array('I'), array('I'), array('I'), array('I')
+        idents, ends, term_ids, positions = array('Q'), array('I'), array('I'), array('I')
         for doc_id in doc_ids:
             tokens = pending[doc_id] or ()          # no tokens: the document is erased
             idents.append(doc_id)
@@ -1177,7 +1193,7 @@ class NindIndexer:
                 future.result()
         del writers
         doc_ids, lengths = builder.doc_lengths()
-        _write_doc_lengths(base, dict(zip(_uint_array(doc_ids), _uint_array(lengths))))
+        _write_doc_lengths(base, dict(zip(_doc_id_array(doc_ids), _uint_array(lengths))))
 
     def _write_index(self, token_lists, first_doc_id, base):
         # writes the index of documents given as token lists (first one: document first_doc_id)
@@ -1289,7 +1305,7 @@ class NindIndexer:
                                            lexicon_identification=lexicon_identification,
                                            specifics_number=0,
                                            indirection_bloc_size=max_term_id + 1)
-        idents, ends, doc_ids, freqs = array('I'), array('I'), array('I'), array('I')
+        idents, ends, doc_ids, freqs = array('I'), array('I'), array('Q'), array('I')
         for tid in sorted(inverted_index):
             postings = inverted_index[tid]
             idents.append(tid)
@@ -1308,7 +1324,7 @@ class NindIndexer:
         local_writer = native.NindLocalIndex(base, is_writer=True,
                                              lexicon_identification=lexicon_identification,
                                              indirection_bloc_size=len(corpus_tokens) + 1)
-        idents, ends, term_ids, positions = array('I'), array('I'), array('I'), array('I')
+        idents, ends, term_ids, positions = array('Q'), array('I'), array('I'), array('I')
         for index, tokens in enumerate(corpus_tokens):
             idents.append(first_doc_id + index)
             term_ids.extend(term_to_id[token] for token in tokens)

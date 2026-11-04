@@ -307,7 +307,7 @@ void readLocalIndex(const string &base) {
         index.getTermIdents(1000 * doc, termIdents);
     }
     index.getDocCount();
-    vector<unsigned int> docIdents;
+    vector<NindDocId> docIdents;
     index.getDocIdents(docIdents);
     index.analyseIndex();
     index.analysePadFile();

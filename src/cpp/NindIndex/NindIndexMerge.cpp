@@ -150,11 +150,11 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
     //les documents de tous les shards, vejrifiejs disjoints avant toute ejcriture
     //(sans index local, un document dans deux shards est vu dans le fichier inverse)
     vector<unique_ptr<NindLocalIndex> > shardLocalIndexes;
-    vector<pair<unsigned int, unsigned int> > documents;       //(identifiant externe, shard)
+    vector<pair<NindDocId, unsigned int> > documents;          //(identifiant externe, shard)
     for (unsigned int shard = 0; shard < shardsNb && withLocalIndex; shard++) {
         shardLocalIndexes.push_back(unique_ptr<NindLocalIndex>(
             new NindLocalIndex(m_shardNames[shard], false, shardIdentifications[shard])));
-        vector<unsigned int> docIdents;
+        vector<NindDocId> docIdents;
         shardLocalIndexes.back()->getDocIdents(docIdents);
         for (size_t i = 0; i < docIdents.size(); i++) documents.push_back(make_pair(docIdents[i], shard));
     }

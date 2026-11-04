@@ -964,7 +964,7 @@ def test_document_names_are_stored_compactly(tmp_path):
     NindIndexer(str(tmp_path / "jsonl"), prefix="corpus").index_jsonl(path)
     names_file = generations(tmp_path / "jsonl")[0] / "corpus.ninddocnames"
     # consecutive document ids aren't stored: 8 bytes per document plus the names
-    assert names_file.stat().st_size == 20 + 4 + 8 * 2000 + sum(len(r["id"]) for r in records)
+    assert names_file.stat().st_size == 24 + 4 + 8 * 2000 + sum(len(r["id"]) for r in records)
 
 
 # -- concurrent searches ----------------------------------------------------------
