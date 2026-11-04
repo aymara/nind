@@ -116,6 +116,23 @@ void checkEnds(const UIntView &ends, const size_t itemsNb, const char *name)
         throw py::value_error(std::string(name) + ": last end offset must equal the data length");
 }
 // one term definition from its [begin, end) slice of (docIds, freqs)
+// the checks of buildTermDef on [begin, end) alone (no definition built): scratch is reused
+void checkTermDef(const uint64_t *docIds, const uint32_t *freqs, const size_t begin, const size_t end,
+                  std::vector<std::pair<uint64_t, uint32_t> > &scratch)
+{
+    scratch.assign(end - begin, std::pair<uint64_t, uint32_t>());
+    uint64_t total = 0;
+    for (size_t i = begin; i < end; i++) {
+        scratch[i - begin] = std::make_pair(docIds[i], freqs[i]);
+        total += freqs[i];
+    }
+    if (!std::is_sorted(scratch.begin(), scratch.end())) std::sort(scratch.begin(), scratch.end());
+    for (size_t i = 1; i < scratch.size(); i++)
+        if (scratch[i].first == scratch[i - 1].first)
+            throw py::value_error("doc_ids: duplicate document id " + std::to_string(scratch[i].first));
+    if (total > std::numeric_limits<unsigned int>::max())
+        throw py::value_error("frequencies: total term frequency overflows 32 bits");
+}
 std::list<NindTermIndex::TermCG> buildTermDef(const uint64_t *docIds, const uint32_t *freqs,
                                                const size_t begin, const size_t end,
                                                const unsigned char cg)
@@ -926,15 +943,24 @@ PYBIND11_MODULE(_native, m) {
             if (terms.size != termEnds.size)
                 throw py::value_error("idents and ends must have the same length");
             checkEnds(termEnds, ids.size, "ends");
-            std::vector<std::list<NindTermIndex::TermCG> > termDefs(terms.size);
-            size_t begin = 0;
-            for (size_t i = 0; i < terms.size; i++) {
-                termDefs[i] = buildTermDef(ids.data, freqs.data, begin, termEnds.data[i], cg);
-                begin = termEnds.data[i];
+            // every definition checked before anything is written, then one at a time: built (from
+            // the buffers, held by the caller) and written (memory: one definition, not all)
+            {
+                std::vector<std::pair<uint64_t, uint32_t> > scratch;
+                size_t begin = 0;
+                for (size_t i = 0; i < terms.size; i++) {
+                    checkTermDef(ids.data, freqs.data, begin, termEnds.data[i], scratch);
+                    begin = termEnds.data[i];
+                }
             }
             py::gil_scoped_release release;
-            for (size_t i = 0; i < terms.size; i++)
-                self.setTermDef(terms.data[i], termDefs[i], fileIdentification, specifics);
+            size_t begin = 0;
+            for (size_t i = 0; i < terms.size; i++) {
+                const std::list<NindTermIndex::TermCG> termDef =
+                    buildTermDef(ids.data, freqs.data, begin, termEnds.data[i], cg);
+                begin = termEnds.data[i];
+                self.setTermDef(terms.data[i], termDef, fileIdentification, specifics);
+            }
         }, py::arg("idents"), py::arg("ends"), py::arg("doc_ids"), py::arg("frequencies"),
            py::arg("file_identification"), py::arg("cg") = 0,
            py::arg("specifics") = std::list<unsigned int>())

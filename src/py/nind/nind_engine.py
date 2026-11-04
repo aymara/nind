@@ -623,6 +623,8 @@ class IndexUpdate:
     #: Above this many words per hash bucket, the lexicon is rebuilt with twice
     #: as many buckets as words (the bucket count is fixed in the file).
     LEXICON_MAX_LOAD = 4
+    #: Touched term definitions are rewritten by batches of about this many postings.
+    UPDATE_BATCH_POSTINGS = 4000000
     #: Entries in each new indirection block of the term and local files (at least).
     INDIRECTION_BLOC_MIN = 4096
 
@@ -863,9 +865,13 @@ class IndexUpdate:
 
     @staticmethod
     def _update_term_index(term_index, removed, added, identification):
-        # every touched term is rewritten whole: previous postings, minus removed documents, plus added ones
+        # every touched term is rewritten whole: previous postings, minus removed documents, plus added
+        # ones; written by batches of about UPDATE_BATCH_POSTINGS postings (memory stays bounded)
         idents, ends, doc_ids, freqs = array('I'), array('I'), array('Q'), array('I')
         for term_id in sorted(removed.keys() | added.keys()):
+            if len(doc_ids) >= IndexUpdate.UPDATE_BATCH_POSTINGS:
+                term_index.set_term_defs_arrays(idents, ends, doc_ids, freqs, identification)
+                idents, ends, doc_ids, freqs = array('I'), array('I'), array('Q'), array('I')
             postings = {}
             for term_cg in term_index.get_term_def(term_id) or ():
                 for document in term_cg.documents:
