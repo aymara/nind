@@ -35,6 +35,27 @@ TEST_CASE("NindFileTest.BufferedRoundTripOfAllIntegerWidths") {
     reader.close();
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindFileTest.ValuesTooLargeForTheirFieldAreRefused") {
+    // a value over a field's width used to be written truncated (a corrupt file); with 64-bit
+    // document ids, every v1 field refuses what it can't hold
+    TestTempDir tmp;
+    NindFile writer(tmp.file("bounds.bin"));
+    REQUIRE(writer.open("wb"));
+    writer.createBuffer(64);
+    CHECK_THROWS_AS(writer.putInt3(0x1000000u), OutOfBoundException);
+    CHECK_THROWS_AS(writer.putInt3(0x1000000u, 0), OutOfBoundException);
+    CHECK_THROWS_AS(writer.putInt4(0x100000000ull), OutOfBoundException);
+    CHECK_THROWS_AS(writer.putUIntLat(0x100000000ull), OutOfBoundException);
+    CHECK_THROWS_AS(writer.putInt5(0x10000000000ull), OutOfBoundException);
+    CHECK_EQ(0u, writer.getOutBufferSize());          //nothing written by the refused values
+    writer.putInt3(0xFFFFFFu);
+    writer.putInt4(0xFFFFFFFFull);
+    writer.putUIntLat(0xFFFFFFFFull);
+    writer.putInt5(0xFFFFFFFFFFull);
+    CHECK_EQ(3u + 4u + 5u + 5u, writer.getOutBufferSize());
+    writer.close();
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindFileTest.GetSInt3AndGetSInt4DecodeTwosComplement") {
     TestTempDir tmp;
     const string path = tmp.file("signed.bin");

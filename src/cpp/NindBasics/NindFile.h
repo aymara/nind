@@ -237,7 +237,8 @@ public:
 
     /**\brief Put a 4-bytes integer into the internal buffer
     *\param int4 integer to write as 4-bytes*/
-    void putInt4(const unsigned int int4);
+    //(64-bit parameter: a value over 32 bits throws OutOfBoundException instead of being truncated)
+    void putInt4(const uint64_t int4);
 
     /**\brief Put a 5-bytes integer into the internal buffer
     *\param int8 long integer to write as 5-bytes*/
@@ -245,7 +246,8 @@ public:
 
     /**\brief Put an unsigned latecon integer into the internal buffer
     *\param int4 unsigned integer to write as latecon integer*/
-    void putUIntLat(const unsigned int int4);
+    //(64-bit parameter: a value over 32 bits throws OutOfBoundException instead of being truncated)
+    void putUIntLat(const uint64_t int4);
 
     /**\brief Put a signed latecon integer into the internal buffer
     *\param int4 signed integer to write as latecon integer*/
