@@ -10,16 +10,20 @@ of 3.0.0 (format v2).
   in the block: tighter MaxScore bounds); MaxScore's threshold
   (`PRUNING_DOCS_PER_RESULT`) measured again at the target sizes (≥ 4M
   documents; 1–2M isn't a target).
-- [ ] Cheap updates: an update rewrites only what changed (the touched terms'
-  last blocks and directories), not every list a new document enters (332 s
-  for 1% of MS MARCO, vs 2 s for Lucene).
+- [x] Cheap updates: an update rewrites only what changed (the touched terms'
+  last blocks and directories), in the C++ API (`NindIndexUpdate`,
+  `NindTermIndex::updateTermDef`).
+- [ ] Updates, what's left proportional to the index: the generation copy
+  (Python's immutable generations; Amose writes in place) and the names and
+  lengths side files rewritten whole; and a first update after a build
+  rewrites its touched terms whole (builds leave no room: an option to leave
+  some?).
 - [ ] Bit-packed blocks (Lucene-like): faster decoding than varints.
 - [ ] Everything in the C++ API (Amose and other clients use it directly):
   move `Bm25Scorer` (block-max MaxScore) and `IndexBuilder` out of
   `src/cpp/NindPy/bindings.cpp` into the `NindIndex` library, and
-  `IndexUpdate`'s change logic (touched terms, merge of postings, migration,
-  lexicon rebuild) out of `nind_engine.py`; Python keeps the generations and
-  publishing.
+  `IndexUpdate`'s change logic (done: `NindIndexUpdate`); Python keeps the
+  generations and publishing.
 
 ## Later
 
