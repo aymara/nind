@@ -41,6 +41,15 @@ class. That the format is written down formally is also what makes an
 ergonomic, non-C++ way of reading and writing the same files possible in
 the first place — which is exactly what the Python package above is.
 
+nind writes **format v2**: 64-bit document ids, no 16 MiB ceiling on a
+term's postings, and long postings lists cut into blocks of 128 whose
+statistics let a top-k search skip what can't reach the top. Its grammar is
+in `docs/proposals/format-v2-blocks.md`; the source comments still describe
+v1. Indexes written in format v1 by older versions are still read. Updating
+one with `NindIndexer.update()` first rebuilds it in format v2. Amose, and
+other programs that write the files themselves, need a nind that writes v1
+until they move to v2.
+
 ## Installation
 
 ```bash
