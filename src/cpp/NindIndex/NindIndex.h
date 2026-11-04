@@ -157,18 +157,19 @@ protected:
     *\param ident ident of definition */
     void setDefinition(const unsigned int ident);
 
-    /**\brief (bulk mode) Rewrite parts of a definition in place, its place and length unchanged:
-    * the write buffer holds the parts, in order, then the specifics and identification
+    /**\brief Rewrite parts of a definition in place, its place and length unchanged: the write
+    * buffer holds the parts, in order, then the specifics and identification (bulk mode or not;
+    * like any rewrite in place, a reader of another process may see it half-written)
     *\param ident ident of definition
     *\param parts (offset in the definition, length) of each part */
-    void setDefinitionPartsBulk(const unsigned int ident,
-                                const std::vector<std::pair<unsigned int, unsigned int> > &parts);
+    void setDefinitionParts(const unsigned int ident,
+                            const std::vector<std::pair<unsigned int, unsigned int> > &parts);
 
-    /**\brief (bulk mode) The place of a definition (as it will be once the bulk session ends)
+    /**\brief The place of a definition (in bulk mode: where the bulk session has it)
     *\return false if there is none */
-    bool getDefinitionAreaBulk(const unsigned int ident,
-                               uint64_t &offset,
-                               unsigned int &length);
+    bool getDefinitionArea(const unsigned int ident,
+                           uint64_t &offset,
+                           unsigned int &length);
         
     /**\brief check if indirection exists and create indirection block if necessary
     *\param ident ident of definition

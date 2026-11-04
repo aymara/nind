@@ -3,6 +3,10 @@
 #include "TestTempDir.h"
 #include "doctest.h"
 #include <list>
+#include <map>
+#include <string>
+#include <vector>
+#include "NindBasics/NindReadBuffer.h"
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
@@ -161,3 +165,61 @@ TEST_CASE("NindTermAmoseTest.RemovingLastListedDocKeepsTheOtherDocs") {
     CHECK_EQ(1u, termIndex.getUniqueTermCount(SIMPLE_TERM));
     CHECK_EQ(3u, termIndex.getTermOccurrences(ALL));
 }
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermAmoseTest.IndexingNodeByNodeAppendsInPlace") {
+    // as Amose indexes: one content node at a time (no bulk mode), ids increasing, an occasional
+    // node indexed again or out of order; the postings (with frequencies) and counters as a model
+    TestTempDir tmp;
+    const string base = tmp.file("nodes");
+    NindLexiconAmose lexicon(base, true, 64, 64);
+    vector<unsigned int> ids;
+    for (unsigned int w = 0; w < 60; w++) ids.push_back(lexicon.addWord("w" + to_string(w), SIMPLE_TERM));
+    const NindIndex::Identification identification = lexicon.getIdentification();
+    map<unsigned int, map<NindDocId, unsigned int> > model;
+    unsigned int occurrences = 0;
+    uint64_t state = 11;
+    {
+        NindTermAmose termIndex(base, true, identification, 64);
+        for (unsigned int node = 1; node <= 2500; node++) {
+            //an occasional node out of order (an earlier id), or indexed again
+            const NindDocId doc = (node % 97 == 0) ? node / 2 : node;
+            map<unsigned int, unsigned int> counts;
+            const unsigned int length = 1 + (state = state * 6364136223846793005ull + 1442695040888963407ull) % 20;
+            for (unsigned int i = 0; i < length; i++) {
+                state = state * 6364136223846793005ull + 1442695040888963407ull;
+                const unsigned int rank = (unsigned int)((state >> 33) % 100);
+                counts[ids[rank * rank / 170]]++;              //w0 in most nodes: a long list
+            }
+            for (map<unsigned int, unsigned int>::const_iterator c = counts.begin(); c != counts.end(); c++) {
+                termIndex.addDocsToTerm(c->first, SIMPLE_TERM, oneDoc((unsigned int)doc, c->second), identification);
+                model[c->first][doc] += c->second;
+                occurrences += c->second;
+            }
+        }
+        CHECK_EQ(occurrences, termIndex.getTermOccurrences(SIMPLE_TERM));
+        CHECK_EQ(model.size(), termIndex.getUniqueTermCount(SIMPLE_TERM));
+    }
+    NindTermAmose reader(base, false, identification);
+    CHECK_EQ(occurrences, reader.getTermOccurrences(ALL));
+    NindReadBuffer buffer;
+    for (map<unsigned int, map<NindDocId, unsigned int> >::const_iterator t = model.begin(); t != model.end(); t++) {
+        INFO("term " << t->first);
+        vector<Document> postings, postingsConst;
+        REQUIRE(reader.getDocPostings(t->first, postings));
+        REQUIRE(reader.getDocPostings(t->first, postingsConst, buffer));
+        REQUIRE_EQ(t->second.size(), postings.size());
+        size_t i = 0;
+        for (map<NindDocId, unsigned int>::const_iterator d = t->second.begin(); d != t->second.end(); d++, i++) {
+            CHECK_EQ(d->first, postings[i].ident);
+            CHECK_EQ(d->second, postings[i].frequency);
+            CHECK_EQ(d->first, postingsConst[i].ident);
+        }
+        list<NindDocId> docs;
+        REQUIRE(reader.getDocList(t->first, docs));
+        CHECK_EQ(postings.size(), docs.size());
+        CHECK_EQ(t->second.size(), reader.getDocFreq(t->first));
+    }
+    vector<Document> none;
+    CHECK_FALSE(reader.getDocPostings(ids[59] + 1000, none));
+}
+////////////////////////////////////////////////////////////

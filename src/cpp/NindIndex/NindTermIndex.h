@@ -90,6 +90,11 @@ public:
         std::vector<Category> categories;
     };
 
+    /**\brief Sequential read of a term's directory only (also a writer's, in bulk mode or not; see
+    * the const one) */
+    bool getTermDirectory(const unsigned int ident,
+                          TermDirectory &directory);
+
     /**\brief Thread-safe (const) read of a term's directory only (format v2: the blocks aren't
     * read; format v1: everything is inline)
     *\return true if the term was found */
@@ -166,11 +171,11 @@ public:
     /**\brief (writer) Change a term's postings: the removed documents leave every category,
     * then the added postings go into category cg (a document already there: its frequency
     * replaced); a term left without documents is erased. The definition is rewritten whole, with
-    * room for the next additions (format v2). Fast path, in bulk mode (format v2): when nothing
-    * is removed, the term's only category is cg and every added document comes after its last one,
-    * only its last block is rewritten, followed by the new blocks, and its directory, in place in
-    * the definition's room (left by an earlier rewrite), when there is enough. Each term at most
-    * once between beginBulk and endBulk.
+    * room for the next additions (format v2). Fast path (format v2, bulk mode or not): when
+    * nothing is removed, the term's only category is cg and every added document comes after its
+    * last one, only its last block is rewritten, followed by the new blocks, and its directory, in
+    * place in the definition's room (left by an earlier rewrite), when there is enough (like any
+    * rewrite in place, a reader of another process may see it half-written).
     *\param ident ident of term
     *\param removed documents to remove, in increasing order
     *\param cg category of the added postings

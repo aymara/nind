@@ -156,8 +156,8 @@ TEST_CASE("NindTermUpdate.AgainstAModel") {
     CHECK(report.ok());
 }
 ////////////////////////////////////////////////////////////
-TEST_CASE("NindTermUpdate.InPlaceOnlyInBulkMode") {
-    // outside bulk mode, the definition is rewritten whole (same result)
+TEST_CASE("NindTermUpdate.InPlaceOutsideBulkMode") {
+    // outside bulk mode too (as Amose writes, document by document): appends in place
     TestTempDir tmp;
     const string base = tmp.file("nobulk");
     NindIndex::Identification identification;
@@ -170,7 +170,7 @@ TEST_CASE("NindTermUpdate.InPlaceOnlyInBulkMode") {
     vector<Document> added;
     for (unsigned int d = 1; d <= 1000; d++) added.push_back(Document(d, 1));
     CHECK_FALSE(terms.updateTermDef(1, vector<NindDocId>(), 0, added, identification, list<unsigned int>()));
-    CHECK_FALSE(terms.updateTermDef(1, vector<NindDocId>(), 0, vector<Document>(1, Document(2000, 3)), identification, list<unsigned int>()));
+    CHECK(terms.updateTermDef(1, vector<NindDocId>(), 0, vector<Document>(1, Document(2000, 3)), identification, list<unsigned int>()));
     list<TermCG> def;
     REQUIRE(terms.getTermDef(1, def));
     CHECK_EQ(1001u, def.front().documents.size());

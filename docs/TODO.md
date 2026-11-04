@@ -36,6 +36,25 @@ of 3.0.0 (format v2).
   follow-up work").
 - **Amose and LIMA readers.** They need adapting to format v2 (nind's own
   `NindAmose` classes already write v2); until then they need nind < 3.
+  From `Amose/amose/docs/search-algorithms.md` (§10, §13), for that work,
+  on the Amose side (the plugin `amose_nindindex`):
+  - `CoreNindIndexInvertedfileReader.cpp:249` passes a `std::list<unsigned int>`
+    to `NindTermAmose::getDocList` (64-bit `NindDocId` since 3.0.0).
+  - `tf` is read from the local index once per posting
+    (`DocListIteratorImpl.cpp:80`, unlocked): `NindTermAmose::getDocPostings`
+    (3.2) returns the postings with their frequencies.
+  - Deletion only empties the node's local definition: postings and statistics
+    keep the node until a rebuild (`NindTermAmose::removeDocFromTerm` exists).
+  - One `QMutex` per reader around nind's sequential API: the `const` paths
+    (`getDocPostings(…, buffer)`, `getTermDef(…, buffer)`...) are thread-safe.
+  - `reset()` removes files with the old extensions (`.lexiconindex`, …), not
+    `.nindlexiconindex`.
+  - List mode's MaxScore is compiled out (`SATURATION`): the block descriptors
+    (`NindTermIndex::getTermDirectory`, `getTermBlocks`: max frequency, shortest
+    length per 128 postings) could drive it.
+  On the nind side, done in 3.2: `NindTermAmose::addDocsToTerm` appends in
+  place (node-by-node indexing, no bulk mode: per call cost flat, 12.9 vs
+  66.4 µs at 50k nodes).
 - **Build memory.** ~19 bytes per token (7.8 GB for MS MARCO 8.8M); sharded
   builds would bound it per shard.
 - **Concurrency benchmark.** Rerun `bench/retrieval/concurrency.py` on format

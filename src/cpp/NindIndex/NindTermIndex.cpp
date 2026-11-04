@@ -487,6 +487,46 @@ void NindTermIndex::decodeTermDefV2(const unsigned int ident,
     }
 }
 ////////////////////////////////////////////////////////////
+//brief Sequential read of a term's directory only (a writer's, in bulk mode or not)
+bool NindTermIndex::getTermDirectory(const unsigned int ident,
+                                     TermDirectory &directory)
+{
+    directory.categories.clear();
+    if (!isFormatV2()) {
+        //format v1: no blocks, everything inline
+        list<TermCG> termDef;
+        if (!getTermDef(ident, termDef)) return false;
+        directory.offset = 0;
+        directory.length = 0;
+        for (list<TermCG>::const_iterator it = termDef.begin(); it != termDef.end(); it++) {
+            directory.categories.push_back(TermDirectory::Category());
+            TermDirectory::Category &category = directory.categories.back();
+            category.cg = (*it).cg;
+            category.frequency = (*it).frequency;
+            category.docsNb = (*it).documents.size();
+            category.inlinePostings.assign((*it).documents.begin(), (*it).documents.end());
+        }
+        return true;
+    }
+    uint64_t offset = 0;
+    unsigned int length = 0;
+    if (!getDefinitionArea(ident, offset, length)) return false;
+    if (!getDefinition(ident)) return false;
+    NindReadBuffer &in = m_file.inBuffer();
+    parseDirectoryV2(ident, in, directory);
+    directory.offset = offset;
+    directory.length = length;
+    const unsigned int directoryEnd = in.getInBufferSize();
+    for (size_t c = 0; c < directory.categories.size(); c++) {
+        const vector<Block> &blocks = directory.categories[c].blocks;
+        for (size_t b = 0; b < blocks.size(); b++) {
+            if (blocks[b].offset < directoryEnd || blocks[b].offset + blocks[b].length > length)
+                throw NindTermIndexException("NindTermIndex::getTermDef G : " + m_fileName);
+        }
+    }
+    return true;
+}
+////////////////////////////////////////////////////////////
 //brief Thread-safe (const) read of a term's directory only
 bool NindTermIndex::getTermDirectory(const unsigned int ident,
                                      TermDirectory &directory,
@@ -580,7 +620,8 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
     }
     if (extraBlocks != 0)
         tailleMaximum += (uint64_t)extraBlocks * TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_DEJFINITION_MAXIMUM
-                         + (uint64_t)(extraBlocks + 1) * (TAILLE_TESTE_BLOC_MAXIMUM + BLOCK_SIZE * TAILLE_DOC_MAXIMUM);
+                         + (uint64_t)(extraBlocks + 1) * (TAILLE_TESTE_BLOC_MAXIMUM + BLOCK_SIZE * TAILLE_DOC_MAXIMUM)
+                         + 2 * BLOCK_SIZE;
     if (tailleMaximum > 0xFFFFFFFFull)
         throw OutOfBoundException("NindTermIndex::setTermDef definition over 4 GiB " + m_fileName);
     m_file.createBuffer((unsigned int)tailleMaximum);
@@ -647,8 +688,10 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
     }
     //room for extraBlocks more blocks, and the last one's growth
     if (extraBlocks != 0 && !pending.empty()) {
+        //(bit-packed blocks vary in size: a block of consecutive documents takes a few bytes, the
+        //same with one more distant document much more; 2 bytes per document cover that growth)
         const uint64_t averageBlock = (m_file.getOutBufferSize() - blocksBegin) / pending.size() + 1;
-        const uint64_t room = (extraBlocks + 1) * averageBlock;
+        const uint64_t room = (extraBlocks + 1) * averageBlock + 2 * BLOCK_SIZE;
         for (uint64_t i = 0; i < room; i++) m_file.putInt1(0);
     }
 }
@@ -906,7 +949,7 @@ bool NindTermIndex::updateTermDef(const unsigned int ident,
     NindCriticalSection criticalSection(m_file);
     checkExtendIndirection(ident, fileIdentification);
     //the fast path: the last block, the new ones and the directory, in place
-    if (removed.empty() && !added.empty() && isBulk() && appendInPlace(ident, cg, added, fileIdentification, specifics))
+    if (removed.empty() && !added.empty() && appendInPlace(ident, cg, added, fileIdentification, specifics))
         return true;
     //the whole definition (sequential read: also in bulk mode, where the definitions are where
     //the bulk session put them)
@@ -964,11 +1007,11 @@ bool NindTermIndex::appendInPlace(const unsigned int ident,
                                   const Identification &fileIdentification,
                                   const list<unsigned int> &specifics)
 {
-    //the definition's place as the bulk session leaves it (each term updated once: its file one)
+    //the definition's place (in bulk mode: where the bulk session has it)
     uint64_t areaOffset = 0;
     unsigned int areaLength = 0;
-    if (!getDefinitionAreaBulk(ident, areaOffset, areaLength)) return false;
-    //the definition read (sequentially, where the bulk session has it), its directory parsed
+    if (!getDefinitionArea(ident, areaOffset, areaLength)) return false;
+    //the definition read (sequentially), its directory parsed
     if (!getDefinition(ident)) return false;
     NindReadBuffer &in = m_file.inBuffer();
     TermDirectory directory;
@@ -1033,7 +1076,7 @@ bool NindTermIndex::appendInPlace(const unsigned int ident,
     vector<pair<unsigned int, unsigned int> > parts;
     parts.push_back(pair<unsigned int, unsigned int>(0, directorySize));
     parts.push_back(pair<unsigned int, unsigned int>((unsigned int)firstOffset, blocksSize));
-    setDefinitionPartsBulk(ident, parts);
+    setDefinitionParts(ident, parts);
     return true;
 }
 ////////////////////////////////////////////////////////////
