@@ -20,6 +20,8 @@
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
 #include <cstdint>
+#include <atomic>
+#include <mutex>
 #include "NindSignalCatcher.h"
 #include "NindReadBuffer.h"
 #include <stdio.h>
@@ -111,7 +113,10 @@ public:
     /**\brief Read bytesNb bytes at offset into buffer, without moving the file position nor
     * touching the internal buffer: thread-safe (const), several threads can read one file at
     * once, each into its own buffer. Positioned reads (pread, ReadFile with an offset) on a
-    * read-only handle of its own, opened with the file. Checks the bytes are in the file.
+    * read-only handle of its own, opened at the first positioned read (so that a file only
+    * read sequentially keeps one descriptor). Checks the bytes are in the file.
+    * On Windows, concurrent reads of one handle are serialized by the system: correct, but
+    * not parallel.
     *\param offset where to read in the file
     *\param bytesNb number of bytes to read
     *\param buffer receives the bytes (its previous content is forgotten, also on failure) */
@@ -310,7 +315,11 @@ private:
     unsigned char *m_wbufferEnd;     //fin buffer d'ecriture
     unsigned char *m_wPtr;           //pointeur buffer d'ecriture
     NindReadBuffer m_in;             //buffer de lecture (et ses dejcodeurs)
-    intptr_t m_readHandle;           //descripteur (POSIX) ou HANDLE (Windows) en lecture seule, pour readAt
+    //descripteur (POSIX) ou HANDLE (Windows) en lecture seule, pour readAt : ouvert au premier
+    //besoin (readHandle), -1 sinon
+    mutable std::atomic<intptr_t> m_readHandle;
+    mutable std::mutex m_readHandleMutex;
+    intptr_t readHandle() const;
     long int m_fileSize;             //taille du fichier
     bool m_isLittleEndian;
     bool m_isBulk;                   //vrai en mode massif (ejcritures non vidanges une ah une)

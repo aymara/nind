@@ -387,6 +387,7 @@ public:
             if (scores[position] > 0) ranked.push_back(std::make_pair(-scores[position], position));
             scores[position] = 0.0;
         }
+        lease.clean = true;             //every score reset: the scratch arrays can be reused
         //decreasing score, then the order of the corpus
         const size_t kept = (topK >= 0 && (size_t)topK < ranked.size()) ? (size_t)topK : ranked.size();
         std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
@@ -425,7 +426,8 @@ private:
     struct ScratchLease {
         const Bm25Scorer &scorer;
         std::unique_ptr<Scratch> scratch;
-        explicit ScratchLease(const Bm25Scorer &s): scorer(s), scratch() {
+        bool clean;
+        explicit ScratchLease(const Bm25Scorer &s): scorer(s), scratch(), clean(false) {
             {
                 std::lock_guard<std::mutex> lock(scorer.m_poolMutex);
                 if (!scorer.m_pool.empty()) {
@@ -436,9 +438,9 @@ private:
             if (!scratch) scratch.reset(new Scratch());
         }
         ~ScratchLease() {
-            // only clean scratch arrays go back (an exception may have left scores behind)
-            if (!scratch) return;
-            if (std::uncaught_exception()) return;
+            //only clean scratch arrays go back (search sets clean after resetting its scores;
+            //an exception may have left scores behind)
+            if (!scratch || !clean) return;
             scratch->buffer.shrink();       //a large definition's storage isn't kept
             std::lock_guard<std::mutex> lock(scorer.m_poolMutex);
             const size_t maxKept = std::max(1u, std::thread::hardware_concurrency());

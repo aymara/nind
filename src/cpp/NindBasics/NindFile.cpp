@@ -70,6 +70,7 @@ NindFile::NindFile(const string &fileName):
     m_wPtr(0),
     m_in(&m_fileName),
     m_readHandle(-1),
+    m_readHandleMutex(),
     m_fileSize(0),
     m_isLittleEndian(false),
     m_isBulk(false),
@@ -108,17 +109,7 @@ bool NindFile::open(const string &accessMode)
     //ouvre le fichier
     m_file =  fopen(m_fileName.c_str(), accessMode.c_str());
     if (!m_file) return false;
-    //un descripteur en lecture seule, ah lui, pour les lectures positionnejes (readAt) : elles ne
-    //dejplacent pas la position du FILE* de l'API sejquentielle (sous Windows, ReadFile avec un
-    //dejcalage dejplace le pointeur du handle, d'oug un handle sejparej). S'il manque, readAt ejchoue.
-#ifdef _WIN32
-    HANDLE handle = CreateFileA(m_fileName.c_str(), GENERIC_READ,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    m_readHandle = (handle == INVALID_HANDLE_VALUE) ? -1 : (intptr_t)handle;
-#else
-    m_readHandle = ::open(m_fileName.c_str(), O_RDONLY | O_CLOEXEC);
-#endif
+
     //memorise sa taille
     fseek(m_file, 0, SEEK_END);
     m_fileSize = ftell(m_file);
@@ -144,27 +135,51 @@ void NindFile::close()
         fclose(m_file);
         m_file = 0;
     }
-    if (m_readHandle != -1) {
+    std::lock_guard<std::mutex> lock(m_readHandleMutex);
+    const intptr_t handle = m_readHandle.exchange(-1);
+    if (handle != -1) {
 #ifdef _WIN32
-        CloseHandle((HANDLE)m_readHandle);
+        CloseHandle((HANDLE)handle);
 #else
-        ::close((int)m_readHandle);
+        ::close((int)handle);
 #endif
-        m_readHandle = -1;
     }
+}
+////////////////////////////////////////////////////////////
+//le descripteur en lecture seule des lectures positionnejes (readAt), ouvert au premier besoin :
+//elles ne dejplacent pas la position du FILE* de l'API sejquentielle (sous Windows, ReadFile avec
+//un dejcalage dejplace le pointeur du handle, d'oug un handle sejparej). -1 s'il ne s'ouvre pas.
+intptr_t NindFile::readHandle() const
+{
+    intptr_t handle = m_readHandle.load(std::memory_order_acquire);
+    if (handle != -1) return handle;
+    std::lock_guard<std::mutex> lock(m_readHandleMutex);
+    handle = m_readHandle.load(std::memory_order_acquire);
+    if (handle != -1 || m_file == 0) return handle;
+#ifdef _WIN32
+    HANDLE opened = CreateFileA(m_fileName.c_str(), GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    handle = (opened == INVALID_HANDLE_VALUE) ? -1 : (intptr_t)opened;
+#else
+    handle = ::open(m_fileName.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
+    m_readHandle.store(handle, std::memory_order_release);
+    return handle;
 }
 ////////////////////////////////////////////////////////////
 //brief Size of the file now, from the read handle (thread-safe)
 uint64_t NindFile::getReadFileSize() const
 {
-    if (m_readHandle == -1) throw ReadFileException(m_fileName);
+    const intptr_t handle = readHandle();
+    if (handle == -1) throw ReadFileException(m_fileName);
 #ifdef _WIN32
     LARGE_INTEGER size;
-    if (!GetFileSizeEx((HANDLE)m_readHandle, &size)) throw ReadFileException(m_fileName);
+    if (!GetFileSizeEx((HANDLE)handle, &size)) throw ReadFileException(m_fileName);
     return (uint64_t)size.QuadPart;
 #else
     struct stat fileStat;
-    if (fstat((int)m_readHandle, &fileStat) != 0) throw ReadFileException(m_fileName);
+    if (fstat((int)handle, &fileStat) != 0) throw ReadFileException(m_fileName);
     return (uint64_t)fileStat.st_size;
 #endif
 }
@@ -176,7 +191,8 @@ void NindFile::readAt(const uint64_t offset,
 {
     buffer.setFileName(&m_fileName);
     buffer.clear();
-    if (m_readHandle == -1) throw ReadFileException(m_fileName);
+    const intptr_t handle = readHandle();
+    if (handle == -1) throw ReadFileException(m_fileName);
     //une longueur lue dans un fichier corrompu ne doit pas provoquer une allocation dejmesureje
     if (bytesNb > READ_SIZE_CHECK_THRESHOLD && offset + bytesNb > getReadFileSize())
         throw EofException(m_fileName);
@@ -190,13 +206,13 @@ void NindFile::readAt(const uint64_t offset,
         overlapped.Offset = (DWORD)(position & 0xFFFFFFFFu);
         overlapped.OffsetHigh = (DWORD)(position >> 32);
         DWORD readSize = 0;
-        if (!ReadFile((HANDLE)m_readHandle, bytes + done, (DWORD)(bytesNb - done), &readSize, &overlapped)) {
+        if (!ReadFile((HANDLE)handle, bytes + done, (DWORD)(bytesNb - done), &readSize, &overlapped)) {
             buffer.clear();
             if (GetLastError() == ERROR_HANDLE_EOF) throw EofException(m_fileName);
             throw ReadFileException(m_fileName);
         }
 #else
-        const ssize_t readSize = pread((int)m_readHandle, bytes + done, bytesNb - done, (off_t)position);
+        const ssize_t readSize = pread((int)handle, bytes + done, bytesNb - done, (off_t)position);
         if (readSize < 0) {
             if (errno == EINTR) continue;
             buffer.clear();
