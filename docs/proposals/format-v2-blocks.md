@@ -363,11 +363,29 @@ are unchanged.
 <longueurMin>           ::= <EntierULat>        // shortest document length in the block, 0 = unknown
 <offsetBloc>            ::= <Entier4>          // from the definition's first byte (its flag)
 <longueurBloc>          ::= <Entier4>
-<bloc>                  ::= <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
-                            { <identDocRelatif> <frejquenceDoc> }      // the first one relative to premierDoc
-<identDocRelatif>       ::= <EntierULat64>
+<bloc>                  ::= <blocCompact> | <blocULat>
+<blocCompact>           ::= <flagBloc=73> <identifiantTerme> <catejgorie> <nbreDocsBloc>
+                            <frejquenceMin> <bitsEcarts> <bitsFrejquences>
+                            <ecartsPackejs> <frejquencesPackejes>      // written since 3.1
+<frejquenceMin>         ::= <EntierULat>        // smallest frequency in the block
+<bitsEcarts>            ::= <Entier1>           // 0..64
+<bitsFrejquences>       ::= <Entier1>           // 0..32
+<ecartsPackejs>         ::= ceil((nbreDocsBloc - 1) * bitsEcarts / 8) bytes: for each document
+                            after the first, (its id - the previous one's - 1) in bitsEcarts bits
+<frejquencesPackejes>   ::= ceil(nbreDocsBloc * bitsFrejquences / 8) bytes: for each document,
+                            (its frequency - frejquenceMin) in bitsFrejquences bits
+<blocULat>              ::= <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
+                            { <identDocRelatif> <frejquenceDoc> }      // nind 3.0.0; still read
+<identDocRelatif>       ::= <EntierULat64>      // the first one relative to premierDoc (0)
 <frejquenceDoc>         ::= <EntierULat>
 ```
+
+- **Bit-packing** (flag 73, nind 3.1): values are packed least significant
+  bit first, bit after bit across bytes; a block's widths are those of its
+  largest gap and frequency difference (0 bits: all equal, e.g. consecutive
+  documents or every frequency 1). A compact block holds at most 128
+  documents. nind 3.0.0 can't read flag 73 blocks: indexes written since
+  then need nind ≥ 3.1.
 
 - **Blocks are written inside their term's definition, after its directory**
   (implementation decision, 2026-11-04), at offsets relative to the
@@ -375,9 +393,10 @@ are unchanged.
   blocks, so the free-space management, the hole statistics and the merge
   work unchanged, and a definition moved by a rewrite keeps valid offsets.
   A search still reads a term's directory, then only the blocks it needs.
-  An update rewrites the whole definition, as in v1: rewriting only the last
-  block, in place, needs slack in the definition (the original design's
-  "extensions"), a writer change that needs no format change. A block
+  A definition may hold room after its directory and after its blocks (the
+  original design's "extensions"): an update rewrites a term whole with room,
+  and an update that only appends documents rewrites only the last block, the
+  new blocks and the directory, in place (`NindTermIndex::updateTermDef`). A block
   repeats its term and category, and its count, first and last documents and
   max frequency are checked against its descriptor.
 - `<offsetBloc>` and `<longueurBloc>` are fixed-width so that the writer can
