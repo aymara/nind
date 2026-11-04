@@ -151,6 +151,31 @@ TEST_CASE("NindFormatV2.BlocksRoundTrip") {
             REQUIRE(c < ends.size());
             CHECK_EQ(n, ends[c]);
         }
+        // the directory alone, then its blocks (all at once, and one by one): the same postings
+        NindTermIndex::TermDirectory directory;
+        REQUIRE(terms.getTermDirectory(i + 1, directory, buffer));
+        REQUIRE_EQ(defs[i].size(), directory.categories.size());
+        vector<Document> fromDirectory, oneByOne;
+        for (size_t c2 = 0; c2 < directory.categories.size(); c2++) {
+            const NindTermIndex::TermDirectory::Category &cat = directory.categories[c2];
+            fromDirectory.insert(fromDirectory.end(), cat.inlinePostings.begin(), cat.inlinePostings.end());
+            oneByOne.insert(oneByOne.end(), cat.inlinePostings.begin(), cat.inlinePostings.end());
+            if (!cat.blocks.empty()) {
+                CHECK(cat.inlinePostings.empty());
+                terms.getTermBlocks(i + 1, directory, c2, 0, cat.blocks.size(), fromDirectory, buffer);
+                for (size_t b = 0; b < cat.blocks.size(); b++)
+                    terms.getTermBlocks(i + 1, directory, c2, b, b + 1, oneByOne, buffer);
+                CHECK_EQ((cat.docsNb + NindTermIndex::BLOCK_SIZE - 1) / NindTermIndex::BLOCK_SIZE, cat.blocks.size());
+            }
+            else CHECK(cat.docsNb <= NindTermIndex::BLOCK_SIZE);
+        }
+        REQUIRE_EQ(postings.size(), fromDirectory.size());
+        REQUIRE_EQ(postings.size(), oneByOne.size());
+        for (size_t p = 0; p < postings.size(); p++) {
+            CHECK_EQ(postings[p].ident, fromDirectory[p].ident);
+            CHECK_EQ(postings[p].frequency, fromDirectory[p].frequency);
+            CHECK_EQ(postings[p].ident, oneByOne[p].ident);
+        }
     }
     // rewritten with another size (moved or in place), still read
     {

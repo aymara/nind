@@ -142,6 +142,21 @@ void NindIndex::endBulk()
     vector<pair<uint64_t, unsigned int> >().swap(m_bulkIndirections);
 }
 ////////////////////////////////////////////////////////////
+//brief Thread-safe (const) place of a definition in the file, without reading it
+bool NindIndex::getDefinitionRefAt(const unsigned int ident,
+                                   NindReadBuffer &buffer,
+                                   uint64_t &offset,
+                                   unsigned int &length) const
+{
+    if (m_isBulk) throw NindIndexException("NindIndex::getDefinitionRefAt in bulk mode : " + m_fileName);
+    const uint64_t indirection = getEntryPosAt(ident, buffer);
+    if (indirection == 0) return false;
+    m_file.readAt(indirection, TAILLE_INDIRECTION, buffer);
+    offset = getIndirectionOffset(buffer);
+    length = getIndirectionLength(buffer);
+    return offset != 0;
+}
+////////////////////////////////////////////////////////////
 //brief Thread-safe (const) read of a definition into buffer (see getDefinition)
 bool NindIndex::getDefinitionAt(const unsigned int ident,
                                 NindReadBuffer &buffer,

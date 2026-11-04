@@ -23,6 +23,9 @@
 using namespace latecon::nindex;
 using namespace std;
 ////////////////////////////////////////////////////////////
+//(definition of the static member: it may be bound by reference)
+const unsigned int NindTermIndex::BLOCK_SIZE;
+////////////////////////////////////////////////////////////
 // <dejfinition>           ::= <flagDejfinition=17> <identifiantTerme>
 //                             <longueurDonnejes> <donnejesTerme>
 // <flagDejfinition=17>    ::= <Entier1>
@@ -256,14 +259,100 @@ void NindTermIndex::getSpecificWords(list<unsigned int> &specifics)
         specifics.push_back(m_file.getInt4());  
 }
 ////////////////////////////////////////////////////////////
-namespace {
-//a block of a category (format v2), as its descriptor gives it
-struct BlockDescriptor {
-    NindDocId first, last;
-    uint64_t docsNb;
-    unsigned int maxFrequency, minLength;
-    uint64_t offset, length;
-};
+////////////////////////////////////////////////////////////
+//format v2: l'en-teste et le rejpertoire de la dejfinition (in : au premier octet de la dejfinition)
+void NindTermIndex::parseDirectoryV2(const unsigned int ident,
+                                     NindReadBuffer &in,
+                                     TermDirectory &directory) const
+{
+    directory.categories.clear();
+    //<flagDejfinition=23> <identifiantTerme> <longueurDonnejes> { <catejgorieV2> }
+    if (in.getInt1() != FLAG_DEJFINITION)
+        throw NindTermIndexException("NindTermIndex::getTermDef A : " + m_fileName);
+    if (in.getInt4() != ident)
+        throw NindTermIndexException("NindTermIndex::getTermDef B : " + m_fileName);
+    const unsigned int longueurDonnejes = getDefinitionField(in);
+    in.setEndInBuffer(longueurDonnejes);
+    while (!in.endOfInBuffer()) {
+        //<flagCg=67> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
+        if (in.getInt1() != FLAG_CG)
+            throw NindTermIndexException("NindTermIndex::getTermDef C : " + m_fileName);
+        directory.categories.push_back(TermDirectory::Category());
+        TermDirectory::Category &category = directory.categories.back();
+        category.cg = in.getInt1();
+        const uint64_t frejquenceTerme = in.getUIntLat64();
+        category.docsNb = in.getUIntLat64();
+        const unsigned int nbreBlocs = in.getUIntLat();
+        if (frejquenceTerme > 0xFFFFFFFFull)
+            throw NindTermIndexException("NindTermIndex::getTermDef term frequency over 32 bits : " + m_fileName);
+        category.frequency = (unsigned int)frejquenceTerme;
+        if (nbreBlocs == 0) {
+            //<postingsEnLigne>: docsNb comes from the file: no reserve, every read is bounded
+            NindDocId identDocument = 0;
+            for (uint64_t it = 0; it != category.docsNb; it++) {
+                const uint64_t delta = in.getUIntLat64();
+                if (delta > ~(NindDocId)0 - identDocument || (it > 0 && delta == 0))
+                    throw NindTermIndexException("NindTermIndex::getTermDef D : " + m_fileName);
+                identDocument += delta;
+                category.inlinePostings.push_back(Document(identDocument, in.getUIntLat()));
+            }
+            continue;
+        }
+        //{ <descripteurBloc> }: nbreBlocs comes from the file: no reserve either
+        NindDocId previousLast = 0;
+        uint64_t total = 0;
+        for (unsigned int b = 0; b != nbreBlocs; b++) {
+            Block block;
+            const uint64_t firstRelative = in.getUIntLat64();
+            const uint64_t lastRelative = in.getUIntLat64();
+            if (firstRelative > ~(NindDocId)0 - previousLast)
+                throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
+            block.first = previousLast + firstRelative;
+            if (lastRelative > ~(NindDocId)0 - block.first)
+                throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
+            block.last = block.first + lastRelative;
+            block.docsNb = in.getUIntLat();
+            block.maxFrequency = in.getUIntLat();
+            block.minLength = in.getUIntLat();
+            block.offset = in.getInt4();
+            block.length = in.getInt4();
+            //a block after the first starts after the previous one's last document
+            if (block.docsNb == 0 || (b > 0 && firstRelative == 0))
+                throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
+            total += block.docsNb;
+            previousLast = block.last;
+            category.blocks.push_back(block);
+        }
+        if (total != category.docsNb)
+            throw NindTermIndexException("NindTermIndex::getTermDef F : " + m_fileName);
+    }
+}
+////////////////////////////////////////////////////////////
+//format v2: un bloc (in : ah son premier octet, fin de buffer ah sa fin), vejrifiej par son descripteur
+void NindTermIndex::decodeBlock(const unsigned int ident,
+                                const Block &block,
+                                NindReadBuffer &in,
+                                vector<Document> &postings) const
+{
+    //<flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc> { <identDocRelatif> <frejquenceDoc> }
+    if (in.getInt1() != FLAG_BLOC || in.getInt4() != ident)
+        throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
+    in.getInt1();                   //catejgorie (checked by the descriptor's place)
+    if (in.getUIntLat() != block.docsNb)
+        throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
+    NindDocId identDocument = block.first;
+    unsigned int maxFrequency = 0;
+    for (uint64_t it = 0; it != block.docsNb; it++) {
+        const uint64_t delta = in.getUIntLat64();
+        if (delta > ~(NindDocId)0 - identDocument || (it == 0 && delta != 0) || (it > 0 && delta == 0))
+            throw NindTermIndexException("NindTermIndex::getTermDef I : " + m_fileName);
+        identDocument += delta;
+        const unsigned int frequency = in.getUIntLat();
+        if (frequency > maxFrequency) maxFrequency = frequency;
+        postings.push_back(Document(identDocument, frequency));
+    }
+    if (identDocument != block.last || maxFrequency != block.maxFrequency || !in.endOfInBuffer())
+        throw NindTermIndexException("NindTermIndex::getTermDef J : " + m_fileName);
 }
 ////////////////////////////////////////////////////////////
 //format v2: dejcode la dejfinition entiehre (postings en ligne et blocs) dans in, lue en entier
@@ -273,109 +362,96 @@ void NindTermIndex::decodeTermDefV2(const unsigned int ident,
                                     vector<size_t> &categoryEnds,
                                     vector<pair<unsigned char, unsigned int> > *categories) const
 {
-    //<flagDejfinition=23> <identifiantTerme> <longueurDonnejes> { <catejgorieV2> }
-    if (in.getInt1() != FLAG_DEJFINITION)
-        throw NindTermIndexException("NindTermIndex::getTermDef A : " + m_fileName);
-    if (in.getInt4() != ident)
-        throw NindTermIndexException("NindTermIndex::getTermDef B : " + m_fileName);
-    const unsigned int longueurDonnejes = getDefinitionField(in);
-    in.setEndInBuffer(longueurDonnejes);
-    //the directory: inline postings are decoded at once, blocks noted for later
-    vector<vector<BlockDescriptor> > blocks;
-    vector<uint64_t> docsNbs;
-    while (!in.endOfInBuffer()) {
-        //<flagCg=67> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
-        if (in.getInt1() != FLAG_CG)
-            throw NindTermIndexException("NindTermIndex::getTermDef C : " + m_fileName);
-        const unsigned char catejgorie = in.getInt1();
-        const uint64_t frejquenceTerme = in.getUIntLat64();
-        const uint64_t nbreDocs = in.getUIntLat64();
-        const unsigned int nbreBlocs = in.getUIntLat();
-        if (frejquenceTerme > 0xFFFFFFFFull)
-            throw NindTermIndexException("NindTermIndex::getTermDef term frequency over 32 bits : " + m_fileName);
-        if (categories != 0) categories->push_back(pair<unsigned char, unsigned int>(catejgorie, (unsigned int)frejquenceTerme));
-        blocks.push_back(vector<BlockDescriptor>());
-        docsNbs.push_back(nbreDocs);
-        if (nbreBlocs == 0) {
-            //<postingsEnLigne>: nbreDocs comes from the file: no reserve, every read is bounded
-            NindDocId identDocument = 0;
-            for (uint64_t it = 0; it != nbreDocs; it++) {
-                const uint64_t delta = in.getUIntLat64();
-                if (delta > ~(NindDocId)0 - identDocument)
-                    throw NindTermIndexException("NindTermIndex::getTermDef D : " + m_fileName);
-                identDocument += delta;
-                postings.push_back(Document(identDocument, in.getUIntLat()));
-            }
-        }
-        else {
-            //{ <descripteurBloc> }: nbreBlocs comes from the file: no reserve either
-            NindDocId previousLast = 0;
-            uint64_t total = 0;
-            for (unsigned int b = 0; b != nbreBlocs; b++) {
-                BlockDescriptor block;
-                const uint64_t firstRelative = in.getUIntLat64();
-                const uint64_t lastRelative = in.getUIntLat64();
-                if (firstRelative > ~(NindDocId)0 - previousLast)
-                    throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
-                block.first = previousLast + firstRelative;
-                if (lastRelative > ~(NindDocId)0 - block.first)
-                    throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
-                block.last = block.first + lastRelative;
-                block.docsNb = in.getUIntLat();
-                block.maxFrequency = in.getUIntLat();
-                block.minLength = in.getUIntLat();
-                block.offset = in.getInt4();
-                block.length = in.getInt4();
-                //a block after the first starts after the previous one's last document
-                if (block.docsNb == 0 || (b > 0 && firstRelative == 0))
-                    throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
-                total += block.docsNb;
-                previousLast = block.last;
-                blocks.back().push_back(block);
-            }
-            if (total != nbreDocs)
-                throw NindTermIndexException("NindTermIndex::getTermDef F : " + m_fileName);
-        }
-        categoryEnds.push_back(postings.size());
-    }
-    //the blocks, in category order: each read where its descriptor says, and checked against it
+    TermDirectory directory;
+    parseDirectoryV2(ident, in, directory);
     const unsigned int directoryEnd = in.getInBufferSize();
-    for (size_t c = 0; c < blocks.size(); c++) {
-        if (blocks[c].empty()) continue;
-        //the postings of the categories after c were already appended for inline ones:
-        //blocks' postings go at their category's place
-        vector<Document> blockPostings;
-        for (size_t b = 0; b < blocks[c].size(); b++) {
-            const BlockDescriptor &block = blocks[c][b];
+    for (size_t c = 0; c < directory.categories.size(); c++) {
+        const TermDirectory::Category &category = directory.categories[c];
+        if (categories != 0) categories->push_back(pair<unsigned char, unsigned int>(category.cg, category.frequency));
+        postings.insert(postings.end(), category.inlinePostings.begin(), category.inlinePostings.end());
+        for (size_t b = 0; b < category.blocks.size(); b++) {
+            const Block &block = category.blocks[b];
             //blocks lie after the directory, within the definition
             if (block.offset < directoryEnd)
                 throw NindTermIndexException("NindTermIndex::getTermDef G : " + m_fileName);
             in.setInBufferPtr((unsigned int)block.offset);
             in.setEndInBuffer((unsigned int)block.length);
-            //<flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
-            if (in.getInt1() != FLAG_BLOC || in.getInt4() != ident)
-                throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
-            in.getInt1();                   //catejgorie (checked by the descriptor's place)
-            if (in.getUIntLat() != block.docsNb)
-                throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
-            NindDocId identDocument = block.first;
-            unsigned int maxFrequency = 0;
-            for (uint64_t it = 0; it != block.docsNb; it++) {
-                const uint64_t delta = in.getUIntLat64();
-                if (delta > ~(NindDocId)0 - identDocument || (it == 0 && delta != 0) || (it > 0 && delta == 0))
-                    throw NindTermIndexException("NindTermIndex::getTermDef I : " + m_fileName);
-                identDocument += delta;
-                const unsigned int frequency = in.getUIntLat();
-                if (frequency > maxFrequency) maxFrequency = frequency;
-                blockPostings.push_back(Document(identDocument, frequency));
-            }
-            if (identDocument != block.last || maxFrequency != block.maxFrequency || !in.endOfInBuffer())
-                throw NindTermIndexException("NindTermIndex::getTermDef J : " + m_fileName);
+            decodeBlock(ident, block, in, postings);
         }
-        //insert at the category's place (categories are few: a term has one or a handful)
-        const size_t begin = (c == 0) ? 0 : categoryEnds[c - 1];
-        postings.insert(postings.begin() + begin, blockPostings.begin(), blockPostings.end());
-        for (size_t later = c; later < categoryEnds.size(); later++) categoryEnds[later] += blockPostings.size();
+        categoryEnds.push_back(postings.size());
+    }
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of a term's directory only
+bool NindTermIndex::getTermDirectory(const unsigned int ident,
+                                     TermDirectory &directory,
+                                     NindReadBuffer &buffer) const
+{
+    directory.categories.clear();
+    if (!isFormatV2()) {
+        //format v1: no blocks, everything inline
+        list<TermCG> termDef;
+        if (!getTermDef(ident, termDef, buffer)) return false;
+        directory.offset = 0;
+        directory.length = 0;
+        for (list<TermCG>::const_iterator it = termDef.begin(); it != termDef.end(); it++) {
+            directory.categories.push_back(TermDirectory::Category());
+            TermDirectory::Category &category = directory.categories.back();
+            category.cg = (*it).cg;
+            category.frequency = (*it).frequency;
+            category.docsNb = (*it).documents.size();
+            category.inlinePostings.assign((*it).documents.begin(), (*it).documents.end());
+        }
+        return true;
+    }
+    if (!getDefinitionRefAt(ident, buffer, directory.offset, directory.length)) return false;
+    //the header, for the directory's length, then the directory
+    if (directory.length < TAILLE_TESTE_DEJFINITION)
+        throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
+    m_file.readAt(directory.offset, TAILLE_TESTE_DEJFINITION, buffer);
+    buffer.setInBufferPtr(OFFSET_LONGUEUR);
+    const uint64_t directorySize = (uint64_t)TAILLE_TESTE_DEJFINITION + getDefinitionField(buffer);
+    if (directorySize > directory.length)
+        throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
+    m_file.readAt(directory.offset, (unsigned int)directorySize, buffer);
+    parseDirectoryV2(ident, buffer, directory);
+    //every block within the definition, after the directory
+    for (size_t c = 0; c < directory.categories.size(); c++) {
+        const vector<Block> &blocks = directory.categories[c].blocks;
+        for (size_t b = 0; b < blocks.size(); b++) {
+            if (blocks[b].offset < directorySize || blocks[b].offset + blocks[b].length > directory.length)
+                throw NindTermIndexException("NindTermIndex::getTermDef G : " + m_fileName);
+        }
+    }
+    return true;
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of blocks [firstBlock, endBlock) of a category
+void NindTermIndex::getTermBlocks(const unsigned int ident,
+                                  const TermDirectory &directory,
+                                  const size_t category,
+                                  const size_t firstBlock,
+                                  const size_t endBlock,
+                                  vector<Document> &postings,
+                                  NindReadBuffer &buffer) const
+{
+    if (category >= directory.categories.size() || firstBlock >= endBlock
+        || endBlock > directory.categories[category].blocks.size())
+        throw NindTermIndexException("NindTermIndex::getTermBlocks bad block range : " + m_fileName);
+    const vector<Block> &blocks = directory.categories[category].blocks;
+    //contiguous (as written): one read; checked by getTermDirectory to be within the definition
+    const uint64_t begin = blocks[firstBlock].offset;
+    uint64_t end = begin;
+    for (size_t b = firstBlock; b < endBlock; b++) {
+        if (blocks[b].offset != end)
+            throw NindTermIndexException("NindTermIndex::getTermBlocks blocks not contiguous : " + m_fileName);
+        end += blocks[b].length;
+    }
+    m_file.readAt(directory.offset + begin, (unsigned int)(end - begin), buffer);
+    for (size_t b = firstBlock; b < endBlock; b++) {
+        buffer.setInBufferPtr((unsigned int)(blocks[b].offset - begin));
+        buffer.setEndInBuffer((unsigned int)blocks[b].length);
+        decodeBlock(ident, blocks[b], buffer, postings);
     }
 }
 ////////////////////////////////////////////////////////////

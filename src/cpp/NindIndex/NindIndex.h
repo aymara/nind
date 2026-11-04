@@ -132,6 +132,17 @@ protected:
                          NindReadBuffer &buffer,
                          const unsigned int bytesNb = 0) const;
 
+    /**\brief Thread-safe (const) place of a definition in the file, without reading it
+    *\param ident ident of definition
+    *\param buffer read buffer of the caller (for the indirection)
+    *\param offset receives the definition's offset in the file
+    *\param length receives its length
+    *\return true if the definition exists */
+    bool getDefinitionRefAt(const unsigned int ident,
+                            NindReadBuffer &buffer,
+                            uint64_t &offset,
+                            unsigned int &length) const;
+
     /**\brief Read from file datas of specified definition and leave result into read buffer 
     *\param ident ident of definition
     *\param bytesNb optional number of bytes to read, in case of partial read
