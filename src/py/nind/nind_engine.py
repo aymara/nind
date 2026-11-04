@@ -82,6 +82,11 @@ TOKENIZER_DEFAULTS = {
 #: index: the original pure-Python tokenizer, kept to query and update them as built.
 LEGACY_TOKENIZER = "legacy"
 
+#: A top-k search uses block-max MaxScore (identical results) from this many documents
+#: per result up (top_k * PRUNING_DOCS_PER_RESULT <= documents), the exhaustive one below:
+#: measured faster above, slower below.
+PRUNING_DOCS_PER_RESULT = 4000
+
 
 def _tokenizer_options(options):
     """Complete and check tokenizer options (``None``: the defaults)."""
@@ -315,8 +320,11 @@ class _Snapshot:
     def search(self, terms, k1, b, top_k):
         # the scores of the documents containing the terms, by decreasing score (see native.Bm25Scorer)
         term_ids = [self.term_id(term) for term in terms]
-        # the native term index reader behind self.term_index
-        return self.scorer.search(self.term_index._native, term_ids, k1, b, top_k)
+        # the native term index reader behind self.term_index; block-max MaxScore (same results)
+        # when k is small for the corpus: measured faster from 4000 documents per result up
+        # (MS MARCO 1M/4M, FiQA), slower below (see docs/proposals/format-v2-blocks.md)
+        prune = 0 < top_k and top_k * PRUNING_DOCS_PER_RESULT <= self.total_docs
+        return self.scorer.search(self.term_index._native, term_ids, k1, b, top_k, prune=prune)
 
     def term_id(self, term):
         return self.lexicon.donneIdentifiant([term])

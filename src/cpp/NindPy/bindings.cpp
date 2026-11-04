@@ -17,6 +17,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/operators.h>
 #include <sstream>
+#include <queue>
 #include <map>
 #include <functional>
 #include <vector>
@@ -383,10 +384,14 @@ public:
         // (exhaustive), or only those of the blocks that may reach the top k (block-max pruning)
         std::vector<double> idfs;
         std::vector<std::vector<std::pair<uint32_t, uint32_t> > > postings;
-        bool pruned = false;
-        if (prune && topK > 0 && k1 >= 0 && b >= 0 && b <= 1 && !distinctIds.empty())
-            pruned = collectPruned(termIndex, distinctIds, occurrences, k1, b, (size_t)topK, buffer, scores, idfs, postings);
-        if (!pruned) collectAll(termIndex, distinctIds, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
+        if (prune && topK > 0 && k1 >= 0 && b >= 0 && b <= 1 && !distinctIds.empty()) {
+            std::vector<std::pair<uint64_t, double> > result;
+            if (searchMaxScore(termIndex, distinctIds, occurrences, k1, b, (size_t)topK, buffer, result)) {
+                lease.clean = true;         //(scores untouched)
+                return result;
+            }
+        }
+        collectAll(termIndex, distinctIds, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
         // the scores, term occurrence by term occurrence in query order (as NindEngine._bm25_score)
         for (size_t o = 0; o < occurrences.size(); o++) {
             const double idf = idfs[occurrences[o]];
@@ -469,165 +474,189 @@ private:
         }
     }
 
-    // A term's postings as segments: a block of a long list, or a single posting of a short one,
-    // with an upper bound of the contribution of any document in it
-    struct Segment {
-        uint64_t first, last;           //document range
-        double bound;
-        size_t block;                   //index in the category's blocks, or NO_BLOCK (posting `posting`)
-        size_t posting;
-    };
-    static const size_t NO_BLOCK = (size_t)-1;
-    struct TermState {
-        bool present;
+    // Dynamic block-max MaxScore, document at a time, exact. The terms by increasing upper bound
+    // (their largest contribution); the shortest prefix of them whose bounds sum is below theta (the
+    // k-th best score so far) is non-essential: a document in none of the others can't reach the top
+    // k. The essential lists are read in document order (blocks read a few at a time); a document is
+    // then completed by the non-essential terms, by decreasing bound, each one first checked against
+    // its block's bound and read (that block only) if the document may still reach theta.
+    // Scores are accumulated in another order than NindEngine._bm25_score: every comparison with
+    // theta has a margin far above the rounding errors, and the candidates kept are scored again,
+    // exactly, in query order (identical scores and ranks).
+    // false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0.
+    static constexpr double PRUNING_MARGIN = 1e-9;
+    static const size_t ESSENTIAL_READ_AHEAD = 16;      //blocks read at once from an essential list
+    struct MaxScoreTerm {
         NindTermIndex::TermDirectory directory;
-        uint64_t df;
         double idf;
-        std::vector<Segment> segments;  //by document range (blocks, or single postings, are disjoint, ordered)
-        TermState(): present(false), directory(), df(0), idf(0), segments() {}
+        unsigned int multiplicity;      //occurrences in the query
+        size_t blocksNb;                //a short list: 1 (its inline postings)
+        std::vector<NindDocId> blockFirst, blockLast;
+        std::vector<double> blockBounds;
+        double bound;                   //the largest of blockBounds
+        size_t chunkBegin, chunkEnd;    //blocks decoded in chunk
+        std::vector<NindTermIndex::Document> chunk;
+        size_t pos;                     //cursor in chunk
+        size_t probeBlock;              //(non-essential) the first block that may hold the next document
+        MaxScoreTerm(): directory(), idf(0), multiplicity(0), blocksNb(0), blockFirst(), blockLast(),
+            blockBounds(), bound(0), chunkBegin(0), chunkEnd(0), chunk(), pos(0), probeBlock(0) {}
+        bool exhausted() const { return pos >= chunk.size(); }     //(essential: see nextBlocks)
     };
-    // the largest bound of the term's segments overlapping [first, last] (0: none)
-    static double maxOverlap(const TermState &term, const uint64_t first, const uint64_t last) {
-        const std::vector<Segment> &segments = term.segments;
-        size_t low = 0, high = segments.size();
-        while (low < high) {                    // first segment ending at or after first
-            const size_t middle = low + (high - low) / 2;
-            if (segments[middle].last < first) low = middle + 1;
-            else high = middle;
-        }
-        double bound = 0.0;
-        for (size_t i = low; i < segments.size() && segments[i].first <= last; i++)
-            if (segments[i].bound > bound) bound = segments[i].bound;
-        return bound;
+    void readBlocks(const NindTermIndex &termIndex, const unsigned int ident, MaxScoreTerm &term,
+                    const size_t first, const size_t end, NindReadBuffer &buffer) const {
+        term.chunk.clear();
+        termIndex.getTermBlocks(ident, term.directory, 0, first, end, term.chunk, buffer);
+        term.chunkBegin = first;
+        term.chunkEnd = end;
+        term.pos = 0;
     }
-    // Block-max pruning, exact: the postings of the blocks whose documents may reach the top k.
-    // 1) a lower bound theta of the k-th score: the partial scores over the rarest terms (their
-    //    postings read whole, up to PRUNING_BUDGET); 2) a block (or posting) of term t is skipped if, in query
-    //    order, its bound for t plus, for every other term, the largest bound of that term's segments
-    //    overlapping the block's document range, is below theta: none of its documents can reach the
-    //    top k, and every document that does keeps every contribution (identical scores and ranks).
-    //    false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0,
-    //    fewer than topK candidates with a positive score.
-    static const uint64_t PRUNING_BUDGET = 65536;
-    bool collectPruned(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
-                       const std::vector<size_t> &occurrences, const double k1, const double b,
-                       const size_t topK, NindReadBuffer &buffer, std::vector<double> &scores, std::vector<double> &idfs,
-                       std::vector<std::vector<std::pair<uint32_t, uint32_t> > > &postings) const
+    // an essential list's next blocks, until a posting (or the end)
+    void nextBlocks(const NindTermIndex &termIndex, const unsigned int ident, MaxScoreTerm &term,
+                    NindReadBuffer &buffer) const {
+        while (term.pos >= term.chunk.size() && term.chunkEnd < term.blocksNb)
+            readBlocks(termIndex, ident, term, term.chunkEnd,
+                       std::min(term.chunkEnd + ESSENTIAL_READ_AHEAD, term.blocksNb), buffer);
+    }
+    bool searchMaxScore(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
+                        const std::vector<size_t> &occurrences, const double k1, const double b,
+                        const size_t topK, NindReadBuffer &buffer,
+                        std::vector<std::pair<uint64_t, double> > &result) const
     {
-        // the shortest document of the corpus: the bound's length when a block doesn't know its own
         const double shortest = m_minLength;
-        std::vector<TermState> terms(distinctIds.size());
-        for (size_t t = 0; t < distinctIds.size(); t++) {
-            TermState &term = terms[t];
-            term.present = termIndex.getTermDirectory(distinctIds[t], term.directory, buffer);
-            if (!term.present) continue;
+        // the query's terms present in the index (index in distinctIds -> in terms)
+        std::vector<MaxScoreTerm> terms;
+        std::vector<unsigned int> termIdents;
+        std::vector<size_t> termOf(distinctIds.size(), (size_t)-1);
+        for (size_t d = 0; d < distinctIds.size(); d++) {
+            MaxScoreTerm term;
+            if (!termIndex.getTermDirectory(distinctIds[d], term.directory, buffer)) continue;
             if (term.directory.categories.size() != 1) return false;
             const NindTermIndex::TermDirectory::Category &category = term.directory.categories[0];
-            term.df = category.docsNb;
-            term.idf = idfOf(term.df);
+            term.idf = idfOf(category.docsNb);
             if (!(term.idf > 0)) return false;
+            for (size_t o = 0; o < occurrences.size(); o++) if (occurrences[o] == d) term.multiplicity++;
             if (!category.blocks.empty()) {
+                term.blocksNb = category.blocks.size();
                 for (size_t i = 0; i < category.blocks.size(); i++) {
                     const NindTermIndex::Block &block = category.blocks[i];
+                    term.blockFirst.push_back(block.first);
+                    term.blockLast.push_back(block.last);
                     const double length = std::max((double)block.minLength, shortest);
-                    term.segments.push_back(Segment{block.first, block.last,
-                        contribution(term.idf, block.maxFrequency, length, k1, b), i, 0});
+                    term.blockBounds.push_back(term.multiplicity *
+                                               contribution(term.idf, block.maxFrequency, length, k1, b));
                 }
             }
             else {
+                if (category.inlinePostings.empty()) continue;
+                term.blocksNb = 1;
+                term.blockFirst.push_back(category.inlinePostings.front().ident);
+                term.blockLast.push_back(category.inlinePostings.back().ident);
+                double bound = 0.0;
                 for (size_t i = 0; i < category.inlinePostings.size(); i++) {
                     const NindTermIndex::Document &posting = category.inlinePostings[i];
                     const uint32_t position = positionOf(posting.ident);
-                    const double bound = (position == NO_POSITION || posting.frequency == 0) ? 0.0 :
-                        contribution(term.idf, posting.frequency, m_lengths[position], k1, b);
-                    term.segments.push_back(Segment{posting.ident, posting.ident, bound, NO_BLOCK, i});
+                    if (position == NO_POSITION || posting.frequency == 0) continue;
+                    bound = std::max(bound, contribution(term.idf, posting.frequency, m_lengths[position], k1, b));
                 }
+                term.blockBounds.push_back(term.multiplicity * bound);
+                term.chunk = category.inlinePostings;
+                term.chunkEnd = 1;
+            }
+            term.bound = *std::max_element(term.blockBounds.begin(), term.blockBounds.end());
+            termOf[d] = terms.size();
+            terms.push_back(std::move(term));
+            termIdents.push_back(distinctIds[d]);
+        }
+        const size_t termsNb = terms.size();
+        if (termsNb == 0) { result.clear(); return true; }
+        // by increasing bound; prefix[i]: the bounds sum of order[0..i]
+        std::vector<size_t> order(termsNb);
+        for (size_t i = 0; i < termsNb; i++) order[i] = i;
+        std::stable_sort(order.begin(), order.end(),
+                         [&](const size_t x, const size_t y) { return terms[x].bound < terms[y].bound; });
+        std::vector<double> prefix(termsNb);
+        for (size_t i = 0; i < termsNb; i++) prefix[i] = (i ? prefix[i - 1] : 0.0) + terms[order[i]].bound;
+        // the long lists: their first blocks
+        for (size_t i = 0; i < termsNb; i++) nextBlocks(termIndex, termIdents[i], terms[i], buffer);
+        std::priority_queue<double, std::vector<double>, std::greater<double> > best;  //the k best approximations
+        double threshold = 0.0;                 //theta minus the margin
+        size_t nonEssential = 0;                //order[0..nonEssential) are non-essential
+        struct Candidate { uint32_t position; double approximation; };
+        std::vector<Candidate> candidates;
+        std::vector<uint32_t> candidateFrequencies;   //termsNb per candidate
+        std::vector<uint32_t> frequencies(termsNb);
+        while (nonEssential < termsNb) {
+            // the next document: the smallest current one of the essential lists
+            bool any = false;
+            NindDocId docId = 0;
+            for (size_t i = nonEssential; i < termsNb; i++) {
+                const MaxScoreTerm &term = terms[order[i]];
+                if (term.exhausted()) continue;
+                const NindDocId current = term.chunk[term.pos].ident;
+                if (!any || current < docId) { docId = current; any = true; }
+            }
+            if (!any) break;
+            const uint32_t position = positionOf(docId);
+            std::fill(frequencies.begin(), frequencies.end(), 0);
+            double approximation = 0.0;
+            for (size_t i = nonEssential; i < termsNb; i++) {
+                const size_t t = order[i];
+                MaxScoreTerm &term = terms[t];
+                if (term.exhausted() || term.chunk[term.pos].ident != docId) continue;
+                frequencies[t] = term.chunk[term.pos].frequency;
+                term.pos++;
+                nextBlocks(termIndex, termIdents[t], term, buffer);
+                if (position != NO_POSITION && frequencies[t] != 0)
+                    approximation += term.multiplicity * contribution(term.idf, frequencies[t], m_lengths[position], k1, b);
+            }
+            if (position == NO_POSITION) continue;
+            // the non-essential terms, by decreasing bound, while the document may reach theta
+            bool rejected = false;
+            for (size_t i = nonEssential; i-- > 0; ) {
+                if (approximation + prefix[i] < threshold) { rejected = true; break; }
+                const size_t t = order[i];
+                MaxScoreTerm &term = terms[t];
+                while (term.probeBlock < term.blocksNb && term.blockLast[term.probeBlock] < docId) term.probeBlock++;
+                if (term.probeBlock == term.blocksNb || term.blockFirst[term.probeBlock] > docId) continue;   //not in it
+                const double others = i ? prefix[i - 1] : 0.0;
+                if (approximation + term.blockBounds[term.probeBlock] + others < threshold) { rejected = true; break; }
+                if (term.probeBlock < term.chunkBegin || term.probeBlock >= term.chunkEnd)
+                    readBlocks(termIndex, termIdents[t], term, term.probeBlock, term.probeBlock + 1, buffer);
+                while (term.pos < term.chunk.size() && term.chunk[term.pos].ident < docId) term.pos++;
+                if (term.pos == term.chunk.size() || term.chunk[term.pos].ident != docId) continue;
+                frequencies[t] = term.chunk[term.pos].frequency;
+                if (frequencies[t] != 0)
+                    approximation += term.multiplicity * contribution(term.idf, frequencies[t], m_lengths[position], k1, b);
+            }
+            if (rejected || !(approximation > 0) || approximation < threshold) continue;
+            candidates.push_back(Candidate{position, approximation});
+            candidateFrequencies.insert(candidateFrequencies.end(), frequencies.begin(), frequencies.end());
+            if (best.size() < topK) best.push(approximation);
+            else if (approximation > best.top()) { best.pop(); best.push(approximation); }
+            if (best.size() == topK) {
+                threshold = best.top() * (1 - PRUNING_MARGIN);
+                while (nonEssential < termsNb && prefix[nonEssential] < threshold) nonEssential++;
             }
         }
-        //1) theta: the k-th largest partial score over the rarest terms (up to PRUNING_BUDGET postings),
-        //   in query order. A partial score is never above the full one (adding a non-negative
-        //   contribution never decreases a floating-point sum), so theta is never above the k-th score.
-        //   Those terms' postings are kept whole for the scoring.
-        std::vector<size_t> byDf;
-        for (size_t t = 0; t < terms.size(); t++) if (terms[t].present) byDf.push_back(t);
-        std::stable_sort(byDf.begin(), byDf.end(), [&](const size_t x, const size_t y) { return terms[x].df < terms[y].df; });
-        std::vector<bool> whole(terms.size(), false);
-        idfs.assign(distinctIds.size(), 0.0);
-        postings.assign(distinctIds.size(), std::vector<std::pair<uint32_t, uint32_t> >());
-        std::vector<NindTermIndex::Document> read;
-        uint64_t budget = 0;
-        for (size_t i = 0; i < byDf.size(); i++) {
-            const size_t t = byDf[i];
-            if (i > 0 && budget + terms[t].df > PRUNING_BUDGET) break;
-            budget += terms[t].df;
-            whole[t] = true;
-            const NindTermIndex::TermDirectory::Category &category = terms[t].directory.categories[0];
-            read.assign(category.inlinePostings.begin(), category.inlinePostings.end());
-            if (!category.blocks.empty())
-                termIndex.getTermBlocks(distinctIds[t], terms[t].directory, 0, 0, category.blocks.size(), read, buffer);
-            for (size_t p = 0; p < read.size(); p++) {
-                const uint32_t position = positionOf(read[p].ident);
-                if (position != NO_POSITION) postings[t].push_back(std::make_pair(position, (uint32_t)read[p].frequency));
+        // the candidates that may be in the top k, scored exactly as the exhaustive search does
+        std::vector<std::pair<double, uint32_t> > ranked;
+        for (size_t c = 0; c < candidates.size(); c++) {
+            if (candidates[c].approximation < threshold) continue;
+            const uint32_t position = candidates[c].position;
+            double score = 0.0;
+            for (size_t o = 0; o < occurrences.size(); o++) {
+                const size_t t = termOf[occurrences[o]];
+                if (t == (size_t)-1) continue;
+                const uint32_t frequency = candidateFrequencies[c * termsNb + t];
+                if (frequency == 0) continue;
+                score += contribution(terms[t].idf, frequency, m_lengths[position], k1, b);
             }
+            if (score > 0) ranked.push_back(std::make_pair(-score, position));
         }
-        //(in the scores scratch array, reset right after: all zero again for the scoring)
-        std::vector<uint32_t> partialTouched;
-        for (size_t o = 0; o < occurrences.size(); o++) {
-            const size_t t = occurrences[o];
-            if (!whole[t]) continue;
-            for (size_t p = 0; p < postings[t].size(); p++) {
-                if (postings[t][p].second == 0) continue;
-                double &score = scores[postings[t][p].first];
-                if (score == 0.0) partialTouched.push_back(postings[t][p].first);
-                score += contribution(terms[t].idf, postings[t][p].second, m_lengths[postings[t][p].first], k1, b);
-            }
-        }
-        std::vector<double> partialScores;
-        partialScores.reserve(partialTouched.size());
-        for (size_t i = 0; i < partialTouched.size(); i++) {
-            if (scores[partialTouched[i]] > 0) partialScores.push_back(scores[partialTouched[i]]);
-            scores[partialTouched[i]] = 0.0;
-        }
-        if (partialScores.size() < topK) return false;
-        std::nth_element(partialScores.begin(), partialScores.begin() + (topK - 1), partialScores.end(),
-                         std::greater<double>());
-        const double theta = partialScores[topK - 1];
-        //2) the other terms: the segments that may reach theta, their postings read (contiguous blocks at once)
-        for (size_t t = 0; t < terms.size(); t++) {
-            TermState &term = terms[t];
-            if (!term.present) continue;
-            idfs[t] = term.idf;
-            if (whole[t]) continue;
-            std::vector<size_t> keptBlocks;
-            std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[t];
-            for (size_t i = 0; i < term.segments.size(); i++) {
-                const Segment &segment = term.segments[i];
-                double bound = 0.0;
-                for (size_t o = 0; o < occurrences.size(); o++) {
-                    if (occurrences[o] == t) bound += segment.bound;
-                    else if (terms[occurrences[o]].present) bound += maxOverlap(terms[occurrences[o]], segment.first, segment.last);
-                }
-                if (bound < theta) continue;
-                if (segment.block == NO_BLOCK) {
-                    const NindTermIndex::Document &posting = term.directory.categories[0].inlinePostings[segment.posting];
-                    const uint32_t position = positionOf(posting.ident);
-                    if (position != NO_POSITION) termPostings.push_back(std::make_pair(position, (uint32_t)posting.frequency));
-                }
-                else keptBlocks.push_back(segment.block);
-            }
-            // runs of consecutive blocks: one read each
-            for (size_t i = 0; i < keptBlocks.size(); ) {
-                size_t j = i + 1;
-                while (j < keptBlocks.size() && keptBlocks[j] == keptBlocks[j - 1] + 1) j++;
-                read.clear();
-                termIndex.getTermBlocks(distinctIds[t], term.directory, 0, keptBlocks[i], keptBlocks[j - 1] + 1, read, buffer);
-                for (size_t p = 0; p < read.size(); p++) {
-                    const uint32_t position = positionOf(read[p].ident);
-                    if (position != NO_POSITION) termPostings.push_back(std::make_pair(position, (uint32_t)read[p].frequency));
-                }
-                i = j;
-            }
-        }
+        const size_t kept = std::min(topK, ranked.size());
+        std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
+        result.resize(kept);
+        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
         return true;
     }
 

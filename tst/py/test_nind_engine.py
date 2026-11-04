@@ -1061,3 +1061,20 @@ def test_block_max_pruning_returns_the_exhaustive_top_k(tmp_path):
             pruned = snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k, prune=True)
             assert pruned == everything[:k], (query, k)
             assert snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k) == everything[:k], (query, k)
+
+
+
+def test_engine_search_prunes_when_k_is_small_for_the_corpus(tmp_path, monkeypatch):
+    # NindEngine turns pruning on from PRUNING_DOCS_PER_RESULT documents per result: same results
+    from nind import nind_engine
+    rng = random.Random(5)
+    vocabulary = ["w%d" % i for i in range(200)]
+    weights = [1.0 / (i + 1) for i in range(len(vocabulary))]
+    texts = [" ".join(rng.choices(vocabulary, weights, k=rng.randint(3, 40))) for _ in range(1500)]
+    _, engine = build_with(tmp_path, "gate", texts, indexer_kwargs={"local_index": False})
+    queries = [" ".join(rng.choices(vocabulary, weights, k=rng.randint(1, 5))) for _ in range(100)]
+    exhaustive = [engine.search(query, top_k=None) for query in queries]
+    monkeypatch.setattr(nind_engine, "PRUNING_DOCS_PER_RESULT", 1)
+    for query, everything in zip(queries, exhaustive):
+        for k in (1, 10, 100):
+            assert engine.search(query, top_k=k) == everything[:k], (query, k)
