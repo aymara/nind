@@ -419,6 +419,58 @@ measured against the previous one (`bench/retrieval/`):
 6. **Block-max top-k in `Bm25Scorer`**, results identical to today's.
 7. **Migration** (rebuild of v1 indexes), native `verify`, the diagnostics.
 
+### Step 6 as implemented: block-max MaxScore, document at a time
+
+A first version kept the term-at-a-time scorer and filtered blocks once, against
+a θ taken up front from the rarest terms' partial scores. It was exact but never
+faster: it still read 60% of the frequent terms' postings on MS MARCO and scored
+the rarest terms twice. On MS MARCO 1M, its top 10 took 2.6 ms against the
+exhaustive search's 2.3 ms, and on 4M 12.5 ms against 11.7. It was replaced by
+dynamic **block-max MaxScore**, document at a time
+(`Bm25Scorer::searchMaxScore`, `search(..., prune=True)`):
+
+- The terms are sorted by increasing upper bound. Every prefix whose bounds sum
+  to less than θ (the k-th best score so far) is *non-essential*: a document in
+  none of the other terms can't reach the top k.
+- The essential lists are read in document order, 16 blocks at a time.
+- A document is completed by the non-essential terms, taken by decreasing
+  bound. For each, the document is first checked against that term's block
+  bound, and only that block is read.
+- **Exactness.** The scores are accumulated in another order than
+  `NindEngine._bm25_score`'s query order. So every comparison with θ has a
+  relative margin of 1e-9, far above the rounding error of a few dozen
+  additions. The candidates left at the end are then scored again, exactly, in
+  query order. The results are identical (scores and ties) to the exhaustive
+  search on FiQA, MS MARCO 1M and 4M, at k = 10 and k = 1000.
+- **Fallback to the exhaustive search**: a term in several categories, an
+  idf ≤ 0, k ≤ 0, k1 < 0, or b outside [0, 1].
+
+The native scorer's search times (µs per query, single thread, MS MARCO without
+stopwords):
+
+| corpus | top 10, exhaustive | top 10, MaxScore | top 1000, exhaustive | top 1000, MaxScore |
+|---|---|---|---|---|
+| FiQA (57.6k) | 818 | 715 | 1087 | 1670 |
+| MS MARCO 1M | 2702 | 1309 | 3108 | 3103 |
+| MS MARCO 4M | 14378 | 4387 | 12824 | 9706 |
+
+The gain grows with the corpus, as the lists the top k doesn't need get longer.
+For a k large relative to the corpus, the per-document overhead of a
+document-at-a-time traversal outweighs the skipping. `NindEngine` therefore
+uses MaxScore only when `top_k * PRUNING_DOCS_PER_RESULT <= documents`
+(4000, measured). The exhaustive search keeps a cost that grows faster than
+the corpus (2.7 ms → 14.4 ms for 4 times the documents): its score array
+(8 bytes per document) no longer fits in the cache.
+
+Still open:
+
+- **Tighter bounds.** The writers don't fill `<longueurMin>` yet (0: the
+  bound uses the corpus's shortest document); `IndexBuilder` knows the
+  lengths.
+- **Faster large k.** Use the exhaustive search below a document count, or
+  keep a score array instead of the candidates once θ stops rising.
+- **Several categories** (Amose) aren't pruned.
+
 ## Remaining questions
 
 1. **Build memory** (not part of the format): `NindIndexer` keeps ~17 bytes
