@@ -28,30 +28,8 @@ using namespace std;
 //taille de lecture au-delah de laquelle readBuffer() verifie d'abord la taille rejelle du fichier
 #define READ_SIZE_CHECK_THRESHOLD 65536
 ////////////////////////////////////////////////////////////
-//Les octets sont assemblejs en arithmejtique non signeje 32 bits : assembler en int
-//(promotion des unsigned char) dejborde dehs que la valeur atteint 2^31 (comportement indejfini).
-//Extension de signe d'une valeur non signeje de bitsNb bits, sans dejcalage de valeur nejgative.
-static inline signed int signExtend(const uint32_t value, const unsigned int bitsNb)
-{
-    const uint32_t signBit = uint32_t(1) << (bitsNb - 1);
-    return static_cast<int32_t>((value ^ signBit) - signBit);
-}
-static inline uint32_t be2(const unsigned char *b) { return (uint32_t(b[0]) << 8) | b[1]; }
-static inline uint32_t be3(const unsigned char *b) { return (be2(b) << 8) | b[2]; }
-static inline uint32_t be4(const unsigned char *b) { return (be3(b) << 8) | b[3]; }
-static inline uint32_t le3(const unsigned char *b) { return (uint32_t(b[2]) << 16) | (uint32_t(b[1]) << 8) | b[0]; }
-static inline uint32_t le4(const unsigned char *b) { return (uint32_t(b[3]) << 24) | le3(b); }
-//Dejcode un entier latecon dont les nbBytes octets sont en bytes[0..nbBytes-1]
-static inline uint32_t latBits(const unsigned char *b, const unsigned int bytesNb)
-{
-    switch (bytesNb) {
-    case 1: return b[0] & 0x7F;
-    case 2: return ((uint32_t(b[0]) & 0x3F) << 8) | b[1];
-    case 3: return ((uint32_t(b[0]) & 0x1F) << 16) | (uint32_t(b[1]) << 8) | b[2];
-    case 4: return ((uint32_t(b[0]) & 0x0F) << 24) | (uint32_t(b[1]) << 16) | (uint32_t(b[2]) << 8) | b[3];
-    default: return be4(b + 1);
-    }
-}
+#include "NindBytes.h"
+using namespace latecon::nindex::bytes;
 ////////////////////////////////////////////////////////////
 // <fichier>              ::= { <Entier1> | <Entier2> | <Entier3> | <Entier4> | <Entier5> |
 //                              <EntierULat> | <EntierULat> |
@@ -76,10 +54,7 @@ NindFile::NindFile(const string &fileName):
     m_wbuffer(0),
     m_wbufferEnd(0),
     m_wPtr(0),
-    m_rbuffer(0),
-    m_rbufferAbsEnd(0),
-    m_rbufferEnd(0),
-    m_rPtr(0),
+    m_in(fileName),
     m_fileSize(0),
     m_isLittleEndian(false),
     m_isBulk(false),
@@ -97,10 +72,6 @@ NindFile::~NindFile()
     if (m_wbuffer != 0) {
         delete [] m_wbuffer;
         m_wbuffer = 0;
-    }
-    if (m_rbuffer != 0) {
-        delete [] m_rbuffer;
-        m_rbuffer = 0;
     }
 }
 ////////////////////////////////////////////////////////////
@@ -241,10 +212,9 @@ string NindFile::readString()
 //param bytesNb size of internal buffer to receive read datas */
 void NindFile::readBuffer(const unsigned int bytesNb)
 {
-    //libehre l'ancien buffer et remet les pointeurs ah zejro d'abord : en cas d'ejchec ci-dessous,
-    //ni pointeur pendant sur l'ancien buffer, ni anciennes donnejes relues comme si c'ejtaient les nouvelles
-    delete [] m_rbuffer;
-    m_rbuffer = m_rbufferAbsEnd = m_rbufferEnd = m_rPtr = 0;
+    //oublie l'ancien contenu d'abord : en cas d'ejchec ci-dessous, pas d'anciennes donnejes relues
+    //comme si c'ejtaient les nouvelles
+    m_in.clear();
     //une longueur lue dans un fichier corrompu ne doit pas provoquer une allocation dejmesureje :
     //au-delah d'un seuil, verifie que le fichier contient bien les octets demandejs
     if (bytesNb > READ_SIZE_CHECK_THRESHOLD) {
@@ -253,177 +223,24 @@ void NindFile::readBuffer(const unsigned int bytesNb)
         if (pos < 0 || fstat(fileno(m_file), &fileStat) != 0) throw ReadFileException(m_fileName);
         if ((uint64_t)pos + bytesNb > (uint64_t)fileStat.st_size) throw EofException(m_fileName);
     }
-    //cree le buffer intermediaire de lecture
-    m_rbuffer = new (nothrow) unsigned char[bytesNb];
-    if (m_rbuffer == 0) throw BadAllocException("in read buffer " + m_fileName);
-    m_rbufferAbsEnd = m_rbuffer + bytesNb;
-    m_rbufferEnd = m_rbufferAbsEnd;
-    m_rPtr = m_rbuffer;
-    //lit le fichier
-    readBytes(m_rbuffer, bytesNb);
+    //lit le fichier dans le buffer de lecture
+    readBytes(m_in.prepare(bytesNb), bytesNb);
 }
 ////////////////////////////////////////////////////////////
-//brief Set logical end of read buffer specifying offset from current read pointer
-//param bytesNb offset from current read pointer */
-void NindFile::setEndInBuffer(const unsigned int bytesNb)
-{
-    if (bytesNb > (size_t)(m_rbufferAbsEnd - m_rPtr)) throw OutReadBufferException("in read buffer (A) " + m_fileName);
-    m_rbufferEnd = m_rPtr + bytesNb;
-}
-////////////////////////////////////////////////////////////
-//brief Set logical end of read buffer specifying offset from head of buffer
-//param bytesNb offset from head of buffer */
-void NindFile::setAbsEndInBuffer(const unsigned int bytesNb)
-{
-    if (bytesNb > (size_t)(m_rbufferAbsEnd - m_rbuffer)) throw OutReadBufferException("in read buffer (AA) " + m_fileName);
-    m_rbufferEnd = m_rbuffer + bytesNb;
-}
-////////////////////////////////////////////////////////////
-//brief Get a 1-bytes integer from internal buffer
-//return 4-bytes integer */
-unsigned int NindFile::getInt1()
-{
-    if (m_rbufferEnd - m_rPtr < 1) throw OutReadBufferException("in read buffer (B) " + m_fileName);
-    m_rPtr += 1;
-    return m_rPtr[-1];
-}
-////////////////////////////////////////////////////////////
-//brief Get a 2-bytes integer from internal buffer
-//return 4-bytes integer */
-unsigned int NindFile::getInt2()
-{
-    //gros-boutiste
-    if (m_rbufferEnd - m_rPtr < 2) throw OutReadBufferException("in read buffer (C) " + m_fileName);
-    m_rPtr += 2;
-    return be2(m_rPtr - 2);
-}
-////////////////////////////////////////////////////////////
-//brief Get a 3-bytes integer from internal buffer
-//return 4-bytes integer */
-unsigned int NindFile::getInt3()
-{
-    //petit boutiste
-    if (m_rbufferEnd - m_rPtr < 3) throw OutReadBufferException("in read buffer (D) " + m_fileName);
-    m_rPtr += 3;
-    return le3(m_rPtr - 3);
-}
-////////////////////////////////////////////////////////////
-//brief Get a 3-bytes signed integer from internal buffer
-//return 4-bytes signed integer */
-signed int NindFile::getSInt3()
-{
-    //petit boutiste
-    if (m_rbufferEnd - m_rPtr < 3) throw OutReadBufferException("in read buffer (D2) " + m_fileName);
-    m_rPtr += 3;
-    return signExtend(le3(m_rPtr - 3), 24);
-}
-////////////////////////////////////////////////////////////
-//brief Get a 4-bytes integer from internal buffer
-//return 4-bytes integer */
-unsigned int NindFile::getInt4()
-{
-    //petit boutiste
-    if (m_rbufferEnd - m_rPtr < 4) throw OutReadBufferException("in read buffer (E) " + m_fileName);
-    m_rPtr += 4;
-    return le4(m_rPtr - 4);
-}
-////////////////////////////////////////////////////////////
-//brief Get a 4-bytes integer from internal buffer
-//return 4-bytes integer */
-signed int NindFile::getSInt4()
-{
-    //petit boutiste
-    if (m_rbufferEnd - m_rPtr < 4) throw OutReadBufferException("in read buffer (E) " + m_fileName);
-    m_rPtr += 4;
-    return signExtend(le4(m_rPtr - 4), 32);
-}
-////////////////////////////////////////////////////////////
-//brief Get a 5-bytes integer from internal buffer
-//return 8-bytes integer */
-uint64_t NindFile::getInt5()
-{
-    //gros boutiste
-    if (m_rbufferEnd - m_rPtr < 5) throw OutReadBufferException("in read buffer (F) " + m_fileName);
-    m_rPtr += 5;
-    //la valeur peut depasser 32 bits : force le calcul en 64 bits des le premier terme
-    return (static_cast<uint64_t>(m_rPtr[-5]) << 32) | be4(m_rPtr - 4);
-}
-////////////////////////////////////////////////////////////
-//brief Get an unsigned latecon integer from internal buffer
-//return 4-bytes unsigned integer */
-unsigned int NindFile::getUIntLat()
-{
-    //il faut que ca aille vite pour les petits nombres
-    const unsigned char *bytes = m_rPtr;
-    const ptrdiff_t available = m_rbufferEnd - m_rPtr;
-    if (available < 1) throw OutReadBufferException("in read buffer (G) " + m_fileName);
-    //0-2^7-1 : 0-127
-    if (!(bytes[0]&0x80)) { m_rPtr += 1; return latBits(bytes, 1); }
-    if (available < 2) throw OutReadBufferException("in read buffer (H) " + m_fileName);
-    //2^7-2^14-1 : 128-16383
-    if (!(bytes[0]&0x40)) { m_rPtr += 2; return latBits(bytes, 2); }
-    if (available < 3) throw OutReadBufferException("in read buffer (I) " + m_fileName);
-    //2^14-2^21-1 : 16384-2097151
-    if (!(bytes[0]&0x20)) { m_rPtr += 3; return latBits(bytes, 3); }
-    if (available < 4) throw OutReadBufferException("in read buffer (J) " + m_fileName);
-    //2^21-2^28 : 2097152-268435455
-    if (!(bytes[0]&0x10)) { m_rPtr += 4; return latBits(bytes, 4); }
-    if (available < 5) throw OutReadBufferException("in read buffer (K) " + m_fileName);
-    if (bytes[0]&0x08) throw OutReadBufferException("in read buffer (L) " + m_fileName);
-    //2^28-2^32-1 : 268435456-4294967295
-    m_rPtr += 5;
-    return latBits(bytes, 5);
-}
-////////////////////////////////////////////////////////////
-//brief Get a signed latecon integer from internal buffer
-//return 4-bytes signed integer */
-signed int NindFile::getSIntLat()
-{
-    //il faut que ca aille vite pour les petits nombres
-    const unsigned char *bytes = m_rPtr;
-    const ptrdiff_t available = m_rbufferEnd - m_rPtr;
-    if (available < 1) throw OutReadBufferException("in read buffer (M) " + m_fileName);
-    //de -2^6 a 2^6-1 : de -64 a 63
-    if (!(bytes[0]&0x80)) { m_rPtr += 1; return signExtend(latBits(bytes, 1), 7); }
-    if (available < 2) throw OutReadBufferException("in read buffer (N) " + m_fileName);
-    //de -2^13 a -2^6-1 et de 2^6 a 2^13-1 : de -8192 a -65 et de 64 a 8191
-    if (!(bytes[0]&0x40)) { m_rPtr += 2; return signExtend(latBits(bytes, 2), 14); }
-    if (available < 3) throw OutReadBufferException("in read buffer (O) " + m_fileName);
-    //de -2^20 a -2^13-1 et de 2^13 a 2^20-1 : de -1048576 a -8193 et de 8192 a 1048575
-    if (!(bytes[0]&0x20)) { m_rPtr += 3; return signExtend(latBits(bytes, 3), 21); }
-    if (available < 4) throw OutReadBufferException("in read buffer (P) " + m_fileName);
-    //de -2^27 a -2^20-1 et de 2^20 a 2^27-1 : de -134217728 a -1048577 et de 1048576 a 134217727
-    if (!(bytes[0]&0x10)) { m_rPtr += 4; return signExtend(latBits(bytes, 4), 28); }
-    if (available < 5) throw OutReadBufferException("in read buffer (Q) " + m_fileName);
-    if (bytes[0]&0x08) throw OutReadBufferException("in read buffer (R) " + m_fileName);
-    //de -2^31 a -2^27-1 et de 2^27 a 2^31-1 : de -2147483648 a -134217729 et de 134217728 a 2147483647
-    m_rPtr += 5;
-    return signExtend(latBits(bytes, 5), 32);
-}
-////////////////////////////////////////////////////////////
-//brief Get a string from internal buffer
-//return read string */
-string NindFile::getString()
-{
-    //lit la longueur de la chaine
-    if (m_rbufferEnd - m_rPtr < 1) throw OutReadBufferException("in read buffer (S) " + m_fileName);
-    const unsigned char length = *m_rPtr++;
-    //lit la chaine
-    if (m_rbufferEnd - m_rPtr < length) throw OutReadBufferException("in read buffer (T) " + m_fileName);
-    m_rPtr += length;
-    return string((char*)(m_rPtr-length), length);
-}
-////////////////////////////////////////////////////////////
-//brief Get a string from internal buffer
-//param length number of bytes to read (bytes, not chars)
-//return read string */
-string NindFile::getStringAsBytes(const unsigned char length)
-{
-    //lit la chaine
-    if (m_rbufferEnd - m_rPtr < length) throw OutReadBufferException("in read buffer (U) " + m_fileName);
-    m_rPtr += length;
-    return string((char*)(m_rPtr-length), length);
-}
+//the read buffer and its decoders are NindReadBuffer's (see NindReadBuffer.h)
+void NindFile::setEndInBuffer(const unsigned int bytesNb) { m_in.setEndInBuffer(bytesNb); }
+void NindFile::setAbsEndInBuffer(const unsigned int bytesNb) { m_in.setAbsEndInBuffer(bytesNb); }
+unsigned int NindFile::getInt1() { return m_in.getInt1(); }
+unsigned int NindFile::getInt2() { return m_in.getInt2(); }
+unsigned int NindFile::getInt3() { return m_in.getInt3(); }
+signed int NindFile::getSInt3() { return m_in.getSInt3(); }
+unsigned int NindFile::getInt4() { return m_in.getInt4(); }
+signed int NindFile::getSInt4() { return m_in.getSInt4(); }
+uint64_t NindFile::getInt5() { return m_in.getInt5(); }
+unsigned int NindFile::getUIntLat() { return m_in.getUIntLat(); }
+signed int NindFile::getSIntLat() { return m_in.getSIntLat(); }
+string NindFile::getString() { return m_in.getString(); }
+string NindFile::getStringAsBytes(const unsigned char length) { return m_in.getStringAsBytes(length); }
 ////////////////////////////////////////////////////////////
 //brief Create an internal buffer for writing
 //param bytesNb size of buffer */
@@ -725,14 +542,9 @@ void NindFile::setBulk(const bool bulk)
 void NindFile::loadInBuffer(const unsigned char *bytes,
                             const unsigned int bytesNb)
 {
-    delete [] m_rbuffer;
-    m_rbuffer = m_rbufferAbsEnd = m_rbufferEnd = m_rPtr = 0;
-    m_rbuffer = new (nothrow) unsigned char[bytesNb == 0 ? 1 : bytesNb];
-    if (m_rbuffer == 0) throw BadAllocException("in read buffer " + m_fileName);
-    if (bytesNb != 0) memcpy(m_rbuffer, bytes, bytesNb);
-    m_rbufferAbsEnd = m_rbuffer + bytesNb;
-    m_rbufferEnd = m_rbufferAbsEnd;
-    m_rPtr = m_rbuffer;
+    m_in.clear();
+    unsigned char *buffer = m_in.prepare(bytesNb);
+    if (bytesNb != 0) memcpy(buffer, bytes, bytesNb);
 }
 ////////////////////////////////////////////////////////////
 //brief Copy part of the write buffer

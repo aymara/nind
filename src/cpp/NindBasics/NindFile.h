@@ -21,6 +21,7 @@
 #include "NindExceptions.h"
 #include <cstdint>
 #include "NindSignalCatcher.h"
+#include "NindReadBuffer.h"
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -291,10 +292,7 @@ private:
     unsigned char *m_wbuffer;        //buffer d'ecriture
     unsigned char *m_wbufferEnd;     //fin buffer d'ecriture
     unsigned char *m_wPtr;           //pointeur buffer d'ecriture
-    unsigned char *m_rbuffer;        //buffer de lecture
-    unsigned char *m_rbufferAbsEnd;  //fin buffer de lecture absolue
-    unsigned char *m_rbufferEnd;     //fin buffer de lecture ajustable
-    unsigned char *m_rPtr;           //pointeur buffer de lecture
+    NindReadBuffer m_in;             //buffer de lecture (et ses dejcodeurs)
     long int m_fileSize;             //taille du fichier
     bool m_isLittleEndian;
     bool m_isBulk;                   //vrai en mode massif (ejcritures non vidanges une ah une)
@@ -348,7 +346,7 @@ inline long int NindFile::getFileIdent() const
 //return the effective actual size */
 inline unsigned int NindFile::getInBufferSize()
 {
-    return (m_rbufferEnd - m_rbuffer);
+    return m_in.getInBufferSize();
 }
 ////////////////////////////////////////////////////////////
 //brief Set file on relative position
@@ -373,25 +371,21 @@ inline bool NindFile::flush()
 //return true if effective buffer was entirely read */
 inline bool NindFile::endOfInBuffer()
 {
-    return (m_rPtr >= m_rbufferEnd);
+    return m_in.endOfInBuffer();
 }
 ////////////////////////////////////////////////////////////
 //brief Set pointer in read buffer
 //param offset from buffer head where to read next time */
 inline void NindFile::setInBufferPtr(const unsigned int offset)
 {
-    if (offset > (unsigned long)(m_rbufferAbsEnd - m_rbuffer))
-        throw OutReadBufferException("in read buffer (V) " + m_fileName);
-    m_rPtr = m_rbuffer + offset;
+    m_in.setInBufferPtr(offset);
 }
 ////////////////////////////////////////////////////////////
 //brief Set pointer in read buffer
 //param offset from actual read pointer where to read next time */
 inline void NindFile::setRelInBufferPtr(const unsigned int offset)
 {
-    if (offset > (unsigned long)(m_rbufferAbsEnd - m_rPtr))
-        throw OutReadBufferException("in read buffer (W) " + m_fileName);
-    m_rPtr += offset;
+    m_in.setRelInBufferPtr(offset);
 }
 ////////////////////////////////////////////////////////////
 //brief Return the effective size of buffer for writing
