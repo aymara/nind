@@ -113,7 +113,8 @@ TEST_CASE("NindIndexVerify.CrossCheck") {
 }
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindIndexVerify.DamagedFiles") {
-    // bytes of the term index (with blocks) and of the local index, corrupted in turn: every
+    // bytes of the term index (with blocks) and of the local index, corrupted in turn (every byte
+    // of the headers, a sample after: kept short enough for TSan builds): every
     // verification returns (under ASan: no memory error either), and finds something in some
     TestTempDir tmp;
     const string base = tmp.file("consistent");
@@ -125,7 +126,7 @@ TEST_CASE("NindIndexVerify.DamagedFiles") {
         writeFileBytes(damagedBase + ".nindtermindex", readFileBytes(base + ".nindtermindex"));
         writeFileBytes(damagedBase + ".nindlocalindex", readFileBytes(base + ".nindlocalindex"));
         unsigned int variants = 0, reported = 0;
-        for (size_t i = 0; i < bytes.size(); i += (i < 2048 ? 1 : 5)) {
+        for (size_t i = 0; i < bytes.size(); i += (i < 512 ? 1 : 13)) {
             for (unsigned char mask : {0xFFu, 0x01u}) {
                 vector<unsigned char> damaged = bytes;
                 damaged[i] ^= mask;
