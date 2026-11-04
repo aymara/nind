@@ -77,20 +77,12 @@ class Nind(System):
 
     def update(self, index_dir, add, corpus):
         from nind import nind_engine
-        # past LEXICON_MAX_LOAD words per lexicon bucket, an update rebuilds the whole index
-        # with merge_indexes: record it
-        merge_indexes = nind_engine.native.merge_indexes
-
-        def recording_merge(*args, **kwargs):
+        with nind_engine.NindIndexer(index_dir, self.prefix).update() as update:
+            for doc in read_jsonl(add):
+                update.add_tokens(doc["contents"].split(), name=doc["id"])
+        # past LEXICON_MAX_LOAD words per lexicon bucket, an update rebuilds the whole index: record it
+        if update.stats is not None and update.stats.rebuilt:
             self.update_mode = "rebuilt (lexicon full)"
-            return merge_indexes(*args, **kwargs)
-        nind_engine.native.merge_indexes = recording_merge
-        try:
-            with nind_engine.NindIndexer(index_dir, self.prefix).update() as update:
-                for doc in read_jsonl(add):
-                    update.add_tokens(doc["contents"].split(), name=doc["id"])
-        finally:
-            nind_engine.native.merge_indexes = merge_indexes
 
     def index_path(self, index_dir):
         with open(os.path.join(index_dir, self.prefix + ".CURRENT")) as f:

@@ -45,8 +45,11 @@ public:
         unsigned int retroIndirectionBlocSize;      //(0 = merged words count + 1)
         unsigned int termIndirectionBlocSize;       //(0 = merged words count + 1)
         unsigned int localIndirectionBlocSize;      //(0 = documents count + 1)
+        //the documents' lengths, for the merged blocks' <longueurMin> (see
+        //NindTermIndex::setDocumentLengths; none: 0, unknown)
+        std::vector<std::pair<NindDocId, unsigned int> > documentLengths;
         Options(): withRetrolexicon(false), lexiconIndirectionBlocSize(0), retroIndirectionBlocSize(0),
-            termIndirectionBlocSize(0), localIndirectionBlocSize(0) {}
+            termIndirectionBlocSize(0), localIndirectionBlocSize(0), documentLengths() {}
     };
 
     /**\brief What was merged */

@@ -96,6 +96,8 @@ public:
     signed int getSIntLat();
     std::string getString();
     std::string getStringAsBytes(const unsigned char length);
+    //the next bytesNb bytes, in place (valid until the buffer changes)
+    const unsigned char *getBytes(const unsigned int bytesNb);
 
 private:
     NindReadBuffer(const NindReadBuffer &);

@@ -226,3 +226,38 @@ TEST_CASE("NindFormatV2.CorruptBlocks") {
     MESSAGE(variants << " corrupted variants, " << rejected << " rejected");
     CHECK(rejected > 0);
 }
+////////////////////////////////////////////////////////////
+TEST_CASE("NindFormatV2.BlocksOfNind300AreRead") {
+    // golden/v2.0/blocks.nindtermindex: blockedDefinitions() written by nind 3.0.0 (blocks of flag
+    // 71, ULat deltas; golden/v2.0/make_blocks.py); today's writers write flag 73 (bit-packed)
+    TestTempDir tmp;
+    const string old = tmp.file("old");
+    writeFileBytes(old + ".nindtermindex", readFileBytes(string(NIND_GOLDEN_DIR) + "/v2.0/blocks.nindtermindex"));
+    const vector<list<TermCG> > defs = blockedDefinitions();
+    NindTermIndex terms(old, false, kNoCheck, 0);
+    NindReadBuffer buffer;
+    for (size_t i = 0; i < defs.size(); i++) {
+        INFO("term " << i + 1);
+        list<TermCG> read, readConst;
+        REQUIRE(terms.getTermDef(i + 1, read));
+        CHECK(sameDefinitions(defs[i], read));
+        REQUIRE(terms.getTermDef(i + 1, readConst, buffer));
+        CHECK(sameDefinitions(defs[i], readConst));
+        NindTermIndex::TermDirectory directory;
+        REQUIRE(terms.getTermDirectory(i + 1, directory, buffer));
+        for (size_t c = 0; c < directory.categories.size(); c++) {
+            vector<Document> postings;
+            if (!directory.categories[c].blocks.empty())
+                terms.getTermBlocks(i + 1, directory, c, 0, directory.categories[c].blocks.size(), postings, buffer);
+            else postings = directory.categories[c].inlinePostings;
+            CHECK_EQ(directory.categories[c].docsNb, postings.size());
+        }
+    }
+    // the same definitions written today: bit-packed blocks, smaller
+    const string now = tmp.file("now");
+    writeBlocked(now);
+    const size_t oldSize = readFileBytes(old + ".nindtermindex").size(), newSize = readFileBytes(now + ".nindtermindex").size();
+    MESSAGE("flag 71 blocks: " << oldSize << " bytes, flag 73: " << newSize);
+    CHECK(newSize < oldSize);
+}
+////////////////////////////////////////////////////////////

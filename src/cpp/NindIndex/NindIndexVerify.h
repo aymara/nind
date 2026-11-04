@@ -41,8 +41,9 @@ namespace latecon {
 * - every document of the local index decodes, the same through both read paths, with terms of
 *   the lexicon;
 * - with crossCheck, the term index and the local index hold the same (document, term, frequency)
-*   triples (a term's frequency in a document: its localisations), in memory: about 16 bytes per
-*   posting. */
+*   triples (a term's frequency in a document: its localisations), and no block's shortest length
+*   (<longueurMin>) is above one of its documents' length (its localisations), in memory: about
+*   40 bytes per posting. */
 class DLLExportLexicon NindIndexVerify {
 public:
     struct Report {

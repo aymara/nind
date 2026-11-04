@@ -86,7 +86,7 @@ bool sameLocalDefs(const list<Term> &a, const list<Term> &b) {
 // one term's definition: decoded both ways, its lists checked; its triples for the cross check
 void verifyTerm(NindTermIndex &termIndex, const unsigned int ident, const unsigned int wordsNb,
                 NindReadBuffer &buffer, Problems &problems, NindIndexVerify::Report &report,
-                vector<Triple> *triples) {
+                vector<Triple> *triples, vector<Triple> *lengthClaims) {
     const string term = "term " + str(ident) + ": ";
     list<TermCG> sequential, positioned;
     bool found;
@@ -140,8 +140,14 @@ void verifyTerm(NindTermIndex &termIndex, const unsigned int ident, const unsign
         for (size_t c = 0; c < directory.categories.size(); c++, cg++) {
             const NindTermIndex::TermDirectory::Category &category = directory.categories[c];
             vector<Document> postings(category.inlinePostings.begin(), category.inlinePostings.end());
-            for (size_t b = 0; b < category.blocks.size(); b++)
+            for (size_t b = 0; b < category.blocks.size(); b++) {
+                const size_t blockBegin = postings.size();
                 termIndex.getTermBlocks(ident, directory, c, b, b + 1, postings, buffer);
+                //(document, term, the block's shortest length): checked against the local index
+                if (lengthClaims != 0 && category.blocks[b].minLength != 0)
+                    for (size_t p = blockBegin; p < postings.size(); p++)
+                        lengthClaims->push_back(Triple(postings[p].ident, ident, category.blocks[b].minLength));
+            }
             bool same = category.cg == cg->cg && category.docsNb == postings.size()
                 && postings.size() == cg->documents.size();
             list<Document>::const_iterator d = cg->documents.begin();
@@ -181,14 +187,16 @@ NindIndexVerify::Report NindIndexVerify::verify(const string &fileNameExtensionL
         return report;
     }
     NindReadBuffer buffer;
-    vector<Triple> termTriples, localTriples;
+    vector<Triple> termTriples, localTriples, lengthClaims;
+    map<NindDocId, uint64_t> localLengths;          //(cross check) per document, its localisations
     //the term index
     try {
         NindTermIndex termIndex(fileNameExtensionLess, false, identification, 0);
         if (termIndex.isFormatV2() != report.formatV2) problems.add("term index: not the lexicon's format");
         const unsigned int maxIdent = max(termIndex.getMaxIdentAt(), report.wordsNb + 1);
         for (unsigned int ident = 1; ident < maxIdent; ident++)
-            verifyTerm(termIndex, ident, report.wordsNb, buffer, problems, report, crossCheck ? &termTriples : 0);
+            verifyTerm(termIndex, ident, report.wordsNb, buffer, problems, report, crossCheck ? &termTriples : 0,
+                       crossCheck ? &lengthClaims : 0);
     }
     catch (const FileException &e) { problems.add(string("term index: ") + e.what()); }
     //the local index
@@ -222,11 +230,23 @@ NindIndexVerify::Report NindIndexVerify::verify(const string &fileNameExtensionL
                     frequencies[t->term] += t->localisation.size();
                 }
                 if (crossCheck)
-                    for (map<unsigned int, uint64_t>::const_iterator it = frequencies.begin(); it != frequencies.end(); it++)
+                    for (map<unsigned int, uint64_t>::const_iterator it = frequencies.begin(); it != frequencies.end(); it++) {
                         localTriples.push_back(Triple(docIdents[i], it->first, it->second));
+                        localLengths[docIdents[i]] += it->second;
+                    }
             }
         }
         catch (const FileException &e) { problems.add(string("local index: ") + e.what()); }
+    }
+    //the cross check: a block's shortest length is at most each of its documents' length (a
+    //document's length: its localisations; above, a top-k search could skip a block it needs)
+    if (crossCheck && report.withLocalIndex) {
+        for (size_t i = 0; i < lengthClaims.size(); i++) {
+            const map<NindDocId, uint64_t>::const_iterator it = localLengths.find(get<0>(lengthClaims[i]));
+            if (it != localLengths.end() && get<2>(lengthClaims[i]) > it->second)
+                problems.add("term " + str(get<1>(lengthClaims[i])) + ": a block's shortest length " + str(get<2>(lengthClaims[i]))
+                             + ", but document " + str(get<0>(lengthClaims[i])) + " has " + str(it->second));
+        }
     }
     //the cross check: the same triples, both ways
     if (crossCheck && report.withLocalIndex) {

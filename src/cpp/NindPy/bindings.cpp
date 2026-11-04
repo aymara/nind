@@ -32,6 +32,9 @@
 #include "NindIndex/NindLocalIndex.h"
 #include "NindIndex/NindIndexMerge.h"
 #include "NindIndex/NindIndexVerify.h"
+#include "NindIndex/NindIndexUpdate.h"
+#include "NindIndex/NindBm25Scorer.h"
+#include "NindIndex/NindIndexBuilder.h"
 #include "NindIndex/NindTokenizer.h"
 #include "NindIndex/NindDocNames.h"
 #include <unordered_map>
@@ -103,6 +106,16 @@ DocIdsView docIdsView(const py::buffer &buffer, const char *name)
     view.size = size;
     return view;
 }
+// (document, length) pairs from two buffers of the same size (ids 'I' or 'Q', lengths 'I')
+std::vector<std::pair<NindDocId, unsigned int> > docLengthPairs(const py::buffer &docIds, const py::buffer &lengths)
+{
+    const DocIdsView ids = docIdsView(docIds, "doc_ids");
+    const UIntView lens = uintView(lengths, "lengths");
+    if (ids.size != lens.size) throw py::value_error("doc_ids and lengths must have the same length");
+    std::vector<std::pair<NindDocId, unsigned int> > pairs(ids.size);
+    for (size_t i = 0; i < ids.size; i++) pairs[i] = std::make_pair((NindDocId)ids.data[i], lens.data[i]);
+    return pairs;
+}
 // validates a batch's end offsets: ascending, the last one == itemsNb
 void checkEnds(const UIntView &ends, const size_t itemsNb, const char *name)
 {
@@ -115,69 +128,6 @@ void checkEnds(const UIntView &ends, const size_t itemsNb, const char *name)
     if (prev != itemsNb)
         throw py::value_error(std::string(name) + ": last end offset must equal the data length");
 }
-// one term definition from its [begin, end) slice of (docIds, freqs)
-// the checks of buildTermDef on [begin, end) alone (no definition built): scratch is reused
-void checkTermDef(const uint64_t *docIds, const uint32_t *freqs, const size_t begin, const size_t end,
-                  std::vector<std::pair<uint64_t, uint32_t> > &scratch)
-{
-    scratch.assign(end - begin, std::pair<uint64_t, uint32_t>());
-    uint64_t total = 0;
-    for (size_t i = begin; i < end; i++) {
-        scratch[i - begin] = std::make_pair(docIds[i], freqs[i]);
-        total += freqs[i];
-    }
-    if (!std::is_sorted(scratch.begin(), scratch.end())) std::sort(scratch.begin(), scratch.end());
-    for (size_t i = 1; i < scratch.size(); i++)
-        if (scratch[i].first == scratch[i - 1].first)
-            throw py::value_error("doc_ids: duplicate document id " + std::to_string(scratch[i].first));
-    if (total > std::numeric_limits<unsigned int>::max())
-        throw py::value_error("frequencies: total term frequency overflows 32 bits");
-}
-std::list<NindTermIndex::TermCG> buildTermDef(const uint64_t *docIds, const uint32_t *freqs,
-                                               const size_t begin, const size_t end,
-                                               const unsigned char cg)
-{
-    std::vector<std::pair<uint64_t, uint32_t> > postings(end - begin);
-    for (size_t i = begin; i < end; i++) postings[i - begin] = std::make_pair(docIds[i], freqs[i]);
-    if (!std::is_sorted(postings.begin(), postings.end())) std::sort(postings.begin(), postings.end());
-    std::list<NindTermIndex::TermCG> termDef;
-    if (postings.empty()) return termDef;
-    uint64_t total = 0;
-    NindTermIndex::TermCG termCG(cg, 0);
-    for (size_t i = 0; i < postings.size(); i++) {
-        if (i > 0 && postings[i].first == postings[i - 1].first)
-            throw py::value_error("doc_ids: duplicate document id " + std::to_string(postings[i].first));
-        total += postings[i].second;
-        termCG.documents.push_back(NindTermIndex::Document(postings[i].first, postings[i].second));
-    }
-    if (total > std::numeric_limits<unsigned int>::max())
-        throw py::value_error("frequencies: total term frequency overflows 32 bits");
-    termCG.frequency = static_cast<unsigned int>(total);
-    termDef.push_back(std::move(termCG));
-    return termDef;
-}
-// one local definition from its [begin, end) slice of occurrences: one Term
-// per term id (ascending), localisations kept in occurrence order.
-// <nbreLocalisations> is one byte, so a term occurring more than 255 times
-// is split into several consecutive Terms with the same id (readers sum them)
-std::list<NindLocalIndex::Term> buildLocalDef(const uint32_t *termIds, const uint32_t *positions,
-                                               const uint32_t *lengths,
-                                               const size_t begin, const size_t end,
-                                               const unsigned char cg)
-{
-    std::map<unsigned int, std::vector<size_t> > byTerm;     //term id -> its occurrences
-    for (size_t i = begin; i < end; i++) byTerm[termIds[i]].push_back(i);
-    std::list<NindLocalIndex::Term> localDef;
-    for (std::map<unsigned int, std::vector<size_t> >::const_iterator it = byTerm.begin(); it != byTerm.end(); it++) {
-        const std::vector<size_t> &occurrences = it->second;
-        for (size_t j = 0; j < occurrences.size(); j++) {
-            if (j % 255 == 0) localDef.push_back(NindLocalIndex::Term(it->first, cg));
-            localDef.back().localisation.push_back(
-                NindLocalIndex::Localisation(positions[occurrences[j]], lengths[occurrences[j]]));
-        }
-    }
-    return localDef;
-}
 }
 namespace {
 py::bytes uintBytes(const std::vector<uint32_t> &values)
@@ -189,138 +139,6 @@ py::bytes uint64Bytes(const std::vector<uint64_t> &values)
     return py::bytes(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(uint64_t));
 }
 
-// Builds the term and local index files of a corpus from its documents, given as
-// chunks of term ids (in document order): see the IndexBuilder binding below.
-class IndexBuilder {
-public:
-    IndexBuilder(): m_docIds(), m_docEnds(), m_tokens(), m_maxTermId(0) {}
-
-    // documents firstDocId, firstDocId + 1... : document i is localIds[ends[i-1]:ends[i]],
-    // local id x being the term idMap[x]
-    void addDocuments(const uint64_t firstDocId, const UIntView &ends, const UIntView &localIds,
-                      const UIntView &idMap)
-    {
-        checkEnds(ends, localIds.size, "ends");
-        if (ends.size != 0 && !m_docIds.empty() && firstDocId <= m_docIds.back())
-            throw py::value_error("documents must be added in increasing id order");
-        if (ends.size != 0 && firstDocId > std::numeric_limits<uint64_t>::max() - (ends.size - 1))
-            throw py::value_error("document id out of range");
-        for (size_t i = 0; i < idMap.size; i++) {
-            if (idMap.data[i] == 0) throw py::value_error("id_map: 0 is not a valid term id");
-        }
-        for (size_t i = 0; i < localIds.size; i++) {
-            if (localIds.data[i] >= idMap.size) throw py::value_error("term_ids: local id beyond id_map");
-        }
-        py::gil_scoped_release release;
-        const size_t base = m_tokens.size();
-        m_tokens.reserve(base + localIds.size);
-        for (size_t i = 0; i < localIds.size; i++) {
-            const uint32_t termId = idMap.data[localIds.data[i]];
-            m_tokens.push_back(termId);
-            if (termId > m_maxTermId) m_maxTermId = termId;
-        }
-        for (size_t i = 0; i < ends.size; i++) {
-            m_docIds.push_back(firstDocId + (uint64_t)i);
-            m_docEnds.push_back(base + ends.data[i]);
-        }
-    }
-
-    // writes every term's postings, terms in increasing id order (GIL released)
-    void writeTermIndex(NindTermIndex &termIndex, const NindPadFile::Identification &identification,
-                        const unsigned char cg) const
-    {
-        py::gil_scoped_release release;
-        const std::list<unsigned int> noSpecifics;
-        //1) occurrences of each term in each document, counted per document
-        std::vector<uint32_t> counts(m_maxTermId + 1, 0);
-        std::vector<uint32_t> touched;
-        std::vector<size_t> postingsNb(m_maxTermId + 2, 0);
-        size_t begin = 0;
-        for (size_t d = 0; d < m_docIds.size(); d++) {
-            for (size_t i = begin; i < m_docEnds[d]; i++) {
-                if (counts[m_tokens[i]]++ == 0) touched.push_back(m_tokens[i]);
-            }
-            for (size_t i = 0; i < touched.size(); i++) {
-                postingsNb[touched[i] + 1]++;
-                counts[touched[i]] = 0;
-            }
-            touched.clear();
-            begin = m_docEnds[d];
-        }
-        //2) postings by term (CSR), documents in increasing id order
-        for (size_t t = 1; t < postingsNb.size(); t++) postingsNb[t] += postingsNb[t - 1];
-        std::vector<size_t> fill(postingsNb.begin(), postingsNb.end() - 1);
-        std::vector<uint64_t> postingDocs(postingsNb.back());
-        std::vector<uint32_t> postingFreqs(postingsNb.back());
-        begin = 0;
-        for (size_t d = 0; d < m_docIds.size(); d++) {
-            for (size_t i = begin; i < m_docEnds[d]; i++) {
-                if (counts[m_tokens[i]]++ == 0) touched.push_back(m_tokens[i]);
-            }
-            for (size_t i = 0; i < touched.size(); i++) {
-                const size_t slot = fill[touched[i]]++;
-                postingDocs[slot] = m_docIds[d];
-                postingFreqs[slot] = counts[touched[i]];
-                counts[touched[i]] = 0;
-            }
-            touched.clear();
-            begin = m_docEnds[d];
-        }
-        //3) the term definitions
-        for (uint32_t t = 1; t <= m_maxTermId; t++) {
-            if (postingsNb[t] == postingsNb[t + 1]) continue;
-            const std::list<NindTermIndex::TermCG> termDef =
-                buildTermDef(postingDocs.data(), postingFreqs.data(), postingsNb[t], postingsNb[t + 1], cg);
-            termIndex.setTermDef(t, termDef, identification, noSpecifics);
-        }
-    }
-
-    // writes every document: its term occurrences at positions 0, 1... (length 1) (GIL released)
-    void writeLocalIndex(NindLocalIndex &localIndex, const NindPadFile::Identification &identification,
-                         const unsigned char cg) const
-    {
-        py::gil_scoped_release release;
-        size_t maxLength = 0, begin = 0;
-        for (size_t d = 0; d < m_docIds.size(); d++) {
-            maxLength = std::max(maxLength, m_docEnds[d] - begin);
-            begin = m_docEnds[d];
-        }
-        std::vector<uint32_t> positions(maxLength), lengths(maxLength, 1);
-        for (size_t i = 0; i < maxLength; i++) positions[i] = (uint32_t)i;
-        begin = 0;
-        for (size_t d = 0; d < m_docIds.size(); d++) {
-            const size_t length = m_docEnds[d] - begin;
-            if (length != 0) {
-                const std::list<NindLocalIndex::Term> localDef =
-                    buildLocalDef(m_tokens.data() + begin, positions.data(), lengths.data(), 0, length, cg);
-                localIndex.setLocalDef(m_docIds[d], localDef, identification);
-            }
-            begin = m_docEnds[d];
-        }
-    }
-
-    // (document ids as uint64 bytes, lengths in tokens as uint32 bytes)
-    py::tuple docLengths() const
-    {
-        std::vector<uint32_t> lengths(m_docIds.size());
-        size_t begin = 0;
-        for (size_t d = 0; d < m_docIds.size(); d++) {
-            lengths[d] = (uint32_t)(m_docEnds[d] - begin);
-            begin = m_docEnds[d];
-        }
-        return py::make_tuple(uint64Bytes(m_docIds), uintBytes(lengths));
-    }
-
-    size_t docsNb() const { return m_docIds.size(); }
-    size_t tokensNb() const { return m_tokens.size(); }
-    uint32_t maxTermId() const { return m_maxTermId; }
-
-private:
-    std::vector<uint64_t> m_docIds;     //in increasing order (external document ids, 64 bits)
-    std::vector<size_t> m_docEnds;      //document d is m_tokens[m_docEnds[d-1]:m_docEnds[d]]
-    std::vector<uint32_t> m_tokens;     //term ids
-    uint32_t m_maxTermId;
-};
 
 // The thread-safe (const) reads of readers each use a buffer of their own (see NindFile::readAt):
 // a local one for a single lookup, the pooled scratch's for a search. Not a thread_local: in a
@@ -328,411 +146,6 @@ private:
 // link-time optimization the compiler recomputed its address in the decoding loops (11% of a
 // search's instructions).
 
-// Okapi BM25 over the postings of a term index: see the Bm25Scorer binding below.
-// Flat arrays only: documents are numbered by their position in the corpus order (dense table
-// from document id, or binary search when ids are too sparse for one), scores are accumulated
-// in an array indexed by position (reset only where touched), postings are read with
-// NindTermIndex::getTermPostings into reused vectors - no allocation nor hashing per posting.
-const uint32_t NO_POSITION = 0xFFFFFFFFu;       // a document id without position: not in the corpus
-const uint64_t DENSE_SLACK = 1u << 20;          // a dense table up to 2 N + 1M entries
-class Bm25Scorer {
-public:
-    // the documents of the corpus, in the order that breaks score ties
-    // document ids: 64 bits (NindDocId); positions: 32 bits (at most 4.29G documents per index)
-    Bm25Scorer(const DocIdsView &docIds, const UIntView &lengths, const double avgDocLength):
-        m_docIds(), m_lengths(), m_dense(), m_sparse(), m_docsNb(docIds.size), m_avgDocLength(avgDocLength),
-        m_poolMutex(), m_pool()
-    {
-        if (docIds.size != lengths.size) throw py::value_error("doc_ids and lengths must have the same length");
-        if (docIds.size >= NO_POSITION) throw py::value_error("too many documents");
-        uint64_t maxId = 0;
-        for (size_t i = 0; i < docIds.size; i++) maxId = std::max(maxId, docIds.data[i]);
-        // a document id given twice: its last position counts (and only it is scored)
-        if (docIds.size != 0 && maxId < 2 * (uint64_t)docIds.size + DENSE_SLACK) {
-            m_dense.assign((size_t)maxId + 1, NO_POSITION);
-            for (size_t i = 0; i < docIds.size; i++) m_dense[docIds.data[i]] = (uint32_t)i;
-        }
-        else {
-            m_sparse.reserve(docIds.size);
-            for (size_t i = 0; i < docIds.size; i++) m_sparse.push_back(std::make_pair(docIds.data[i], (uint32_t)i));
-            std::stable_sort(m_sparse.begin(), m_sparse.end(),
-                             [](const std::pair<uint64_t, uint32_t> &a, const std::pair<uint64_t, uint32_t> &b)
-                             { return a.first < b.first; });
-            std::vector<std::pair<uint64_t, uint32_t> > unique;
-            unique.reserve(m_sparse.size());
-            for (size_t i = 0; i < m_sparse.size(); i++) {
-                if (!unique.empty() && unique.back().first == m_sparse[i].first) unique.back() = m_sparse[i];
-                else unique.push_back(m_sparse[i]);
-            }
-            m_sparse.swap(unique);
-        }
-        m_docIds.assign(docIds.data, docIds.data + docIds.size);
-        m_lengths.assign(lengths.data, lengths.data + lengths.size);
-        m_minLength = 0;
-        for (size_t i = 0; i < m_lengths.size(); i++)
-            if (i == 0 || m_lengths[i] < m_minLength) m_minLength = m_lengths[i];
-    }
-
-    // the documents with a positive score for the query terms (in query order, repeats
-    // included, 0 = unknown term), by decreasing score, at most topK if topK >= 0
-    std::vector<std::pair<uint64_t, double> > search(const NindTermIndex &termIndex,
-                                                     const std::vector<unsigned int> &termIds,
-                                                     const double k1, const double b,
-                                                     const long topK, const bool prune) const
-    {
-        py::gil_scoped_release release;
-        // scratch arrays and read buffer from the pool: concurrent searches each get their own
-        ScratchLease lease(*this);
-        NindReadBuffer &buffer = lease.scratch->buffer;
-        std::vector<double> &scores = lease.scratch->scores;
-        if (scores.size() != m_docsNb) scores.assign(m_docsNb, 0.0);
-        std::vector<uint32_t> touched;          // positions whose score isn't 0 any more
-
-        // the query's distinct terms; per occurrence (query order, repeats included) its term
-        std::vector<unsigned int> distinctIds;
-        std::vector<size_t> occurrences;
-        std::unordered_map<unsigned int, size_t> distinct;
-        for (size_t t = 0; t < termIds.size(); t++) {
-            if (termIds[t] == 0) continue;
-            const auto found = distinct.insert(std::make_pair(termIds[t], distinctIds.size()));
-            if (found.second) distinctIds.push_back(termIds[t]);
-            occurrences.push_back(found.first->second);
-        }
-        // per distinct term: its idf and the postings to score, (position, frequency): every posting
-        // (exhaustive), or only those of the blocks that may reach the top k (block-max pruning)
-        std::vector<double> idfs;
-        std::vector<std::vector<std::pair<uint32_t, uint32_t> > > postings;
-        if (prune && topK > 0 && k1 >= 0 && b >= 0 && b <= 1 && !distinctIds.empty()) {
-            std::vector<std::pair<uint64_t, double> > result;
-            if (searchMaxScore(termIndex, distinctIds, occurrences, k1, b, (size_t)topK, buffer, result)) {
-                lease.clean = true;         //(scores untouched)
-                return result;
-            }
-        }
-        collectAll(termIndex, distinctIds, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
-        // the scores, term occurrence by term occurrence in query order (as NindEngine._bm25_score)
-        for (size_t o = 0; o < occurrences.size(); o++) {
-            const double idf = idfs[occurrences[o]];
-            const std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[occurrences[o]];
-            for (size_t i = 0; i < termPostings.size(); i++) {
-                if (termPostings[i].second == 0) continue;
-                const uint32_t position = termPostings[i].first;
-                double &score = scores[position];
-                if (score == 0.0) touched.push_back(position);
-                score += contribution(idf, termPostings[i].second, m_lengths[position], k1, b);
-            }
-        }
-        //(score, position) of the documents with a positive score; scores reset for the next search
-        std::vector<std::pair<double, uint32_t> > ranked;
-        ranked.reserve(touched.size());
-        for (size_t i = 0; i < touched.size(); i++) {
-            const uint32_t position = touched[i];
-            if (scores[position] > 0) ranked.push_back(std::make_pair(-scores[position], position));
-            scores[position] = 0.0;
-        }
-        lease.clean = true;             //every score reset: the scratch arrays can be reused
-        //decreasing score, then the order of the corpus
-        const size_t kept = (topK >= 0 && (size_t)topK < ranked.size()) ? (size_t)topK : ranked.size();
-        std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
-        std::vector<std::pair<uint64_t, double> > result(kept);
-        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
-        return result;
-    }
-
-    size_t docsNb() const { return m_docsNb; }
-
-private:
-    // one term's BM25 contribution: the same operations, in the same order, everywhere (scores and
-    // bounds; -ffp-contract=off): each operation is monotonic, so a bound computed at a larger tf
-    // and a smaller length is never below a contribution
-    double contribution(const double idf, const double tf, const double docLength,
-                        const double k1, const double b) const {
-        const double numerator = tf * (k1 + 1);
-        const double denominator = tf + k1 * (1 - b + b * (docLength / m_avgDocLength));
-        return idf * (numerator / denominator);
-    }
-    double idfOf(const uint64_t df) const {
-        //same operations, in the same order, as NindEngine._bm25_score
-        return std::log(((double)((int64_t)m_docsNb - (int64_t)df) + 0.5) / ((double)df + 0.5) + 1.0);
-    }
-
-    // every posting of every term (several categories: a document's first one only)
-    void collectAll(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
-                    NindReadBuffer &buffer, std::vector<uint32_t> &stamps, uint32_t &stamp,
-                    std::vector<double> &idfs,
-                    std::vector<std::vector<std::pair<uint32_t, uint32_t> > > &postings) const
-    {
-        idfs.clear();
-        postings.assign(distinctIds.size(), std::vector<std::pair<uint32_t, uint32_t> >());
-        std::vector<NindTermIndex::Document> read;
-        std::vector<size_t> categoryEnds;
-        for (size_t t = 0; t < distinctIds.size(); t++) {
-            termIndex.getTermPostings(distinctIds[t], read, categoryEnds, buffer);
-            // df counts the documents of every category
-            idfs.push_back(idfOf((uint64_t)read.size()));
-            std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[t];
-            termPostings.reserve(read.size());
-            const bool severalCategories = categoryEnds.size() > 1;
-            if (severalCategories) {
-                if (stamps.size() != m_docsNb) stamps.assign(m_docsNb, 0);
-                if (++stamp == 0) {         // wrapped: forget every mark
-                    std::fill(stamps.begin(), stamps.end(), 0);
-                    stamp = 1;
-                }
-            }
-            for (size_t i = 0; i < read.size(); i++) {
-                const uint32_t position = positionOf(read[i].ident);
-                if (position == NO_POSITION) continue;
-                if (severalCategories) {
-                    if (stamps[position] == stamp) continue;    // already in a previous category
-                    stamps[position] = stamp;
-                }
-                termPostings.push_back(std::make_pair(position, (uint32_t)read[i].frequency));
-            }
-        }
-    }
-
-    // Dynamic block-max MaxScore, document at a time, exact. The terms by increasing upper bound
-    // (their largest contribution); the shortest prefix of them whose bounds sum is below theta (the
-    // k-th best score so far) is non-essential: a document in none of the others can't reach the top
-    // k. The essential lists are read in document order (blocks read a few at a time); a document is
-    // then completed by the non-essential terms, by decreasing bound, each one first checked against
-    // its block's bound and read (that block only) if the document may still reach theta.
-    // Scores are accumulated in another order than NindEngine._bm25_score: every comparison with
-    // theta has a margin far above the rounding errors, and the candidates kept are scored again,
-    // exactly, in query order (identical scores and ranks).
-    // false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0, a
-    // long list without blocks (format v1).
-    static constexpr double PRUNING_MARGIN = 1e-9;
-    static const size_t ESSENTIAL_READ_AHEAD = 16;      //blocks read at once from an essential list
-    struct MaxScoreTerm {
-        NindTermIndex::TermDirectory directory;
-        double idf;
-        unsigned int multiplicity;      //occurrences in the query
-        size_t blocksNb;                //a short list: 1 (its inline postings)
-        std::vector<NindDocId> blockFirst, blockLast;
-        std::vector<double> blockBounds;
-        double bound;                   //the largest of blockBounds
-        size_t chunkBegin, chunkEnd;    //blocks decoded in chunk
-        std::vector<NindTermIndex::Document> chunk;
-        size_t pos;                     //cursor in chunk
-        size_t probeBlock;              //(non-essential) the first block that may hold the next document
-        MaxScoreTerm(): directory(), idf(0), multiplicity(0), blocksNb(0), blockFirst(), blockLast(),
-            blockBounds(), bound(0), chunkBegin(0), chunkEnd(0), chunk(), pos(0), probeBlock(0) {}
-        bool exhausted() const { return pos >= chunk.size(); }     //(essential: see nextBlocks)
-    };
-    void readBlocks(const NindTermIndex &termIndex, const unsigned int ident, MaxScoreTerm &term,
-                    const size_t first, const size_t end, NindReadBuffer &buffer) const {
-        term.chunk.clear();
-        termIndex.getTermBlocks(ident, term.directory, 0, first, end, term.chunk, buffer);
-        term.chunkBegin = first;
-        term.chunkEnd = end;
-        term.pos = 0;
-    }
-    // an essential list's next blocks, until a posting (or the end)
-    void nextBlocks(const NindTermIndex &termIndex, const unsigned int ident, MaxScoreTerm &term,
-                    NindReadBuffer &buffer) const {
-        while (term.pos >= term.chunk.size() && term.chunkEnd < term.blocksNb)
-            readBlocks(termIndex, ident, term, term.chunkEnd,
-                       std::min(term.chunkEnd + ESSENTIAL_READ_AHEAD, term.blocksNb), buffer);
-    }
-    bool searchMaxScore(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
-                        const std::vector<size_t> &occurrences, const double k1, const double b,
-                        const size_t topK, NindReadBuffer &buffer,
-                        std::vector<std::pair<uint64_t, double> > &result) const
-    {
-        const double shortest = m_minLength;
-        // the query's terms present in the index (index in distinctIds -> in terms)
-        std::vector<MaxScoreTerm> terms;
-        std::vector<unsigned int> termIdents;
-        std::vector<size_t> termOf(distinctIds.size(), (size_t)-1);
-        for (size_t d = 0; d < distinctIds.size(); d++) {
-            MaxScoreTerm term;
-            if (!termIndex.getTermDirectory(distinctIds[d], term.directory, buffer)) continue;
-            if (term.directory.categories.size() != 1) return false;
-            const NindTermIndex::TermDirectory::Category &category = term.directory.categories[0];
-            term.idf = idfOf(category.docsNb);
-            if (!(term.idf > 0)) return false;
-            //a format v1 file: every list inline, a long one would be read whole as one block
-            if (category.blocks.empty() && category.inlinePostings.size() > NindTermIndex::BLOCK_SIZE) return false;
-            for (size_t o = 0; o < occurrences.size(); o++) if (occurrences[o] == d) term.multiplicity++;
-            if (!category.blocks.empty()) {
-                term.blocksNb = category.blocks.size();
-                for (size_t i = 0; i < category.blocks.size(); i++) {
-                    const NindTermIndex::Block &block = category.blocks[i];
-                    term.blockFirst.push_back(block.first);
-                    term.blockLast.push_back(block.last);
-                    const double length = std::max((double)block.minLength, shortest);
-                    term.blockBounds.push_back(term.multiplicity *
-                                               contribution(term.idf, block.maxFrequency, length, k1, b));
-                }
-            }
-            else {
-                if (category.inlinePostings.empty()) continue;
-                term.blocksNb = 1;
-                term.blockFirst.push_back(category.inlinePostings.front().ident);
-                term.blockLast.push_back(category.inlinePostings.back().ident);
-                double bound = 0.0;
-                for (size_t i = 0; i < category.inlinePostings.size(); i++) {
-                    const NindTermIndex::Document &posting = category.inlinePostings[i];
-                    const uint32_t position = positionOf(posting.ident);
-                    if (position == NO_POSITION || posting.frequency == 0) continue;
-                    bound = std::max(bound, contribution(term.idf, posting.frequency, m_lengths[position], k1, b));
-                }
-                term.blockBounds.push_back(term.multiplicity * bound);
-                term.chunk = category.inlinePostings;
-                term.chunkEnd = 1;
-            }
-            term.bound = *std::max_element(term.blockBounds.begin(), term.blockBounds.end());
-            termOf[d] = terms.size();
-            terms.push_back(std::move(term));
-            termIdents.push_back(distinctIds[d]);
-        }
-        const size_t termsNb = terms.size();
-        if (termsNb == 0) { result.clear(); return true; }
-        // by increasing bound; prefix[i]: the bounds sum of order[0..i]
-        std::vector<size_t> order(termsNb);
-        for (size_t i = 0; i < termsNb; i++) order[i] = i;
-        std::stable_sort(order.begin(), order.end(),
-                         [&](const size_t x, const size_t y) { return terms[x].bound < terms[y].bound; });
-        std::vector<double> prefix(termsNb);
-        for (size_t i = 0; i < termsNb; i++) prefix[i] = (i ? prefix[i - 1] : 0.0) + terms[order[i]].bound;
-        // the long lists: their first blocks
-        for (size_t i = 0; i < termsNb; i++) nextBlocks(termIndex, termIdents[i], terms[i], buffer);
-        std::priority_queue<double, std::vector<double>, std::greater<double> > best;  //the k best approximations
-        double threshold = 0.0;                 //theta minus the margin
-        size_t nonEssential = 0;                //order[0..nonEssential) are non-essential
-        struct Candidate { uint32_t position; double approximation; };
-        std::vector<Candidate> candidates;
-        std::vector<uint32_t> candidateFrequencies;   //termsNb per candidate
-        std::vector<uint32_t> frequencies(termsNb);
-        while (nonEssential < termsNb) {
-            // the next document: the smallest current one of the essential lists
-            bool any = false;
-            NindDocId docId = 0;
-            for (size_t i = nonEssential; i < termsNb; i++) {
-                const MaxScoreTerm &term = terms[order[i]];
-                if (term.exhausted()) continue;
-                const NindDocId current = term.chunk[term.pos].ident;
-                if (!any || current < docId) { docId = current; any = true; }
-            }
-            if (!any) break;
-            const uint32_t position = positionOf(docId);
-            std::fill(frequencies.begin(), frequencies.end(), 0);
-            double approximation = 0.0;
-            for (size_t i = nonEssential; i < termsNb; i++) {
-                const size_t t = order[i];
-                MaxScoreTerm &term = terms[t];
-                if (term.exhausted() || term.chunk[term.pos].ident != docId) continue;
-                frequencies[t] = term.chunk[term.pos].frequency;
-                term.pos++;
-                nextBlocks(termIndex, termIdents[t], term, buffer);
-                if (position != NO_POSITION && frequencies[t] != 0)
-                    approximation += term.multiplicity * contribution(term.idf, frequencies[t], m_lengths[position], k1, b);
-            }
-            if (position == NO_POSITION) continue;
-            // the non-essential terms, by decreasing bound, while the document may reach theta
-            bool rejected = false;
-            for (size_t i = nonEssential; i-- > 0; ) {
-                if (approximation + prefix[i] < threshold) { rejected = true; break; }
-                const size_t t = order[i];
-                MaxScoreTerm &term = terms[t];
-                while (term.probeBlock < term.blocksNb && term.blockLast[term.probeBlock] < docId) term.probeBlock++;
-                if (term.probeBlock == term.blocksNb || term.blockFirst[term.probeBlock] > docId) continue;   //not in it
-                const double others = i ? prefix[i - 1] : 0.0;
-                if (approximation + term.blockBounds[term.probeBlock] + others < threshold) { rejected = true; break; }
-                if (term.probeBlock < term.chunkBegin || term.probeBlock >= term.chunkEnd)
-                    readBlocks(termIndex, termIdents[t], term, term.probeBlock, term.probeBlock + 1, buffer);
-                while (term.pos < term.chunk.size() && term.chunk[term.pos].ident < docId) term.pos++;
-                if (term.pos == term.chunk.size() || term.chunk[term.pos].ident != docId) continue;
-                frequencies[t] = term.chunk[term.pos].frequency;
-                if (frequencies[t] != 0)
-                    approximation += term.multiplicity * contribution(term.idf, frequencies[t], m_lengths[position], k1, b);
-            }
-            if (rejected || !(approximation > 0) || approximation < threshold) continue;
-            candidates.push_back(Candidate{position, approximation});
-            candidateFrequencies.insert(candidateFrequencies.end(), frequencies.begin(), frequencies.end());
-            if (best.size() < topK) best.push(approximation);
-            else if (approximation > best.top()) { best.pop(); best.push(approximation); }
-            if (best.size() == topK) {
-                threshold = best.top() * (1 - PRUNING_MARGIN);
-                while (nonEssential < termsNb && prefix[nonEssential] < threshold) nonEssential++;
-            }
-        }
-        // the candidates that may be in the top k, scored exactly as the exhaustive search does
-        std::vector<std::pair<double, uint32_t> > ranked;
-        for (size_t c = 0; c < candidates.size(); c++) {
-            if (candidates[c].approximation < threshold) continue;
-            const uint32_t position = candidates[c].position;
-            double score = 0.0;
-            for (size_t o = 0; o < occurrences.size(); o++) {
-                const size_t t = termOf[occurrences[o]];
-                if (t == (size_t)-1) continue;
-                const uint32_t frequency = candidateFrequencies[c * termsNb + t];
-                if (frequency == 0) continue;
-                score += contribution(terms[t].idf, frequency, m_lengths[position], k1, b);
-            }
-            if (score > 0) ranked.push_back(std::make_pair(-score, position));
-        }
-        const size_t kept = std::min(topK, ranked.size());
-        std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
-        result.resize(kept);
-        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
-        return true;
-    }
-
-    uint32_t positionOf(const uint64_t docId) const {
-        if (!m_dense.empty() || m_sparse.empty())
-            return docId < m_dense.size() ? m_dense[docId] : NO_POSITION;
-        const auto it = std::lower_bound(m_sparse.begin(), m_sparse.end(), docId,
-                                         [](const std::pair<uint64_t, uint32_t> &a, const uint64_t id)
-                                         { return a.first < id; });
-        return (it != m_sparse.end() && it->first == docId) ? it->second : NO_POSITION;
-    }
-
-    std::vector<uint64_t> m_docIds;     //position -> document id
-    std::vector<uint32_t> m_lengths;    //position -> length
-    uint32_t m_minLength;               //the shortest document
-    std::vector<uint32_t> m_dense;      //document id -> position (NO_POSITION: none), or empty
-    std::vector<std::pair<uint64_t, uint32_t> > m_sparse;   //(document id, position), by id, when not dense
-    size_t m_docsNb;
-    double m_avgDocLength;
-    // scratch arrays reused by successive searches (all zero / unmarked between searches): a
-    // pool, so that concurrent searches each have their own; at most one per hardware thread kept
-    struct Scratch {
-        std::vector<double> scores;
-        std::vector<uint32_t> stamps;
-        uint32_t stamp;
-        NindReadBuffer buffer;          //for the term index's const reads
-        Scratch(): scores(), stamps(), stamp(0), buffer() {}
-    };
-    struct ScratchLease {
-        const Bm25Scorer &scorer;
-        std::unique_ptr<Scratch> scratch;
-        bool clean;
-        explicit ScratchLease(const Bm25Scorer &s): scorer(s), scratch(), clean(false) {
-            {
-                std::lock_guard<std::mutex> lock(scorer.m_poolMutex);
-                if (!scorer.m_pool.empty()) {
-                    scratch = std::move(scorer.m_pool.back());
-                    scorer.m_pool.pop_back();
-                }
-            }
-            if (!scratch) scratch.reset(new Scratch());
-        }
-        ~ScratchLease() {
-            //only clean scratch arrays go back (search sets clean after resetting its scores;
-            //an exception may have left scores behind)
-            if (!scratch || !clean) return;
-            scratch->buffer.shrink();       //a large definition's storage isn't kept
-            std::lock_guard<std::mutex> lock(scorer.m_poolMutex);
-            const size_t maxKept = std::max(1u, std::thread::hardware_concurrency());
-            if (scorer.m_pool.size() < maxKept) scorer.m_pool.push_back(std::move(scratch));
-        }
-    };
-    mutable std::mutex m_poolMutex;
-    mutable std::vector<std::unique_ptr<Scratch> > m_pool;
-};
 }
 ////////////////////////////////////////////////////////////
 PYBIND11_MODULE(_native, m) {
@@ -875,11 +288,40 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("frequency", &NindTermIndex::TermCG::frequency)
         .def_readwrite("documents", &NindTermIndex::TermCG::documents);
 
+    // format v2 blocks, as a term's directory describes them (get_term_directory)
+    py::class_<NindTermIndex::Block>(m, "Block")
+        .def_readonly("first", &NindTermIndex::Block::first)
+        .def_readonly("last", &NindTermIndex::Block::last)
+        .def_readonly("docs_nb", &NindTermIndex::Block::docsNb)
+        .def_readonly("max_frequency", &NindTermIndex::Block::maxFrequency)
+        .def_readonly("min_length", &NindTermIndex::Block::minLength)
+        .def_readonly("offset", &NindTermIndex::Block::offset)
+        .def_readonly("length", &NindTermIndex::Block::length);
+    py::class_<NindTermIndex::TermDirectory::Category>(m, "DirectoryCategory")
+        .def_readonly("cg", &NindTermIndex::TermDirectory::Category::cg)
+        .def_readonly("frequency", &NindTermIndex::TermDirectory::Category::frequency)
+        .def_readonly("docs_nb", &NindTermIndex::TermDirectory::Category::docsNb)
+        .def_readonly("inline_postings", &NindTermIndex::TermDirectory::Category::inlinePostings)
+        .def_readonly("blocks", &NindTermIndex::TermDirectory::Category::blocks);
+
     py::class_<NindTermIndex>(m, "NindTermIndex")
         .def(py::init<const std::string &, bool, const NindPadFile::Identification &, unsigned int, unsigned int>(),
              py::arg("file_name_extensionless"), py::arg("is_writer"),
              py::arg("lexicon_identification"), py::arg("specifics_number"),
              py::arg("indirection_bloc_size") = 0)
+        // a term's directory (format v2: blocks' descriptors, not their postings; v1: every
+        // posting inline), per category; None if the term has no definition
+        .def("get_term_directory", [](const NindTermIndex &self, unsigned int ident) -> py::object {
+            NindTermIndex::TermDirectory directory;
+            bool found;
+            {
+                py::gil_scoped_release release;
+                NindReadBuffer buffer;
+                found = self.getTermDirectory(ident, directory, buffer);
+            }
+            if (!found) return py::none();
+            return py::cast(directory.categories);
+        }, py::arg("ident"))
         .def("get_term_def", [](NindTermIndex &self, unsigned int ident) -> py::object {
             std::list<NindTermIndex::TermCG> termDef;
             bool found;
@@ -920,7 +362,7 @@ PYBIND11_MODULE(_native, m) {
             const UIntView freqs = uintView(frequencies, "frequencies");
             if (ids.size != freqs.size)
                 throw py::value_error("doc_ids and frequencies must have the same length");
-            const std::list<NindTermIndex::TermCG> termDef = buildTermDef(ids.data, freqs.data, 0, ids.size, cg);
+            const std::list<NindTermIndex::TermCG> termDef = NindIndexBuilder::termDef(ids.data, freqs.data, 0, ids.size, cg);
             py::gil_scoped_release release;
             self.setTermDef(ident, termDef, fileIdentification, specifics);
         }, py::arg("ident"), py::arg("doc_ids"), py::arg("frequencies"), py::arg("file_identification"),
@@ -949,7 +391,7 @@ PYBIND11_MODULE(_native, m) {
                 std::vector<std::pair<uint64_t, uint32_t> > scratch;
                 size_t begin = 0;
                 for (size_t i = 0; i < terms.size; i++) {
-                    checkTermDef(ids.data, freqs.data, begin, termEnds.data[i], scratch);
+                    NindIndexBuilder::checkTermDef(ids.data, freqs.data, begin, termEnds.data[i], scratch);
                     begin = termEnds.data[i];
                 }
             }
@@ -957,13 +399,18 @@ PYBIND11_MODULE(_native, m) {
             size_t begin = 0;
             for (size_t i = 0; i < terms.size; i++) {
                 const std::list<NindTermIndex::TermCG> termDef =
-                    buildTermDef(ids.data, freqs.data, begin, termEnds.data[i], cg);
+                    NindIndexBuilder::termDef(ids.data, freqs.data, begin, termEnds.data[i], cg);
                 begin = termEnds.data[i];
                 self.setTermDef(terms.data[i], termDef, fileIdentification, specifics);
             }
         }, py::arg("idents"), py::arg("ends"), py::arg("doc_ids"), py::arg("frequencies"),
            py::arg("file_identification"), py::arg("cg") = 0,
            py::arg("specifics") = std::list<unsigned int>())
+        // (writer) the documents' lengths (doc_ids 'I' or 'Q', lengths 'I'), for the blocks'
+        // <longueurMin>: the lengths a search scores with
+        .def("set_document_lengths", [](NindTermIndex &self, const py::buffer &docIds, const py::buffer &lengths) {
+            self.setDocumentLengths(docLengthPairs(docIds, lengths));
+        }, py::arg("doc_ids"), py::arg("lengths"))
         .def("get_file_name", &NindPadFile::getFileName)
         .def("analyse_pad_file", &NindPadFile::analysePadFile)
         .def("analyse_index", &NindIndex::analyseIndex);
@@ -1034,7 +481,7 @@ PYBIND11_MODULE(_native, m) {
             if (terms.size != pos.size || terms.size != lens.size)
                 throw py::value_error("term_ids, positions and lengths must have the same length");
             const std::list<NindLocalIndex::Term> localDef =
-                buildLocalDef(terms.data, pos.data, lens.data, 0, terms.size, cg);
+                NindIndexBuilder::localDef(terms.data, pos.data, lens.data, 0, terms.size, cg);
             py::gil_scoped_release release;
             self.setLocalDef(ident, localDef, fileIdentification);
         }, py::arg("ident"), py::arg("term_ids"), py::arg("positions"), py::arg("lengths"),
@@ -1063,7 +510,7 @@ PYBIND11_MODULE(_native, m) {
             size_t begin = 0;
             for (size_t i = 0; i < docs.size; i++) {
                 const std::list<NindLocalIndex::Term> localDef =
-                    buildLocalDef(terms.data, pos.data, lens.data, begin, docEnds.data[i], cg);
+                    NindIndexBuilder::localDef(terms.data, pos.data, lens.data, begin, docEnds.data[i], cg);
                 self.setLocalDef(docs.data[i], localDef, fileIdentification);
                 begin = docEnds.data[i];
             }
@@ -1101,8 +548,11 @@ PYBIND11_MODULE(_native, m) {
     m.def("merge_indexes", [](const std::vector<std::string> &shards, const std::string &target,
                               const bool withRetrolexicon, const unsigned int lexiconIndirectionBlocSize,
                               const unsigned int retroIndirectionBlocSize, const unsigned int termIndirectionBlocSize,
-                              const unsigned int localIndirectionBlocSize) {
+                              const unsigned int localIndirectionBlocSize, const py::object &docIds,
+                              const py::object &docLengths) {
         NindIndexMerge::Options options;
+        if (!docIds.is_none() || !docLengths.is_none())
+            options.documentLengths = docLengthPairs(docIds.cast<py::buffer>(), docLengths.cast<py::buffer>());
         options.withRetrolexicon = withRetrolexicon;
         options.lexiconIndirectionBlocSize = lexiconIndirectionBlocSize;
         options.retroIndirectionBlocSize = retroIndirectionBlocSize;
@@ -1112,7 +562,52 @@ PYBIND11_MODULE(_native, m) {
         return NindIndexMerge(shards, options).merge(target);
     }, py::arg("shards"), py::arg("target"), py::arg("with_retrolexicon") = false,
        py::arg("lexicon_indirection_bloc_size") = 0, py::arg("retro_indirection_bloc_size") = 0,
-       py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0);
+       py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0,
+       py::arg("doc_ids") = py::none(), py::arg("doc_lengths") = py::none());
+
+    // ---- NindIndexUpdate ------------------------------------------------
+    py::class_<NindIndexUpdate::Options>(m, "IndexUpdateOptions")
+        .def(py::init<>())
+        .def_readwrite("with_local_index", &NindIndexUpdate::Options::withLocalIndex)
+        .def_readwrite("with_retrolexicon", &NindIndexUpdate::Options::withRetrolexicon)
+        .def_readwrite("lexicon_min_buckets", &NindIndexUpdate::Options::lexiconMinBuckets)
+        .def_readwrite("lexicon_max_load", &NindIndexUpdate::Options::lexiconMaxLoad)
+        .def_readwrite("indirection_bloc_min", &NindIndexUpdate::Options::indirectionBlocMin);
+    py::class_<NindIndexUpdate::Occurrence>(m, "Occurrence")
+        .def(py::init([](const std::list<std::string> &word, unsigned char cg, unsigned int position, unsigned int length) {
+            return NindIndexUpdate::Occurrence{word, cg, position, length};
+        }), py::arg("word"), py::arg("cg") = 0, py::arg("position") = 0, py::arg("length") = 1)
+        .def_readwrite("word", &NindIndexUpdate::Occurrence::word)
+        .def_readwrite("cg", &NindIndexUpdate::Occurrence::cg)
+        .def_readwrite("position", &NindIndexUpdate::Occurrence::position)
+        .def_readwrite("length", &NindIndexUpdate::Occurrence::length);
+    py::class_<NindIndexUpdate::Stats>(m, "IndexUpdateStats")
+        .def_readonly("added_docs_nb", &NindIndexUpdate::Stats::addedDocsNb)
+        .def_readonly("removed_docs_nb", &NindIndexUpdate::Stats::removedDocsNb)
+        .def_readonly("new_words_nb", &NindIndexUpdate::Stats::newWordsNb)
+        .def_readonly("terms_nb", &NindIndexUpdate::Stats::termsNb)
+        .def_readonly("in_place_terms_nb", &NindIndexUpdate::Stats::inPlaceTermsNb)
+        .def_readonly("migrated", &NindIndexUpdate::Stats::migrated)
+        .def_readonly("rebuilt", &NindIndexUpdate::Stats::rebuilt);
+    // An incremental update (see NindIndexUpdate.h): documents added (or replaced) and removed,
+    // written by commit() (GIL released)
+    py::class_<NindIndexUpdate>(m, "NindIndexUpdate")
+        .def(py::init<const std::string &, const NindIndexUpdate::Options &>(),
+             py::arg("file_name_extensionless"), py::arg("options") = NindIndexUpdate::Options())
+        .def("set_document_lengths", [](NindIndexUpdate &self, const py::buffer &docIds, const py::buffer &lengths) {
+            self.setDocumentLengths(docLengthPairs(docIds, lengths));
+        }, py::arg("doc_ids"), py::arg("lengths"))
+        .def("add_document", [](NindIndexUpdate &self, NindDocId ident, const std::vector<std::string> &words,
+                                unsigned char cg, long length) {
+            self.addDocument(ident, words, cg, length);
+        }, py::arg("ident"), py::arg("words"), py::arg("cg") = 0, py::arg("length") = -1)
+        .def("add_document_occurrences", [](NindIndexUpdate &self, NindDocId ident,
+                                            const std::vector<NindIndexUpdate::Occurrence> &occurrences, long length) {
+            self.addDocument(ident, occurrences, length);
+        }, py::arg("ident"), py::arg("occurrences"), py::arg("length") = -1)
+        .def("remove_document", &NindIndexUpdate::removeDocument, py::arg("ident"))
+        .def("pending_nb", &NindIndexUpdate::pendingNb)
+        .def("commit", &NindIndexUpdate::commit, py::call_guard<py::gil_scoped_release>());
 
     // ---- NindIndexVerify ------------------------------------------------
     py::class_<NindIndexVerify::Report>(m, "VerifyReport")
@@ -1205,21 +700,33 @@ PYBIND11_MODULE(_native, m) {
     // add_documents() chunk by chunk in increasing document id order, then
     // write_term_index() and write_local_index() (both release the GIL and only read
     // the builder: they can run concurrently, each on its own writer).
-    py::class_<IndexBuilder>(m, "IndexBuilder")
+    py::class_<NindIndexBuilder>(m, "IndexBuilder")
         .def(py::init<>())
-        .def("add_documents", [](IndexBuilder &self, uint64_t firstDocId, const py::buffer &ends,
+        .def("add_documents", [](NindIndexBuilder &self, uint64_t firstDocId, const py::buffer &ends,
                                  const py::buffer &termIds, const py::buffer &idMap) {
-            self.addDocuments(firstDocId, uintView(ends, "ends"), uintView(termIds, "term_ids"),
-                              uintView(idMap, "id_map"));
+            const UIntView documentEnds = uintView(ends, "ends");
+            const UIntView localIds = uintView(termIds, "term_ids");
+            const UIntView map = uintView(idMap, "id_map");
+            py::gil_scoped_release release;
+            self.addDocuments(firstDocId, documentEnds.data, documentEnds.size, localIds.data, localIds.size,
+                              map.data, map.size);
         }, py::arg("first_doc_id"), py::arg("ends"), py::arg("term_ids"), py::arg("id_map"))
-        .def("write_term_index", &IndexBuilder::writeTermIndex,
-             py::arg("term_index"), py::arg("file_identification"), py::arg("cg") = 0)
-        .def("write_local_index", &IndexBuilder::writeLocalIndex,
-             py::arg("local_index"), py::arg("file_identification"), py::arg("cg") = 0)
-        .def("doc_lengths", &IndexBuilder::docLengths)
-        .def_property_readonly("docs_nb", &IndexBuilder::docsNb)
-        .def_property_readonly("tokens_nb", &IndexBuilder::tokensNb)
-        .def_property_readonly("max_term_id", &IndexBuilder::maxTermId);
+        .def("write_term_index", &NindIndexBuilder::writeTermIndex,
+             py::arg("term_index"), py::arg("file_identification"), py::arg("cg") = 0,
+             py::call_guard<py::gil_scoped_release>())
+        .def("write_local_index", &NindIndexBuilder::writeLocalIndex,
+             py::arg("local_index"), py::arg("file_identification"), py::arg("cg") = 0,
+             py::call_guard<py::gil_scoped_release>())
+        // (document ids as uint64 bytes, lengths in tokens as uint32 bytes)
+        .def("doc_lengths", [](const NindIndexBuilder &self) {
+            std::vector<NindDocId> docIds;
+            std::vector<uint32_t> lengths;
+            self.docLengths(docIds, lengths);
+            return py::make_tuple(uint64Bytes(std::vector<uint64_t>(docIds.begin(), docIds.end())), uintBytes(lengths));
+        })
+        .def_property_readonly("docs_nb", &NindIndexBuilder::docsNb)
+        .def_property_readonly("tokens_nb", &NindIndexBuilder::tokensNb)
+        .def_property_readonly("max_term_id", &NindIndexBuilder::maxTermId);
 
     // ---- NindDocNames -----------------------------------------------------
     // The names of an index's documents (their identifiers in the corpus), both ways.
@@ -1267,14 +774,21 @@ PYBIND11_MODULE(_native, m) {
     // search() reads the term index on its thread-safe path (NindFile::readAt): several threads
     // can search one reader at once, each with its own scratch arrays (one pool per scorer)
     // with the GIL released.
-    py::class_<Bm25Scorer>(m, "Bm25Scorer")
+    py::class_<NindBm25Scorer>(m, "Bm25Scorer")
         .def(py::init([](const py::buffer &docIds, const py::buffer &lengths, double avgDocLength) {
-            return new Bm25Scorer(docIdsView(docIds, "doc_ids"), uintView(lengths, "lengths"), avgDocLength);
+            const DocIdsView ids = docIdsView(docIds, "doc_ids");
+            const UIntView lens = uintView(lengths, "lengths");
+            return new NindBm25Scorer(std::vector<NindDocId>(ids.data, ids.data + ids.size),
+                                      std::vector<uint32_t>(lens.data, lens.data + lens.size), avgDocLength);
         }), py::arg("doc_ids"), py::arg("lengths"), py::arg("avg_doc_len"))
-        .def("search", &Bm25Scorer::search, py::arg("term_index"), py::arg("term_ids"),
+        .def("search", [](const NindBm25Scorer &self, const NindTermIndex &termIndex,
+                          const std::vector<unsigned int> &termIds, double k1, double b, long topK, bool prune) {
+            py::gil_scoped_release release;
+            return self.search(termIndex, termIds, k1, b, topK, prune);
+        }, py::arg("term_index"), py::arg("term_ids"),
              py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1,
              py::arg("prune") = false)
-        .def_property_readonly("docs_nb", &Bm25Scorer::docsNb);
+        .def_property_readonly("docs_nb", &NindBm25Scorer::docsNb);
 
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")
         .def(py::init<>())

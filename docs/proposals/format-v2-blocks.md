@@ -363,11 +363,29 @@ are unchanged.
 <longueurMin>           ::= <EntierULat>        // shortest document length in the block, 0 = unknown
 <offsetBloc>            ::= <Entier4>          // from the definition's first byte (its flag)
 <longueurBloc>          ::= <Entier4>
-<bloc>                  ::= <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
-                            { <identDocRelatif> <frejquenceDoc> }      // the first one relative to premierDoc
-<identDocRelatif>       ::= <EntierULat64>
+<bloc>                  ::= <blocCompact> | <blocULat>
+<blocCompact>           ::= <flagBloc=73> <identifiantTerme> <catejgorie> <nbreDocsBloc>
+                            <frejquenceMin> <bitsEcarts> <bitsFrejquences>
+                            <ecartsPackejs> <frejquencesPackejes>      // written since 3.1
+<frejquenceMin>         ::= <EntierULat>        // smallest frequency in the block
+<bitsEcarts>            ::= <Entier1>           // 0..64
+<bitsFrejquences>       ::= <Entier1>           // 0..32
+<ecartsPackejs>         ::= ceil((nbreDocsBloc - 1) * bitsEcarts / 8) bytes: for each document
+                            after the first, (its id - the previous one's - 1) in bitsEcarts bits
+<frejquencesPackejes>   ::= ceil(nbreDocsBloc * bitsFrejquences / 8) bytes: for each document,
+                            (its frequency - frejquenceMin) in bitsFrejquences bits
+<blocULat>              ::= <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
+                            { <identDocRelatif> <frejquenceDoc> }      // nind 3.0.0; still read
+<identDocRelatif>       ::= <EntierULat64>      // the first one relative to premierDoc (0)
 <frejquenceDoc>         ::= <EntierULat>
 ```
+
+- **Bit-packing** (flag 73, nind 3.1): values are packed least significant
+  bit first, bit after bit across bytes; a block's widths are those of its
+  largest gap and frequency difference (0 bits: all equal, e.g. consecutive
+  documents or every frequency 1). A compact block holds at most 128
+  documents. nind 3.0.0 can't read flag 73 blocks: indexes written since
+  then need nind ≥ 3.1.
 
 - **Blocks are written inside their term's definition, after its directory**
   (implementation decision, 2026-11-04), at offsets relative to the
@@ -375,9 +393,10 @@ are unchanged.
   blocks, so the free-space management, the hole statistics and the merge
   work unchanged, and a definition moved by a rewrite keeps valid offsets.
   A search still reads a term's directory, then only the blocks it needs.
-  An update rewrites the whole definition, as in v1: rewriting only the last
-  block, in place, needs slack in the definition (the original design's
-  "extensions"), a writer change that needs no format change. A block
+  A definition may hold room after its directory and after its blocks (the
+  original design's "extensions"): an update rewrites a term whole with room,
+  and an update that only appends documents rewrites only the last block, the
+  new blocks and the directory, in place (`NindTermIndex::updateTermDef`). A block
   repeats its term and category, and its count, first and last documents and
   max frequency are checked against its descriptor.
 - `<offsetBloc>` and `<longueurBloc>` are fixed-width so that the writer can
@@ -475,11 +494,36 @@ uses MaxScore only when `top_k * PRUNING_DOCS_PER_RESULT <= documents`
 the corpus (2.7 ms → 14.4 ms for 4 times the documents): its score array
 (8 bytes per document) no longer fits in the cache.
 
+**With `<longueurMin>` filled.** Writers that know the documents' lengths now
+fill it: `IndexBuilder`, `IndexUpdate` and `merge_indexes(doc_ids=,
+doc_lengths=)`, through `NindTermIndex::setDocumentLengths`. Blocks are then
+bounded by their own shortest document. Native scorer, µs per query, 500
+queries, exhaustive → MaxScore (ratio). The results are identical:
+
+| corpus | k = 10 | k = 100 | k = 1000 |
+|---|---|---|---|
+| FiQA (57.6k) | 675 → 593 (0.88) | 680 → 893 (1.31) | 940 → 1455 (1.55) |
+| MS MARCO 4M | 10245 → 3233 (0.32) | 10204 → 5314 (0.52) | 10730 → 8183 (0.76) |
+| MS MARCO 8.8M | 25199 → 5810 (0.23) | 25317 → 10136 (0.40) | 25958 → 15360 (0.59) |
+| MS MARCO 8.8M, stopwords kept | 202775 → 8708 (0.04) | 197099 → 14424 (0.07) | 197772 → 27601 (0.14) |
+
+At 4M, `<longueurMin>` speeds MaxScore up by 7% at k = 10 (3473 → 3233 µs)
+and by 12% at k = 1000 (9293 → 8183 µs). MaxScore wins at every k on the
+target sizes. It loses only where a corpus has few documents per result
+(FiQA, 1,920 documents per result or fewer). The threshold of 4,000
+documents per result is consistent with every measurement and is kept.
+
+**Bit-packed blocks** (flag 73, nind 3.1). The same corpora, rebuilt; native
+scorer, ms per query, 500 queries, ULat blocks → packed blocks. The results
+are identical:
+
+| MS MARCO, stopwords removed | index size | exhaustive | MaxScore top 10 | MaxScore top 100 | MaxScore top 1000 |
+|---|---|---|---|---|---|
+| 4M | 480 → 396 MB (−18%) | 10.4 → 8.4 | 3.27 → 2.44 (−25%) | 5.33 → 4.07 | 8.11 → 6.61 |
+| 8.8M | 1039 → 849 MB (−18%) | 26.0 → 21.7 | 6.24 → 4.89 (−22%) | 10.6 → 8.07 | 16.4 → 12.1 (−26%) |
+
 Still open:
 
-- **Tighter bounds.** The writers don't fill `<longueurMin>` yet (0: the
-  bound uses the corpus's shortest document); `IndexBuilder` knows the
-  lengths.
 - **Faster large k.** Use the exhaustive search below a document count, or
   keep a score array instead of the candidates once θ stops rising.
 - **Several categories** (Amose) aren't pruned.
