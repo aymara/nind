@@ -26,7 +26,7 @@ using namespace std;
 // <dejfinition>           ::= <flagDejfinition=17> <identifiantTerme>
 //                             <longueurDonnejes> <donnejesTerme>
 // <flagDejfinition=17>    ::= <Entier1>
-// <identifiantTerme>      ::= <Entier3>
+// <identifiantTerme>      ::= <Entier4>
 // <longueurDonnejes>      ::= <Entier3>
 // <donnejesTerme>         ::= { <donnejesCG> }
 // <donnejesCG>            ::= <flagCg=61> <catejgorie> <frejquenceTerme>

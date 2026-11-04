@@ -45,7 +45,7 @@ using namespace std;
 //
 // <blocIdentification>    ::= <flagIdentification=53> <maxIdentifiant> <identifieurUnique>
 // <flagIdentification=53> ::= <Entier1>
-// <maxIdentifiant>        ::= <Entier3>
+// <maxIdentifiant>        ::= <Entier4>
 // <identifieurUnique>     ::= <dateHeure>
 // <dateHeure >            ::= <Entier4>
 ////////////////////////////////////////////////////////////

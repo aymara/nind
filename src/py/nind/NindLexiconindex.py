@@ -127,11 +127,11 @@ def main():
 # <donnejesHash>          ::= { <mot> }
 # <mot>                   ::= <motSimple> <identifiantS> <nbreComposejs> <composejs>
 # <motSimple>             ::= <MotUtf8>
-# <identifiantS>          ::= <Entier3>
+# <identifiantS>          ::= <Entier4>
 # <nbreComposejs>         ::= <EntierULat>
 # <composejs>             ::= { <composej> } 
 # <composej>              ::= <identifiantA> <identifiantRelC>
-# <identifiantA>          ::= <Entier3>
+# <identifiantA>          ::= <Entier4>
 # <identifiantRelC>       ::= <EntierSLat>
 ##############################
 # <spejcifique>           ::= <vide>
