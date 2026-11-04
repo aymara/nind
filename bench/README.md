@@ -219,6 +219,14 @@ bench-env/bin/python bench/retrieval/prepare.py msmarco-passage/dev/small data/m
 bench-env/bin/python bench/retrieval/driver.py --work work --data data/scifact data/fiqa \
     [--systems nind,lucene,...] [--threads 8] [--k1 1.2 --b 0.75] [--max-queries N]
 bench-env/bin/python bench/retrieval/driver.py --work work --report-only
+
+# scaling: prefixes of one prepared corpus, the matrix on each, then the fits
+bench-env/bin/python bench/retrieval/prepare.py msmarco-passage/dev/small data/msmarco-stop --stopwords
+bench-env/bin/python bench/retrieval/subset.py data/msmarco-stop data/msmarco-stop-1M 1000000   # also 2M, 4M
+bench-env/bin/python bench/retrieval/driver.py --work work --max-queries 500 \
+    --data data/msmarco-stop-1M data/msmarco-stop-2M data/msmarco-stop-4M data/msmarco-stop
+bench-env/bin/python bench/retrieval/extrapolate.py work \
+    msmarco-stop-1M msmarco-stop-2M msmarco-stop-4M msmarco-stop [--to 1e8 1e9 1e10]
 ```
 
 `prepare.py` writes the corpus as JSON Lines whose `contents` are the tokens
@@ -254,67 +262,175 @@ wins), `WORK/report.md` and `WORK/report.csv`.
 ### What to expect from the scores
 
 nind and bm25s compute BM25 exactly: their quality numbers and rankings are
-identical. Lucene and tantivy store document lengths in one byte (lossy) and
+identical (up to bm25s's float32 near-ties on large corpora). Lucene and tantivy store document lengths in one byte (lossy) and
 leave out BM25's constant (k1 + 1) factor: their rankings agree with each
 other and overlap nind's top 10 at 0.96–0.99, quality within ±0.004.
 
-### Results (2026-11-03)
+### Results (2026-11-04)
 
 One laptop: Intel i7-1370P (20 threads), 62 GB, NVMe; 8 threads to build,
-1 to query; k1=1.2, b=0.75; nind 2.6.0, Anserini 2.3.0 (Lucene 10.4), bm25s
-0.3.16, tantivy-py 0.27.0, JDK 25.
+1 to query; k1=1.2, b=0.75; nind 2.6.0 with the flat-array `Bm25Scorer`
+(commit `453caeb`), Anserini 2.3.0 (Lucene 10.4), bm25s 0.3.16, tantivy-py
+0.27.0, JDK 25. `-stop`: Lucene's 33 English stopwords removed
+(`prepare.py --stopwords`), for every system. MS MARCO: 500 dev queries
+(`--max-queries 500`); prefixes (`-1M`...) have no qrels; `nind+local`
+searches with the same scorer as `nind`, so only its build and update are run
+there. Sizes in MB, latencies in ms; every column in `WORK/report.md`.
 
-BEIR SciFact, NFCorpus, FiQA (sizes in MB, latencies in ms; full columns in
-`WORK/report.md`):
+BEIR SciFact, NFCorpus, FiQA, with and without stopwords:
 
-| dataset | system | build s | build peak MB | index MB | k10 p50 ms | k10 p99 ms | k1000 p50 ms | nDCG@10 | top10 = nind | update s | incremental |
+| dataset | system | build s | build peak MB | index MB | k10 p50 ms | k10 p99 ms | k1000 p50 ms | nDCG@10 | top10 = nind | update s | update |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| fiqa | nind | 1.22 | 215 | 15.1 | 12.013 | 25.623 | 13.035 | 0.2365 |  | 3.070 | yes |
-| fiqa | nind+local | 2.04 | 217 | 51.5 | 11.915 | 25.340 | 12.974 | 0.2365 | 1.000 | 3.176 | yes |
-| fiqa | lucene | 2.53 | 446 | 9.3 | 0.891 | 2.501 | 11.404 | 0.2375 | 0.959 | 1.332 | yes |
-| fiqa | lucene+pos | 3.84 | 1053 | 46.9 | 0.935 | 2.567 | 11.065 | 0.2375 | 0.959 | 1.528 | yes |
-| fiqa | bm25s | 3.39 | 312 | 39.6 | 0.325 | 1.928 | 0.594 | 0.2365 | 1.000 | 3.081 | no (rebuild) |
-| fiqa | tantivy | 1.21 | 131 | 9.0 | 0.669 | 1.511 | 1.833 | 0.2375 | 0.959 | 0.765 | yes |
-| nfcorpus | nind | 0.37 | 81 | 2.3 | 0.086 | 0.872 | 0.162 | 0.3067 |  | 0.300 | yes |
-| nfcorpus | nind+local | 0.49 | 81 | 6.0 | 0.075 | 0.983 | 0.167 | 0.3067 | 1.000 | 0.319 | yes |
-| nfcorpus | lucene | 2.12 | 216 | 1.4 | 0.295 | 1.210 | 3.231 | 0.3080 | 0.988 | 1.102 | yes |
-| nfcorpus | lucene+pos | 2.56 | 538 | 5.8 | 0.304 | 1.266 | 3.182 | 0.3080 | 0.988 | 1.183 | yes |
-| nfcorpus | bm25s | 0.48 | 85 | 4.4 | 0.062 | 0.141 | 0.262 | 0.3067 | 1.000 | 0.310 | no (rebuild) |
-| nfcorpus | tantivy | 0.60 | 80 | 1.1 | 0.023 | 0.082 | 0.361 | 0.3078 | 0.988 | 0.572 | yes |
-| scifact | nind | 0.49 | 89 | 3.1 | 1.142 | 3.964 | 1.460 | 0.6615 |  | 0.326 | yes |
-| scifact | nind+local | 0.53 | 90 | 8.1 | 1.086 | 2.389 | 1.534 | 0.6615 | 1.000 | 0.350 | yes |
-| scifact | lucene | 2.12 | 223 | 1.9 | 0.790 | 2.580 | 8.609 | 0.6611 | 0.981 | 1.075 | yes |
-| scifact | lucene+pos | 2.21 | 526 | 7.9 | 0.802 | 2.772 | 8.944 | 0.6611 | 0.981 | 1.362 | yes |
-| scifact | bm25s | 0.58 | 94 | 5.8 | 0.073 | 0.163 | 0.304 | 0.6615 | 1.000 | 0.368 | no (rebuild) |
-| scifact | tantivy | 1.22 | 85 | 1.5 | 0.106 | 0.192 | 1.045 | 0.6611 | 0.981 | 0.975 | yes |
+| fiqa | nind | 1.31 | 209 | 15.1 | 1.642 | 3.296 | 2.220 | 0.2365 |  | 3.125 | in place |
+| fiqa | nind+local | 2.07 | 211 | 51.5 | 1.636 | 3.392 | 2.153 | 0.2365 | 1.000 | 3.193 | in place |
+| fiqa | lucene | 2.94 | 561 | 9.3 | 1.033 | 2.916 | 11.312 | 0.2375 | 0.959 | 1.063 | in place |
+| fiqa | lucene+pos | 3.93 | 1254 | 47.0 | 0.971 | 2.543 | 11.484 | 0.2375 | 0.959 | 1.070 | in place |
+| fiqa | bm25s | 3.16 | 288 | 39.6 | 0.330 | 1.955 | 0.670 | 0.2365 | 1.000 | 2.923 | full rebuild |
+| fiqa | tantivy | 0.52 | 103 | 10.5 | 0.736 | 1.263 | 2.140 | 0.2375 | 0.959 | 0.606 | in place |
+| fiqa-stop | nind | 1.05 | 181 | 13.3 | 0.443 | 1.383 | 0.947 | 0.2379 |  | 2.550 | in place |
+| fiqa-stop | nind+local | 1.66 | 185 | 40.6 | 0.440 | 1.305 | 1.016 | 0.2379 | 1.000 | 2.777 | in place |
+| fiqa-stop | lucene | 2.80 | 503 | 8.5 | 0.803 | 1.925 | 10.542 | 0.2406 | 0.964 | 0.995 | in place |
+| fiqa-stop | lucene+pos | 3.69 | 1130 | 38.4 | 0.854 | 2.193 | 10.631 | 0.2406 | 0.964 | 1.156 | in place |
+| fiqa-stop | bm25s | 2.50 | 222 | 32.7 | 0.248 | 2.709 | 0.535 | 0.2379 | 1.000 | 2.256 | full rebuild |
+| fiqa-stop | tantivy | 0.64 | 90 | 9.2 | 0.308 | 0.677 | 1.514 | 0.2406 | 0.965 | 1.224 | in place |
+| nfcorpus | nind | 0.37 | 74 | 2.3 | 0.021 | 0.150 | 0.104 | 0.3067 |  | 0.290 | in place |
+| nfcorpus | nind+local | 0.48 | 74 | 6.0 | 0.022 | 0.248 | 0.105 | 0.3067 | 1.000 | 0.316 | in place |
+| nfcorpus | lucene | 2.08 | 308 | 1.4 | 0.526 | 2.869 | 3.470 | 0.3080 | 0.988 | 0.789 | in place |
+| nfcorpus | lucene+pos | 2.54 | 622 | 5.8 | 0.487 | 2.572 | 3.494 | 0.3080 | 0.988 | 0.903 | in place |
+| nfcorpus | bm25s | 0.32 | 74 | 4.4 | 0.068 | 0.138 | 0.268 | 0.3067 | 1.000 | 0.335 | full rebuild |
+| nfcorpus | tantivy | 0.91 | 71 | 1.1 | 0.023 | 0.088 | 0.381 | 0.3078 | 0.988 | 0.788 | in place |
+| nfcorpus-stop | nind | 0.41 | 71 | 2.2 | 0.018 | 0.071 | 0.068 | 0.3079 |  | 0.265 | in place |
+| nfcorpus-stop | nind+local | 0.49 | 71 | 5.1 | 0.018 | 0.071 | 0.053 | 0.3079 | 1.000 | 0.295 | in place |
+| nfcorpus-stop | lucene | 2.32 | 304 | 1.4 | 0.561 | 2.593 | 1.645 | 0.3080 | 0.989 | 0.842 | in place |
+| nfcorpus-stop | lucene+pos | 2.57 | 599 | 5.0 | 0.474 | 1.906 | 1.609 | 0.3080 | 0.989 | 0.873 | in place |
+| nfcorpus-stop | bm25s | 0.25 | 67 | 3.9 | 0.092 | 0.170 | 0.262 | 0.3079 | 1.000 | 0.247 | full rebuild |
+| nfcorpus-stop | tantivy | 0.94 | 65 | 1.0 | 0.018 | 0.045 | 0.144 | 0.3075 | 0.990 | 0.853 | in place |
+| scifact | nind | 0.43 | 79 | 3.1 | 0.191 | 0.440 | 0.537 | 0.6615 |  | 0.338 | in place |
+| scifact | nind+local | 0.52 | 83 | 8.1 | 0.180 | 0.419 | 0.544 | 0.6615 | 1.000 | 0.361 | in place |
+| scifact | lucene | 2.10 | 317 | 1.9 | 0.830 | 2.617 | 8.857 | 0.6611 | 0.981 | 0.778 | in place |
+| scifact | lucene+pos | 2.63 | 632 | 7.9 | 0.813 | 3.117 | 8.671 | 0.6611 | 0.981 | 0.884 | in place |
+| scifact | bm25s | 0.43 | 82 | 5.8 | 0.073 | 0.179 | 0.313 | 0.6615 | 1.000 | 0.427 | full rebuild |
+| scifact | tantivy | 0.84 | 74 | 1.5 | 0.098 | 0.195 | 1.051 | 0.6611 | 0.981 | 0.803 | in place |
+| scifact-stop | nind | 0.44 | 78 | 2.9 | 0.067 | 0.181 | 0.369 | 0.6645 |  | 0.304 | in place |
+| scifact-stop | nind+local | 0.49 | 86 | 6.8 | 0.068 | 0.197 | 0.374 | 0.6645 | 1.000 | 0.329 | in place |
+| scifact-stop | lucene | 2.21 | 327 | 1.8 | 0.646 | 1.935 | 8.860 | 0.6639 | 0.982 | 0.756 | in place |
+| scifact-stop | lucene+pos | 2.65 | 646 | 6.8 | 0.683 | 1.716 | 8.679 | 0.6639 | 0.982 | 0.863 | in place |
+| scifact-stop | bm25s | 0.35 | 77 | 5.2 | 0.081 | 0.299 | 0.316 | 0.6645 | 1.000 | 0.337 | full rebuild |
+| scifact-stop | tantivy | 0.96 | 73 | 1.4 | 0.053 | 0.118 | 1.011 | 0.6639 | 0.982 | 0.870 | in place |
+
+MS MARCO passage (8.8M passages) with and without stopwords, and prefixes of
+the stopword-free corpus:
+
+| dataset | system | build s | build peak MB | index MB | k10 p50 ms | k10 p99 ms | k1000 p50 ms | nDCG@10 | top10 = nind | update s | update |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| msmarco | nind | 84.35 | 8765 | 1053.6 | 132.917 | 388.855 | 140.297 | 0.2263 |  | 437.697 | in place |
+| msmarco | nind+local | 291.54 | 8971 | 3812.4 |  |  |  |  |  | 340.490 | in place |
+| msmarco | lucene | 52.83 | 3438 | 709.1 | 2.398 | 16.883 | 20.312 | 0.2276 | 0.974 | 3.466 | in place |
+| msmarco | lucene+pos | 106.31 | 5459 | 3058.3 | 2.407 | 19.941 | 22.112 | 0.2276 | 0.974 | 4.327 | in place |
+| msmarco | bm25s | 413.24 | 18153 | 2852.8 | 49.721 | 429.079 | 47.450 | 0.2263 | 0.998 | 340.787 | full rebuild |
+| msmarco | tantivy | 55.09 | 1481 | 739.3 | 41.108 | 108.156 | 46.218 | 0.2270 | 0.973 | 0.850 | in place |
+| msmarco-stop | nind | 58.24 | 6535 | 899.6 | 14.531 | 108.985 | 15.855 | 0.2280 |  | 237.125 | in place |
+| msmarco-stop | nind+local | 146.68 | 6763 | 2992.3 |  |  |  |  |  | 240.543 | in place |
+| msmarco-stop | lucene | 36.82 | 3439 | 646.9 | 1.621 | 13.052 | 15.953 | 0.2270 | 0.987 | 2.156 | in place |
+| msmarco-stop | lucene+pos | 75.01 | 5638 | 2525.4 | 1.541 | 11.462 | 15.397 | 0.2270 | 0.987 | 3.377 | in place |
+| msmarco-stop | bm25s | 246.53 | 14003 | 2236.8 | 393.569 | 507.768 | 349.030 | 0.2280 | 0.997 | 251.560 | full rebuild |
+| msmarco-stop | tantivy | 49.67 | 1447 | 658.0 | 5.709 | 29.599 | 9.391 | 0.2273 | 0.986 | 0.656 | in place |
+| msmarco-stop-1M | nind | 6.33 | 942 | 109.7 | 1.195 | 7.299 | 1.979 |  |  | 19.916 | in place |
+| msmarco-stop-1M | nind+local | 12.66 | 973 | 334.0 |  |  |  |  |  | 21.331 | in place |
+| msmarco-stop-1M | lucene | 6.39 | 1077 | 76.5 | 0.804 | 3.528 | 11.744 |  | 0.984 | 3.121 | in place |
+| msmarco-stop-1M | lucene+pos | 11.97 | 4127 | 286.9 | 0.802 | 3.425 | 11.292 |  | 0.984 | 1.338 | in place |
+| msmarco-stop-1M | bm25s | 23.67 | 1643 | 254.7 | 27.273 | 39.485 | 27.085 |  | 0.989 | 23.228 | full rebuild |
+| msmarco-stop-1M | tantivy | 6.89 | 381 | 75.5 | 0.761 | 3.848 | 4.121 |  | 0.974 | 0.917 | in place |
+| msmarco-stop-2M | nind | 12.05 | 1682 | 212.3 | 2.893 | 17.355 | 3.710 |  |  | 43.069 | in place |
+| msmarco-stop-2M | nind+local | 29.06 | 1714 | 669.3 |  |  |  |  |  | 48.713 | in place |
+| msmarco-stop-2M | lucene | 10.55 | 1290 | 149.7 | 0.978 | 5.091 | 13.133 |  | 0.983 | 1.559 | in place |
+| msmarco-stop-2M | lucene+pos | 21.17 | 4414 | 572.3 | 0.938 | 5.010 | 12.269 |  | 0.983 | 1.794 | in place |
+| msmarco-stop-2M | bm25s | 53.50 | 3196 | 506.3 | 60.253 | 86.745 | 59.834 |  | 0.994 | 49.128 | full rebuild |
+| msmarco-stop-2M | tantivy | 13.61 | 646 | 148.2 | 1.501 | 7.376 | 5.492 |  | 0.985 | 0.822 | in place |
+| msmarco-stop-4M | nind | 28.00 | 3120 | 415.8 | 7.232 | 44.214 | 7.529 |  |  | 98.486 | in place |
+| msmarco-stop-4M | nind+local | 60.58 | 3213 | 1346.1 |  |  |  |  |  | 100.259 | in place |
+| msmarco-stop-4M | lucene | 19.55 | 2174 | 299.8 | 1.190 | 6.587 | 13.912 |  | 0.983 | 2.155 | in place |
+| msmarco-stop-4M | lucene+pos | 38.39 | 4598 | 1151.6 | 1.181 | 6.665 | 14.372 |  | 0.983 | 2.959 | in place |
+| msmarco-stop-4M | bm25s | 112.34 | 6367 | 1012.7 | 147.101 | 202.162 | 147.447 |  | 0.998 | 104.742 | full rebuild |
+| msmarco-stop-4M | tantivy | 26.51 | 1166 | 295.9 | 2.680 | 13.543 | 6.101 |  | 0.984 | 0.569 | in place |
+
+Growth with the corpus size, fitted as y = a N^p on the four stopword-free
+MS MARCO sizes (`extrapolate.py`; bm25s and the `+local`/`+pos` variants in
+its full output). The extrapolations are orders of magnitude, assuming the
+corpus keeps MS MARCO's statistics, and **ignore format limits** (see below):
+
+| system | metric | 1.0M | 2.0M | 4.0M | 8.8M | exponent p | 100M | 1G | 10G |
+|---|---|---|---|---|---|---|---|---|---|
+| nind | build s | 6.33 | 12.1 | 28 | 58.2 | 1.04 | 736 | 8e+03 | 8.69e+04 |
+| nind | build peak GB | 0.92 | 1.64 | 3.05 | 6.38 | 0.89 | 54.3 | 421 | 3.27e+03 |
+| nind | index GB | 0.107 | 0.207 | 0.406 | 0.878 | 0.97 | 9.12 | 84.3 | 779 |
+| nind | k10 p50 ms | 1.2 | 2.89 | 7.23 | 14.5 | 1.16 | 265 | 3.82e+03 | 5.51e+04 |
+| nind | search peak GB | 0.215 | 0.342 | 0.588 | 1.16 | 0.78 | 7.42 | 44.5 | 266 |
+| nind | update s (1%) | 19.9 | 43.1 | 98.5 | 237 | 1.14 | 3.81e+03 | 5.28e+04 | 7.31e+05 |
+| lucene | build s | 6.39 | 10.5 | 19.5 | 36.8 | 0.81 | 263 | 1.7e+03 | 1.1e+04 |
+| lucene | build peak GB | 1.05 | 1.26 | 2.12 | 3.36 | 0.55 | 12.5 | 44.9 | 161 |
+| lucene | index GB | 0.0747 | 0.146 | 0.293 | 0.632 | 0.98 | 6.85 | 65.6 | 629 |
+| lucene | k10 p50 ms | 0.804 | 0.978 | 1.19 | 1.62 | 0.32 | 3.44 | 7.16 | 14.9 |
+| lucene | search peak GB | 1.1 | 0.983 | 1.1 | 1.33 | 0.10 | 1.58 | 1.97 | 2.46 |
+| lucene | update s (1%) | 3.12 | 1.56 | 2.15 | 2.16 | -0.10 | 1.51 | 1.18 | 0.931 |
+| tantivy | build s | 6.89 | 13.6 | 26.5 | 49.7 | 0.91 | 471 | 3.83e+03 | 3.11e+04 |
+| tantivy | build peak GB | 0.372 | 0.631 | 1.14 | 1.41 | 0.63 | 7.32 | 31.3 | 134 |
+| tantivy | index GB | 0.0738 | 0.145 | 0.289 | 0.643 | 0.99 | 7.12 | 70.2 | 692 |
+| tantivy | k10 p50 ms | 0.761 | 1.5 | 2.68 | 5.71 | 0.92 | 52.5 | 433 | 3.57e+03 |
+| tantivy | search peak GB | 0.147 | 0.182 | 0.237 | 0.411 | 0.47 | 1.18 | 3.44 | 10.1 |
+| tantivy | update s (1%) | 0.917 | 0.822 | 0.569 | 0.656 | -0.19 | 0.377 | 0.246 | 0.16 |
 
 ### Findings
 
-- **Parity holds** on every dataset: N and avgdl are the same for every
-  system, nind's rankings equal bm25s's, its top 10 overlaps Lucene's and
-  tantivy's at 0.96–0.99, and every updated index answers as one built at once.
-- **Building**: nind is among the fastest builders and has the smallest
-  memory footprint after tantivy; its index is about 1.6x Lucene's without
-  the local index, about the size of Lucene with positions and document
-  vectors with it.
-- **Updates**: nind, Lucene and tantivy update in place, bm25s rebuilds.
-  nind's update cost is dominated by reopening its writers, which scan their
-  whole files (see the I/O follow-up in CLAUDE.md), so it grows with the
-  index, not the update: batch documents per update.
-- **Querying is nind's weak point, and it isn't for lack of pruning**:
-  `Bm25Scorer` costs a constant **~85–100 ns per posting** (82 on SciFact,
-  88 on FiQA, 100 on NFCorpus), when bm25s, also exhaustive, costs ~2 ns.
-  Each posting goes through a `std::list` node (decoding by
-  `NindTermIndex::getTermDef`), a `seen` hash set, a hash-map lookup of the
-  document and a hash-map score update. Queries with frequent terms (FiQA:
-  ~146k postings per query, no stopword removal) are then ~12 ms, against
-  ~0.9 ms for Lucene and ~0.7 ms for tantivy, which also skip postings that
-  can't reach the top k (block-max WAND/MaxScore). Flat arrays indexed by
-  document (scores, lengths) and decoding postings into a vector would
-  remove most of it; dynamic pruning would be the next step.
+- **Parity holds everywhere.** N and avgdl are equal for every system; nind
+  ranks exactly like bm25s on BEIR (top-10 overlap 1.000; 0.997–0.998 on MS
+  MARCO, where bm25s's float32 scores order near-ties differently); its top
+  10 overlaps Lucene's and tantivy's at 0.96–0.99 (their one-byte document
+  lengths). nind's and Lucene's updated indexes answer exactly as indexes
+  built at once (1.000 everywhere); tantivy's at 0.987–0.998 on MS MARCO.
+- **Size: linear for every system** (p ≈ 1). nind's index is ~1.4x Lucene's
+  without the local index (MS MARCO without stopwords: 0.90 vs 0.65 GB),
+  ~1.2x Lucene with positions and document vectors with it (2.99 vs 2.53 GB).
+- **Build time: nind is linear (p 1.04)**, comparable to the others at MS
+  MARCO's size (58 s vs 37 s for Lucene and 50 s for tantivy, stopwords
+  removed). **Its build memory grows with the corpus** (p 0.89, ~19 bytes per
+  token: 6.4 GB for 8.8M passages), where Lucene's and tantivy's stay bounded
+  (they flush segments: p 0.55 and 0.63).
+- **Search: nind reads every posting, Lucene doesn't.** The flat-array
+  scorer made nind 10–15x faster (~9–12 ns per posting, results unchanged),
+  and on small corpora nind is among the fastest (NFCorpus: 0.018 ms, Lucene
+  through pyjnius ~0.5 ms). But its latency grows as **N^1.16** (1.2 ms at
+  1M passages, 14.5 ms at 8.8M) while Lucene's grows as **N^0.32** (0.8 to
+  1.6 ms): Lucene skips the blocks of postings that can't reach the top k
+  (block-max WAND). With stopwords kept, MS MARCO costs nind 133 ms per query
+  vs 2.4 ms for Lucene. tantivy grows as N^0.92 here. bm25s, exhaustive over
+  a precomputed matrix, is slowest at scale (and unexpectedly slower on MS
+  MARCO without stopwords, 394 ms, than with them, 50 ms: not investigated).
+- **Updates: nind rewrites every postings list a new document enters.**
+  Adding 1% of the documents costs **4–5x a full rebuild** (237 s vs 58 s at
+  8.8M passages, without stopwords; 438 s vs 84 s with them) and grows as
+  N^1.14; Lucene and tantivy write a new segment: 2 s and 0.7 s, about
+  constant (their later segment merges aren't measured).
+- **Stopwords** (33 words) are 30% of MS MARCO's tokens. Removing them cuts
+  nind's index by 15%, its build by 31%, its query time 9x and its update
+  time by 46%, and pushes the 16 MiB term limit (below) from ~10M to at most
+  ~38M passages.
+- **Format limits come before the extrapolated costs.** A term definition is
+  at most 16 MiB (~8M postings): MS MARCO-like corpora reach it at ~10M
+  passages with stopwords (`the`, 15.4 MB at 8.8M) and at ≤38M without them
+  (`you`, in 22% of the passages); a local index holds at most 16.7M
+  documents. These used to be written truncated, silently corrupting the
+  index; they now throw (commit `2c0bc0a`). So nind can't index 100M
+  documents today, whatever the machine; at 1G, its build would also need
+  ~420 GB of memory and a query ~4 s; 10G exceeds its 32-bit document ids
+  (4.29G) and the 1 TiB per file of a local index (~3.4 TB). Lucene caps an
+  index at ~2.1G documents (several indexes beyond). The block-structured
+  format proposed in `docs/proposals/format-v2-blocks.md` addresses the
+  limits, the update cost and the search growth together, and
+  `docs/proposals/thread-safe-readers.md` the concurrent search the many-core
+  target needs.
 - Lucene's k=1000 latency is mostly Anserini's `SimpleSearcher` loading each
-  hit's stored `docid` and building one Java object per hit for pyjnius (the
-  `search` call alone, without reading the hits from Python, is as slow): k=10
+  hit's stored `docid` and building one Java object per hit for pyjnius: k=10
   is the comparable figure.
 
 ## Notes
