@@ -1127,6 +1127,7 @@ def test_engine_search_prunes_when_k_is_small_for_the_corpus(tmp_path, monkeypat
     for query, everything in zip(queries, exhaustive):
         for k in (1, 10, 100):
             assert engine.search(query, top_k=k) == everything[:k], (query, k)
+            assert engine.search(query, top_k=k, threads=4) == everything[:k], (query, k)
 
 
 # the texts of the format v1 indexes in tst/py/data/v1 (written by NindIndexer before format v2,

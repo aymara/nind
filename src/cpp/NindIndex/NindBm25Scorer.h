@@ -62,13 +62,16 @@ public:
     *\param termIds the query's terms, in query order, repeats included (0: an unknown term)
     *\param topK at most this many documents (all if < 0)
     *\param prune block-max MaxScore (same results; see above)
+    *\param threads (prune) the documents cut into this many ranges of ids, searched by as many
+    * threads at once (this one included), sharing the k-th best score so far: the same results
     *\return (document id, score) pairs */
     std::vector<std::pair<NindDocId, double> > search(const NindTermIndex &termIndex,
                                                       const std::vector<unsigned int> &termIds,
                                                       const double k1,
                                                       const double b,
                                                       const long topK,
-                                                      const bool prune) const;
+                                                      const bool prune,
+                                                      const unsigned int threads = 1) const;
 
     /**\brief Number of documents of the corpus */
     size_t docsNb() const;

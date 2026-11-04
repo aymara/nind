@@ -322,14 +322,14 @@ class _Snapshot:
                                         self.avg_doc_len)
         self.doc_names = _read_doc_names(base)
 
-    def search(self, terms, k1, b, top_k):
+    def search(self, terms, k1, b, top_k, threads=1):
         # the scores of the documents containing the terms, by decreasing score (see native.Bm25Scorer)
         term_ids = [self.term_id(term) for term in terms]
         # the native term index reader behind self.term_index; block-max MaxScore (same results)
         # when k is small for the corpus: measured faster from 4000 documents per result up
         # (MS MARCO 1M/4M, FiQA), slower below (see docs/proposals/format-v2-blocks.md)
         prune = 0 < top_k and top_k * PRUNING_DOCS_PER_RESULT <= self.total_docs
-        return self.scorer.search(self.term_index._native, term_ids, k1, b, top_k, prune=prune)
+        return self.scorer.search(self.term_index._native, term_ids, k1, b, top_k, prune=prune, threads=threads)
 
     def term_id(self, term):
         return self.lexicon.donneIdentifiant([term])
@@ -549,7 +549,7 @@ class NindEngine:
 
         return score
 
-    def search(self, query, top_k=10, doc_names=False, k1=1.5, b=0.75):
+    def search(self, query, top_k=10, doc_names=False, k1=1.5, b=0.75, threads=1):
         """Search the corpus with BM25 and return the top-scoring documents.
 
         :param query: the query text.
@@ -559,6 +559,11 @@ class NindEngine:
             identifiers in the index - like pyserini's hits' ``docid``.
         :param k1: BM25 term-frequency saturation parameter.
         :param b: BM25 document-length normalization parameter.
+        :param threads: threads searching this one query at once (block-max
+            pruning only, i.e. a ``top_k`` small for the corpus): the
+            documents cut into as many ranges, the same results. For many
+            queries at once, calling ``search`` from several threads scales
+            better (each call releases the GIL).
         :return: a list of ``(doc_id, score)`` tuples (``(name, score)``
             with ``doc_names``), sorted by descending score, of length at
             most ``top_k`` (only documents with a positive score are included).
@@ -566,12 +571,13 @@ class NindEngine:
         Only the documents containing a query term are scored, from the
         terms' postings lists (in native code): the cost depends on how many
         documents contain the query terms, not on the size of the corpus.
-        Scores are those of :meth:`bm25_score`; equal scores keep the order
-        of the documents in the index.
+        Scores are those of :meth:`bm25_score` (to rounding: the native code
+        computes the same formula, not the same operations); equal scores keep
+        the order of the documents in the index.
         """
         limit = top_k if isinstance(top_k, int) and top_k >= 0 else -1
         with self._session() as snapshot:
-            results = snapshot.search(self.tokenize(query), k1, b, limit)
+            results = snapshot.search(self.tokenize(query), k1, b, limit, threads)
             if limit < 0:
                 results = results[:top_k]
             if doc_names:
