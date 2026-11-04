@@ -436,6 +436,47 @@ corpus keeps MS MARCO's statistics, and **ignore format limits** (see below):
   hit's stored `docid` and building one Java object per hit for pyjnius: k=10
   is the comparable figure.
 
+### Format v2 (nind rerun, 2026-11-04)
+
+nind and nind+local rerun with format v2 (branch `nind-format-v2`, commit
+`81c0c35`), on the same data, machine and options. The other systems weren't
+rerun: their v1-run numbers above still hold. Raw results:
+`bench/retrieval/results/2026-11-04-v2/` (`v1-vs-v2.md`: every column, v1 /
+v2). `NindEngine` uses block-max MaxScore when `top_k * 4000 <= documents`,
+and its results are identical to the exhaustive search's. Single-thread
+search, median latency, top 10, in ms:
+
+| corpus | nind v1 | nind v2 | Lucene | tantivy |
+|---|---|---|---|---|
+| FiQA (stopwords removed) | 0.443 | 0.576 | 0.803 | 0.308 |
+| MS MARCO 1M (stopwords removed) | 1.195 | 0.863 | 0.804 | 0.761 |
+| MS MARCO 2M | 2.893 | 1.464 | 0.978 | 1.501 |
+| MS MARCO 4M | 7.232 | 2.757 | 1.190 | 2.680 |
+| MS MARCO 8.8M | 14.531 | 5.135 | 1.621 | 5.709 |
+| MS MARCO 8.8M, stopwords kept | 132.9 | 7.70 | 2.398 | 41.1 |
+
+- **Search scaling:** nind's top-10 latency now grows as **N^0.83**, down
+  from N^1.16. Lucene grows as N^0.32 and tantivy as N^0.92. nind matches
+  tantivy without stopwords and is 17× faster than v1 with them. It's still
+  3× Lucene's latency.
+- **Top 1000, scored exhaustively below 4M documents:** slower in v2 at 1M
+  and 2M (2.47 vs 1.98 ms at 1M). At these sizes MaxScore doesn't apply, so
+  this is the cost of the v2 exhaustive path (block decoding). It is faster
+  from 4M (13.1 vs 15.9 ms at 8.8M), and up to 4.8× with stopwords (29.4 vs
+  140.3 ms).
+- **Small corpora:** a little slower at top 10 (FiQA 0.58 vs 0.44 ms,
+  SciFact 0.072 vs 0.067). FiQA is just above MaxScore's threshold, where it
+  barely gains.
+- **Size and build:** the index is about 10% larger (6-byte offsets, 64-bit
+  ids, block descriptors: 991 vs 900 MB on MS MARCO without stopwords). Build
+  memory is about 19% higher (7.8 vs 6.5 GB). Build time is about the same,
+  except on the full corpus (72 vs 58 s; 202 vs 147 s with the local index).
+- **Updates:** update memory is about 40% lower (7.7 vs 13.4 GB at 8.8M).
+  The touched terms are now written one definition at a time, by batches.
+  Before that fix, the v2 update was killed at 20 GB on the full corpus. The
+  time is unchanged (332 vs 302 s): every list a new document enters is
+  still rewritten whole, since block-level updates aren't implemented yet.
+
 ## 5. Concurrent searches (`bench/retrieval/concurrency.py`)
 
 Queries per second of one `NindEngine` shared by 1 to 16 threads
