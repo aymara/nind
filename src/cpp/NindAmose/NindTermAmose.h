@@ -63,7 +63,7 @@ public:
     *\param fileIdentification unique identification of file */
     void removeDocFromTerm(const unsigned int ident,
                            const AmoseTypes type,
-                           const unsigned int documentId,
+                           const NindDocId documentId,
                            const Identification &fileIdentification);
 
     /** \brief Read the list of documents where term is indexed
@@ -72,7 +72,7 @@ public:
     *\param documentIds structure to receive the list of documents ids
     *\return true if term was found, false otherwise */
     bool getDocList(const unsigned int termId,
-                    std::list<unsigned int> &documentIds);
+                    std::list<NindDocId> &documentIds);
 
     /** \brief Number of occurrences in index of a given term
     *\param termId: identifier of the term

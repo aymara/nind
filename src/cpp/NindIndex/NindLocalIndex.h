@@ -22,6 +22,7 @@
 #define NindLocalIndex_H
 ////////////////////////////////////////////////////////////
 #include "NindIndex.h"
+#include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
 #include <stdio.h>
@@ -71,12 +72,12 @@ public:
     *\param ident ident of doc
     *\param localDef structure to receive all datas of the specified doc
     *\return true if doc was found, false otherwise */
-    bool getLocalDef(const unsigned int ident,
+    bool getLocalDef(const NindDocId ident,
                      std::list<struct Term> &localDef);
 
     /**\brief Thread-safe (const) getLocalDef: reads into the caller's buffer (see NindFile::readAt);
     * several threads can read one local index at once, each with its own buffer */
-    bool getLocalDef(const unsigned int ident,
+    bool getLocalDef(const NindDocId ident,
                      std::list<struct Term> &localDef,
                      NindReadBuffer &buffer) const;
 
@@ -84,27 +85,31 @@ public:
     *\param ident ident of doc
     *\param localLength the resulting length
     *\return true if doc was found, false otherwise */
-    bool getLocalLength(const unsigned int ident,
+    bool getLocalLength(const NindDocId ident,
                      unsigned int &localLength);
 
     /**\brief Return a full document as a list of unique terms ids
     *\param ident ident of doc
     *\param termIdents structure to receive all datas of the specified doc
     *\return true if doc was found, false otherwise */
-    bool getTermIdents(const unsigned int ident,
+    bool getTermIdents(const NindDocId ident,
                        std::set<unsigned int> &termIdents);
 
     /**\brief Write a full document as a list of terms whith their localisations
     *\param ident ident of doc
     *\param localDef structure containing all datas of the specified doc . empty when deletion
     *\param fileIdentification unique identification of lexicon */
-    void setLocalDef(const unsigned int ident,
+    void setLocalDef(const NindDocId ident,
                      const std::list<struct Term> &localDef,
                      const Identification &fileIdentification);
     
     /**\brief List the (external) idents of all documents of the collection
     *\param docIdents receives the idents, in increasing order */
-    void getDocIdents(std::vector<unsigned int> &docIdents);
+    void getDocIdents(std::vector<NindDocId> &docIdents);
+
+    /**\brief List the (external, internal) idents of all documents of the collection
+    *\param docIdents receives the pairs, in increasing external ident order */
+    void getDocIdentPairs(std::vector<std::pair<NindDocId, unsigned int> > &docIdents);
 
     /**\brief number of documents in the collection 
      * \return number of documents in the collection */
@@ -117,13 +122,13 @@ private:
     void writeSpecificsAndIdentification(const Identification &fileIdentification);
 
     //Rejcupehre l'identifiant interne 
-    unsigned int getInternalIdent(const unsigned int ident);
-    unsigned int getInternalIdentAt(const unsigned int ident,
+    unsigned int getInternalIdent(const NindDocId ident);
+    unsigned int getInternalIdentAt(const NindDocId ident,
                                     NindReadBuffer &buffer) const;
     void fillDocIdTradExtIntAt(const unsigned int intIdMin,
                                const unsigned int intIdMax,
                                NindReadBuffer &buffer) const;
-    void decodeLocalDef(const unsigned int ident,
+    void decodeLocalDef(const NindDocId ident,
                         const unsigned int identInt,
                         NindReadBuffer &in,
                         std::list<struct Term> &localDef) const;
@@ -134,7 +139,7 @@ private:
    
     //map de traduction des identifiants externes vers les identifiants internes
     //(mutable : complejteje par les lecteurs, sous m_docIdMutex, lectures partagejes, mises ah jour exclusives)
-    mutable std::map<unsigned int, unsigned int> m_docIdTradExtInt;
+    mutable std::map<NindDocId, unsigned int> m_docIdTradExtInt;
     //max des identifiants internes, pour la numejrotation
     mutable unsigned int m_currIdent;
     mutable std::shared_timed_mutex m_docIdMutex;

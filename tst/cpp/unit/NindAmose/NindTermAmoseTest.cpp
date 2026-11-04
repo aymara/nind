@@ -26,7 +26,7 @@ TEST_CASE("NindTermAmoseTest.AddDocsToTermAggregatesCountsAndDocList") {
     termIndex.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(1, 3), identification);
     termIndex.addDocsToTerm(catId, SIMPLE_TERM, oneDoc(2, 5), identification);
 
-    list<unsigned int> docs;
+    list<NindDocId> docs;
     REQUIRE(termIndex.getDocList(catId, docs));
     REQUIRE_EQ(2u, docs.size());
     CHECK_EQ(2u, termIndex.getDocFreq(catId));
@@ -64,7 +64,7 @@ TEST_CASE("NindTermAmoseTest.RemovingLastDocFromTermErasesItAndDecrementsUniqueC
     termIndex.removeDocFromTerm(catId, SIMPLE_TERM, 1, identification);
     CHECK_EQ(0u, termIndex.getUniqueTermCount(SIMPLE_TERM));
     CHECK_EQ(0u, termIndex.getDocFreq(catId));
-    list<unsigned int> docs;
+    list<NindDocId> docs;
     CHECK_FALSE(termIndex.getDocList(catId, docs));
 }
 ////////////////////////////////////////////////////////////
@@ -153,7 +153,7 @@ TEST_CASE("NindTermAmoseTest.RemovingLastListedDocKeepsTheOtherDocs") {
 
     //doc 2 is the last one of the ordered list, but not the only one
     termIndex.removeDocFromTerm(catId, SIMPLE_TERM, 2, identification);
-    list<unsigned int> docs;
+    list<NindDocId> docs;
     REQUIRE(termIndex.getDocList(catId, docs));
     REQUIRE_EQ(1u, docs.size());
     CHECK_EQ(1u, docs.front());

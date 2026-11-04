@@ -141,11 +141,11 @@ int main(int argc, char *argv[]) {
                 if (idlect == 0) { nbLexNok++; continue; }
                 nbLexOk++;
                 //rejcupehre la liste des documents ouh est indexej ce terme
-                list<unsigned int> documentIds;
+                list<NindDocId> documentIds;
                 const bool trouvej = nindTermAmoseLect.getDocList(idlect, documentIds);
                 if (!trouvej) { nbTermNok++; continue; }
                 //le doc doit estre dans la liste
-                list<unsigned int>::const_iterator itdoc = documentIds.begin();
+                list<NindDocId>::const_iterator itdoc = documentIds.begin();
                 while (itdoc != documentIds.end()) {
                     if (*itdoc == noDoc) break;
                     itdoc++;

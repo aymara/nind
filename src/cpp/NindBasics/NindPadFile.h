@@ -117,7 +117,8 @@ protected:
 
 protected:
 //<flagIndexej=47>(1) <addrBlocSuivant>(5) <nombreIndex>(3) = 9
-#define TAILLE_TETE_INDEX 9
+//<flagIndexej=47> <addrBlocSuivant> <nombreIndex>: 9 bytes (v1, 5-byte address) or 10 (v2, 6-byte)
+#define TAILLE_TETE_INDEX blockHeaderSize()
 
     /**\brief Creates NindPadFile with a specified name associated with.
     *\param fileName absolute path file name
@@ -131,7 +132,9 @@ protected:
                 const Identification &referenceIdentification,
                 const unsigned int specificsSize,
                 const unsigned int dataEntrySize = 0,
-                const unsigned int dataEntriesBlocSize = 0);
+                const unsigned int dataEntriesBlocSize = 0,
+                const unsigned int nextBlockAddrSize = 5,
+                const unsigned int legacyDataEntrySize = 0);
 
     virtual ~NindPadFile();
 
@@ -207,6 +210,12 @@ public:
     /**\brief Thread-safe (const) getMaxIdent: number of entries in the shared map */
     unsigned int getMaxIdentAt() const;
 
+    /**\brief size in bytes of one data entry, as in the file */
+    unsigned int getDataEntrySize() const { return m_dataEntrySize; }
+
+    /**\brief size in bytes of an entries block's header: 9 (v1 layout) or 10 (v2) */
+    unsigned int blockHeaderSize() const { return 4 + m_nextBlockAddrSize; }
+
     /**\brief true if this object writes the file */
     bool isWriter() const { return m_isWriter; }
 
@@ -274,6 +283,12 @@ private:
     unsigned int m_specificsSize;                //size in bytes of specific datas
     unsigned int m_dataEntrySize;               //size in bytes of one data entry (for neo writer)
     unsigned int m_dataEntriesBlocSize;         //number of entries in a single block (for neo writer)
+    unsigned int m_nextBlockAddrSize;           //<addrBlocSuivant> : 5 bytes (v1 layout) or 6 (v2)
+    //<addrBlocSuivant> of an entries block, as wide as the file's layout
+    uint64_t getNextBlockAddr(NindReadBuffer &in) const {
+        return (m_nextBlockAddrSize == 6) ? in.getInt6() : in.getInt5(); }
+    void putNextBlockAddr(const uint64_t address) {
+        if (m_nextBlockAddrSize == 6) m_file.putInt6(address); else m_file.putInt5(address); }
 };
 ////////////////////////////////////////////////////////////
     } // end namespace

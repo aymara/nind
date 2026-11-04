@@ -198,7 +198,7 @@ applies well before the limits:
 | skipping blocks in top-k search | as soon as queries contain frequent terms: FiQA (57k documents) already scores ~146k postings per query, most of which block-max skipping would avoid |
 | updates that rewrite the last block, not the whole list | any index that's updated: the 438 s / 16.8 GB on MS MARCO becomes roughly (terms touched) × (one block), orders of magnitude less I/O |
 | bounded read buffers, one `pread` per block | any index with long lists (memory no longer grows with the corpus per read) |
-| a merge that copies blocks instead of re-encoding them (shards cover disjoint, ordered document ranges: only a block's first id changes) | any sharded build, i.e. the way to use hundreds of cores |
+| a merge that copies block bodies instead of re-encoding them (documents keep their ids, and a body is relative to its block's first document: only the small header, with the merged term id, is rewritten) | any sharded build, i.e. the way to use hundreds of cores |
 | parallel decoding/scoring of one query's blocks across cores | large corpora on many-core machines |
 | no 16 MiB / 16.7M-document / 16.7M-bucket ceilings | ~10M documents (stopwords kept) to ~100M (without) |
 
@@ -218,18 +218,22 @@ two formats.
 
 ## Migration
 
-1. **Readers next.** v2 readers accept v1 files (entry size 8, flag 17) and v2
-   files (entry size 10, flag 23), in C++ and in `nind._native`. Amose gets a
-   reader that opens both before any v2 file exists.
-0. **Reconcile the v1 grammar with the code** (principle 2), then write the
+Decided (2026-11-04): **writers write v2 by default**; readers read v1 and v2.
+Amose follows as needed (or keeps an older nind for v1).
+
+1. **Reconcile the v1 grammar with the code** (principle 2), then write the
    v2 grammar, before any code.
-2. **Then writers.** `NindIndexer`, `IndexUpdate`, `IndexBuilder` and
-   `NindIndexMerge` write v2 only. Conversion: rebuild the v2 term index from
-   the v1 lexicon and local index, which are the source of truth
-   (principle 3); for indexes without a local index, `NindIndexMerge`
-   reading v1 and writing v2 (`nind._native.merge_indexes([old], new)`).
-   The same rebuild is the recovery tool for a damaged term index.
-3. **Diagnostics** (`dumpeFichier`, `afficheTerme`, ...) move to
+2. **Readers read both**: v1 files (entry size 8, flag 17) and v2 files
+   (entry size 10, flag 23), in C++ and in `nind._native`.
+3. **Writers write v2**: `NindIndexer`, `IndexUpdate`, `IndexBuilder`,
+   `NindIndexMerge` and the C++ writers Amose uses. An existing v1 file
+   reopened by a writer is refused (it can't grow v2 definitions): rebuild
+   it. Conversion: rebuild the v2 term index from the v1 lexicon and local
+   index, which are the source of truth (principle 3); for indexes without a
+   local index, `NindIndexMerge` reading v1 and writing v2
+   (`nind._native.merge_indexes([old], new)`). The same rebuild is the
+   recovery tool for a damaged term index.
+4. **Diagnostics** (`dumpeFichier`, `afficheTerme`, ...) move to
    `nind._native` like the rest of the low-level API (see "Planned follow-up
    work" in CLAUDE.md), with a native **`verify`**: it walks every structure
    of an index and checks its invariants (flags, bounds, counts matching
@@ -237,41 +241,35 @@ two formats.
    files paired by their identification). That's the offline tool the
    original design used to tell whether a fault comes from indexing or from
    search (LAT2016.JYS.463, §8.3), without a second decoder.
-
-## Testing and measuring
-
-- Unit tests per field width and per path: inline vs. blocked categories, a
-  two-level directory, appending to the last block, removing from a middle
-  block, holes reused.
-- Robustness: extend the `*RobustnessTest.cpp` corruption sweeps to v2 files.
-  Descriptor offsets, lengths and counts are read from the file, so each must
-  be bounded against the file size and the buffer, as v1 fields are.
-- A term over 16 MiB (`NindTermIndexTest.DefinitionOver16MiBIsRefused` today)
-  must round-trip in v2.
-- **Golden files**: a few small v1 and v2 files, written once and checked
-  into `tst/` byte for byte. A writer must reproduce them exactly (an
-  accidental format change, or a writer and reader sharing a bug, breaks
-  the test), and v2 readers must read the v1 ones.
-- `verify` accepts every file the writers produce and rejects every
-  corrupted one from the sweeps.
-- **Idempotent incremental indexing** (LAT2016.JYS.463, §4.7, as a test):
-  indexing a corpus as overlapping parts, in any order, gives the same index
-  as indexing it at once. Sparse external ids too (CLEF-like numbering).
-- **Rebuild**: a term index rebuilt from the lexicon and local index equals
-  the one written incrementally.
-- `bench/retrieval/`, before and after: parity (rankings identical to bm25s),
-  index size, build time, query latency at k = 10 and 1000, and update cost on
-  MS MARCO and its prefixes; then a corpus over 16.7M documents with a local
-  index.
+5. **Golden files**: the v1 set (`tst/cpp/unit/NindIndex/golden/v1`) stays,
+   read-only (v2 readers must decode it); a v2 set is written and checked
+   both ways (writers reproduce it, readers decode it).
 
 ## Decisions (2026-11-04)
 
-1. **Document ids are 64 bits.** 32 bits would cap an index at 4.29G
-   documents, below the 10G target.
+1. **External document ids are 64 bits** (the application's numbering, in
+   postings, the local index's `<identifiantExterne>`, `.ninddocnames`,
+   `.ninddoclengths`). **The internal numbering stays 32 bits**: the local
+   index's `<identifiantDoc>`, `NindIndex`'s identifiers (its indirection
+   numbering), `Bm25Scorer`'s positions. So **one index holds at most
+   4.29G documents**; beyond that, several indexes (see "Possible
+   evolutions").
 2. **Blocks of 128 postings** by default (a build-time parameter stored in
    the file's specifics; 256 to be measured).
 3. **Block statistics: max term frequency and min document length.** More
    can be added later under a new flag.
+4. **Writers write v2 by default** (see Migration).
+
+## Possible evolutions
+
+- **64-bit internal numbering**, for one index over 4.29G documents: the
+  local index's `<identifiantDoc>` (`Entier8`), `NindIndex`'s identifiers
+  (`getEntryPos`, the indirection numbering: 64-bit identifiers, and the
+  indirection blocks' `<nombreIndex>` counts summing past 2^32), and
+  `Bm25Scorer`'s positions (`uint64_t`, its per-document arrays then
+  beyond 4.29G entries, so a bounded accumulator rather than N-sized arrays,
+  see the inventory). The lexicon and term index keep 32-bit word
+  identifiers. Not needed while one index stays under 4.29G documents.
 
 ## Implementation inventory
 
@@ -308,6 +306,94 @@ What the decisions reach beyond the term index's grammar:
   large N, scoring block by block into a bounded accumulator (document-at-a-
   time over blocks) replaces it.
 
+## The v2 grammar
+
+As precise as the v1 grammar in the source comments, written before the code
+(principle 2). Only what changes from v1 is shown; the retrolexicon and the
+identification block (`<maxIdentifiant>` and `<dateHeure>`, both `Entier4`)
+are unchanged.
+
+```
+// integers
+<EntierULat64>          ::= <EntierULat>                        // values < 2^32: as in v1
+                          | <flagULat64=0xF8> <Entier8>          // values >= 2^32
+<Entier6>               ::= <Octet>{6}                           // big-endian, as Entier5
+<Entier8>               ::= <Octet>{8}                           // big-endian
+
+// NindPadFile / NindIndex envelope (lexicon, term and local indexes)
+<fichier>               ::= <tailleEntreje=10> <tailleSpejcifiques> { <blocIndexej> <blocEnVrac> }
+                            <blocSpejcifique> <blocIdentification>
+<blocIndexej>           ::= <flagIndexej=47> <addrBlocSuivant> <nombreIndex> { <indirection> }
+<addrBlocSuivant>       ::= <Entier6>
+<indirection>           ::= <offsetDejfinition> <longueurDejfinition>
+<offsetDejfinition>     ::= <Entier6>
+<longueurDejfinition>   ::= <Entier4>
+
+// .nindlexiconindex
+<dejfinition>           ::= <flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
+<identifiantHash>       ::= <Entier4>
+<longueurDonnejes>      ::= <Entier4>
+
+// .nindlocalindex
+<dejfinition>           ::= <flagDejfinition=19> <identifiantDoc> <identifiantExterne>
+                            <longueurDonnejes> <donnejesDoc>
+<identifiantDoc>        ::= <Entier4>
+<identifiantExterne>    ::= <Entier8>
+<longueurDonnejes>      ::= <Entier4>
+
+// .nindtermindex
+<dejfinition>           ::= <flagDejfinition=23> <identifiantTerme> <longueurDonnejes> { <catejgorieV2> }
+                            { <bloc> }                       // after the directory, within the definition
+<identifiantTerme>      ::= <Entier4>
+<longueurDonnejes>      ::= <Entier4>                        // of the directory (the categories), not the blocks
+<catejgorieV2>          ::= <flagCg=67> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
+                            ( <postingsEnLigne>              // nbreBlocs = 0
+                            | { <descripteurBloc> } )        // nbreBlocs > 0
+<catejgorie>            ::= <Entier1>
+<frejquenceTerme>       ::= <EntierULat64>
+<nbreDocs>              ::= <EntierULat64>
+<nbreBlocs>             ::= <EntierULat>
+<postingsEnLigne>       ::= { <identDocRelatif> <frejquenceDoc> }      // nbreDocs times
+<descripteurBloc>       ::= <premierDocRelatif> <dernierDocRelatif> <nbreDocsBloc>
+                            <frejquenceMax> <longueurMin> <offsetBloc> <longueurBloc>
+<premierDocRelatif>     ::= <EntierULat64>      // from the previous block's last document (0 first)
+<dernierDocRelatif>     ::= <EntierULat64>      // from this block's first document
+<nbreDocsBloc>          ::= <EntierULat>
+<frejquenceMax>         ::= <EntierULat>        // largest frequency in the block
+<longueurMin>           ::= <EntierULat>        // shortest document length in the block, 0 = unknown
+<offsetBloc>            ::= <Entier4>          // from the definition's first byte (its flag)
+<longueurBloc>          ::= <Entier4>
+<bloc>                  ::= <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
+                            { <identDocRelatif> <frejquenceDoc> }      // the first one relative to premierDoc
+<identDocRelatif>       ::= <EntierULat64>
+<frejquenceDoc>         ::= <EntierULat>
+```
+
+- **Blocks are written inside their term's definition, after its directory**
+  (implementation decision, 2026-11-04), at offsets relative to the
+  definition's first byte: the indirection's length covers directory and
+  blocks, so the free-space management, the hole statistics and the merge
+  work unchanged, and a definition moved by a rewrite keeps valid offsets.
+  A search still reads a term's directory, then only the blocks it needs.
+  An update rewrites the whole definition, as in v1: rewriting only the last
+  block, in place, needs slack in the definition (the original design's
+  "extensions"), a writer change that needs no format change. A block
+  repeats its term and category, and its count, first and last documents and
+  max frequency are checked against its descriptor.
+- `<offsetBloc>` and `<longueurBloc>` are fixed-width so that the writer can
+  write the directory first and patch them once the blocks are written.
+- The block size (128 by default) is the writer's: readers only follow the
+  descriptors, so blocks of different sizes can coexist (a block split by an
+  update holds fewer).
+- `<longueurMin>` is 0 when the writer doesn't know the documents' lengths
+  (Amose's writers today): a top-k search then bounds the block by its max
+  frequency alone.
+- Every count, offset and length above is read from the file: bounded
+  against the definition or the file before use, never used to `reserve`.
+- A two-level directory isn't needed at first: a category of 7.7M documents
+  (MS MARCO's `the`) has ~60k descriptors, ~1 MB, well below the 4-byte
+  length.
+
 ## Implementation order
 
 Each step keeps every test passing (ASan, TSan, golden v1 files) and is
@@ -317,23 +403,92 @@ measured against the previous one (`bench/retrieval/`):
    wrappers stop parsing the envelope; the diagnostics keep working on v1.
 2. **Reconcile the v1 grammar comments with the code**, then write the v2
    grammar (this document's section 2 made precise), with `EntierULat64`.
-3. **64-bit document ids** (still the v1 term and local formats: ids above
-   2^32 refused there): `NindDocId`, the C++ structures, Python arrays,
-   `NINDDL02`, the new `NindDocNames` version.
+3. **64-bit external document ids** (the v1 formats refuse ids above 2^32):
+   `NindDocId`, the C++ structures, Python arrays, `NINDDL02`, the new
+   `NindDocNames` version.
 4. **The v2 envelope** (entry size 10; 4-byte local document and lexicon
-   bucket numbers; 4-byte lengths): v2 readers read v1 and v2, writers write
-   v2. Golden v2 files.
+   bucket numbers; 4-byte lengths): readers read v1 and v2, writers write v2.
+   The v1 golden files stay as a reader test; golden v2 files.
 5. **Blocks in the term index** (flag 23): writers, readers, `getTermPostings`
-   over blocks, in-place updates of the last block, `NindIndexMerge` copying
-   blocks, `NindAmose`.
+   over blocks, in-place updates of the last block, `NindIndexMerge`
+   (copying block bodies, rewriting their headers: a block repeats its term
+   id, renumbered by the merge), `NindAmose`.
+   A writer reopening a file must know the blocks' areas: the free-space
+   management (`findNewArea`/`vacateOldArea`) and the hole statistics
+   (`chercheVides`) only know the areas indirections point at.
 6. **Block-max top-k in `Bm25Scorer`**, results identical to today's.
 7. **Migration** (rebuild of v1 indexes), native `verify`, the diagnostics.
+
+### Step 6 as implemented: block-max MaxScore, document at a time
+
+A first version kept the term-at-a-time scorer and filtered blocks once, against
+a θ taken up front from the rarest terms' partial scores. It was exact but never
+faster: it still read 60% of the frequent terms' postings on MS MARCO and scored
+the rarest terms twice. On MS MARCO 1M, its top 10 took 2.6 ms against the
+exhaustive search's 2.3 ms, and on 4M 12.5 ms against 11.7. It was replaced by
+dynamic **block-max MaxScore**, document at a time
+(`Bm25Scorer::searchMaxScore`, `search(..., prune=True)`):
+
+- The terms are sorted by increasing upper bound. Every prefix whose bounds sum
+  to less than θ (the k-th best score so far) is *non-essential*: a document in
+  none of the other terms can't reach the top k.
+- The essential lists are read in document order, 16 blocks at a time.
+- A document is completed by the non-essential terms, taken by decreasing
+  bound. For each, the document is first checked against that term's block
+  bound, and only that block is read.
+- **Exactness.** The scores are accumulated in another order than
+  `NindEngine._bm25_score`'s query order. So every comparison with θ has a
+  relative margin of 1e-9, far above the rounding error of a few dozen
+  additions. The candidates left at the end are then scored again, exactly, in
+  query order. The results are identical (scores and ties) to the exhaustive
+  search on FiQA, MS MARCO 1M and 4M, at k = 10 and k = 1000.
+- **Fallback to the exhaustive search**: a term in several categories, an
+  idf ≤ 0, k ≤ 0, k1 < 0, b outside [0, 1], or a long list without blocks.
+  The last one can only come from a format v1 file: v2 writers keep at most
+  128 postings inline. Such a list would otherwise be read whole as a single
+  block.
+- **Trusted descriptors.** A block that is read is checked against its
+  descriptor (`decodeBlock`: first and last documents, count, exact largest
+  frequency), so a mismatch throws. A block that MaxScore skips is never
+  read. If such a block's descriptor understates it (a damaged file, a buggy
+  writer), the search can't notice and may miss documents, where the
+  exhaustive search would throw. Block-max skipping can't avoid this:
+  `nind._native.verify_index` (`NindIndexVerify`) checks every descriptor
+  against its block.
+
+The native scorer's search times (µs per query, single thread, MS MARCO without
+stopwords). Each row's four numbers come from the same run. Absolute times vary
+by about 20% between runs on this machine (the first version's figures above
+come from another run):
+
+| corpus | top 10, exhaustive | top 10, MaxScore | top 1000, exhaustive | top 1000, MaxScore |
+|---|---|---|---|---|
+| FiQA (57.6k) | 818 | 715 | 1087 | 1670 |
+| MS MARCO 1M | 2702 | 1309 | 3108 | 3103 |
+| MS MARCO 4M | 14378 | 4387 | 12824 | 9706 |
+
+The gain grows with the corpus, as the lists the top k doesn't need get longer.
+For a k large relative to the corpus, the per-document overhead of a
+document-at-a-time traversal outweighs the skipping. `NindEngine` therefore
+uses MaxScore only when `top_k * PRUNING_DOCS_PER_RESULT <= documents`
+(4000, measured). The exhaustive search keeps a cost that grows faster than
+the corpus (2.7 ms → 14.4 ms for 4 times the documents): its score array
+(8 bytes per document) no longer fits in the cache.
+
+Still open:
+
+- **Tighter bounds.** The writers don't fill `<longueurMin>` yet (0: the
+  bound uses the corpus's shortest document); `IndexBuilder` knows the
+  lengths.
+- **Faster large k.** Use the exhaustive search below a document count, or
+  keep a score array instead of the candidates once θ stops rising.
+- **Several categories** (Amose) aren't pruned.
 
 ## Remaining questions
 
 1. **Build memory** (not part of the format): `NindIndexer` keeps ~17 bytes
    per token in memory (8.8 GB for MS MARCO). Sharded builds plus a
-   block-copying merge would bound it per shard.
+   merge copying block bodies would bound it per shard.
 2. **The author's other documents**: LAT2014.JYS.440 (*nind, indexation
    post-S2*, the main design), LAT2015.JYS.448 (the Amose adaptation),
    LAT2017.JYS.468 (*synchronisation des lecteurs par les fichiers*),

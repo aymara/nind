@@ -95,7 +95,7 @@ TEST_CASE("NindAmoseMergeTest.MergedIndexHasTheCountsTypesAndPostingsOfASingleIn
         const unsigned int referenceId = referenceLexicon.getWordId(get<0>(words[i]), get<1>(words[i]), get<2>(words[i]));
         const unsigned int mergedId = mergedLexicon.getWordId(get<0>(words[i]), get<1>(words[i]), get<2>(words[i]));
         REQUIRE_NE(0u, mergedId);
-        list<unsigned int> referenceDocs, mergedDocs;
+        list<NindDocId> referenceDocs, mergedDocs;
         referenceTerms.getDocList(referenceId, referenceDocs);
         mergedTerms.getDocList(mergedId, mergedDocs);
         CHECK(referenceDocs == mergedDocs);

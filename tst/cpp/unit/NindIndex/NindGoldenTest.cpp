@@ -1,11 +1,11 @@
-// Golden files: a small index (lexicon + retrolexicon, term index, local index) of the
-// current format (v1), written once and checked into golden/v1/.
+// Golden files: a small index (lexicon + retrolexicon, term index, local index), written once
+// per format version and checked into golden/v1/ and golden/v2/.
 //
-// - NindGolden.WritersReproduceTheGoldenFiles: today's writers must produce exactly these
-//   bytes (except the identification's timestamp, the last 4 bytes of every file). An
-//   accidental format change, or a writer and a reader sharing the same bug, breaks it.
-// - NindGolden.ReadersDecodeTheGoldenFiles: today's readers must decode them to the values
-//   written. Future versions of the format keep reading them (v1 compatibility).
+// - NindGolden.WritersReproduceTheGoldenFiles: today's writers (format v2) must produce exactly
+//   golden/v2's bytes (except the identification's timestamp, the last 4 bytes of every file).
+//   An accidental format change, or a writer and a reader sharing the same bug, breaks it.
+// - NindGolden.ReadersDecodeTheGoldenFiles: today's readers must decode both versions to the
+//   values written (format v1 files, written by older nind, stay readable).
 //
 // To regenerate them after an *intended* format change, run the test executable with
 // NIND_WRITE_GOLDEN=1 (writes into the source tree), then review and commit the new files.
@@ -133,7 +133,7 @@ vector<unsigned char> maskedBytes(const string &path) {
     return bytes;
 }
 
-const string goldenBase() { return string(NIND_GOLDEN_DIR) + "/golden"; }
+const string goldenBase(const char *version = "v2") { return string(NIND_GOLDEN_DIR) + "/" + version + "/golden"; }
 }
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindGolden.WritersReproduceTheGoldenFiles") {
@@ -143,7 +143,7 @@ TEST_CASE("NindGolden.WritersReproduceTheGoldenFiles") {
     if (getenv("NIND_WRITE_GOLDEN") != 0) {
         for (size_t e = 0; e < 4; e++)
             writeFileBytes(goldenBase() + kExtensions[e], readFileBytes(base + kExtensions[e]));
-        MESSAGE("golden files written into " NIND_GOLDEN_DIR);
+        MESSAGE("golden files written into " NIND_GOLDEN_DIR "/v2");
     }
     for (size_t e = 0; e < 4; e++) {
         INFO("file " << kExtensions[e]);
@@ -153,12 +153,19 @@ TEST_CASE("NindGolden.WritersReproduceTheGoldenFiles") {
     }
 }
 ////////////////////////////////////////////////////////////
+void checkGoldenFiles(const char *version);
 TEST_CASE("NindGolden.ReadersDecodeTheGoldenFiles") {
+    for (const char *version : {"v1", "v2"}) {
+        INFO("format " << version);
+        checkGoldenFiles(version);
+    }
+}
+void checkGoldenFiles(const char *version) {
     // the readers open copies (a reader may not write, but the test must not risk the sources)
     TestTempDir tmp;
     const string base = tmp.file("golden");
     for (size_t e = 0; e < 4; e++)
-        writeFileBytes(base + kExtensions[e], readFileBytes(goldenBase() + kExtensions[e]));
+        writeFileBytes(base + kExtensions[e], readFileBytes(goldenBase(version) + kExtensions[e]));
     // the values written by buildGolden, rebuilt independently of the files
     const vector<list<string> > words = goldenWords();
     // ids: one per simple word, component or compound prefix, in insertion order

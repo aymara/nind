@@ -68,14 +68,14 @@ public:
     * document's local index but absent from the lexicon (e.g. after a corpus/MediaData
     * configuration change). Such terms are skipped rather than raising an exception, so
     * termsSet is still fully populated with the terms that were found. */
-    bool getDocTerms(const unsigned int docId,
+    bool getDocTerms(const NindDocId docId,
                      const AmoseTypes termType,
                      std::set<std::string> &termsSet,
                      unsigned int *unknownTermCount = nullptr);
  
     /** \brief get length of a document
     *\return  an integer, the number of occurrences of terms    */
-    unsigned int getDocLength(const unsigned int docId);
+    unsigned int getDocLength(const NindDocId docId);
         
 private:
     NindLexiconAmose m_nindLexicon;

@@ -24,6 +24,7 @@
 ////////////////////////////////////////////////////////////
 #include "NindBasics/NindPadFile.h"
 #include "NindBasics/NindFile.h"
+#include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
 #include <cstdint>
@@ -68,7 +69,46 @@ public:
     *\return true if in bulk mode */
     bool isBulk() const { return m_isBulk; }
 
+    /**\brief true for a file of format v2 (10-byte indirections), false for v1 (8): a v1 file is
+    * read, but a writer refuses to extend it (rebuild it, e.g. with NindIndexMerge) */
+    bool isFormatV2() const { return getDataEntrySize() == 10; }
+
 protected:
+
+    //the fields of an indirection, as wide as the file's format
+    uint64_t getIndirectionOffset(NindReadBuffer &in) const {
+        return isFormatV2() ? in.getInt6() : in.getInt5(); }
+    unsigned int getIndirectionLength(NindReadBuffer &in) const {
+        return isFormatV2() ? in.getInt4() : in.getInt3(); }
+    void putIndirectionOffset(const uint64_t offset) {
+        if (isFormatV2()) m_file.putInt6(offset); else m_file.putInt5(offset); }
+    void putIndirectionLength(const uint64_t length) {
+        if (isFormatV2()) m_file.putInt4(length);
+        else if (length > 0xFFFFFFu) throw OutOfBoundException("value over 3 bytes " + m_fileName);
+        else m_file.putInt3((unsigned int)length); }
+
+    //a definition header's identifier or length: Entier3 (v1) or Entier4 (v2)
+    unsigned int getDefinitionField(NindReadBuffer &in) const {
+        return isFormatV2() ? in.getInt4() : in.getInt3(); }
+    void putDefinitionField(const uint64_t value) {
+        if (isFormatV2()) m_file.putInt4(value);
+        else if (value > 0xFFFFFFu) throw OutOfBoundException("value over 3 bytes " + m_fileName);
+        else m_file.putInt3((unsigned int)value); }
+    void putDefinitionFieldAt(const uint64_t value, const unsigned int offset) {
+        if (isFormatV2()) m_file.putInt4(value, offset);
+        else if (value > 0xFFFFFFu) throw OutOfBoundException("value over 3 bytes " + m_fileName);
+        else m_file.putInt3((unsigned int)value, offset); }
+    //a count or a document id delta: EntierULat (v1) or EntierULat64 (v2)
+    uint64_t getCountField(NindReadBuffer &in) const {
+        return isFormatV2() ? in.getUIntLat64() : in.getUIntLat(); }
+    void putCountField(const uint64_t value) {
+        if (isFormatV2()) m_file.putUIntLat64(value); else m_file.putUIntLat(value); }
+    //an external document identifier: Entier4 (v1) or Entier8 (v2)
+    NindDocId getExternalDocId(NindReadBuffer &in) const {
+        return isFormatV2() ? in.getInt8() : in.getInt4(); }
+    void putExternalDocId(const NindDocId ident) {
+        if (isFormatV2()) m_file.putInt8(ident); else m_file.putInt4(ident); }
+
     /**\brief Creates NindIndex with a specified name associated with.
     *\param fileName absolute path file name
     *\param isWriter true if writer, false if reader  
@@ -93,6 +133,17 @@ protected:
     bool getDefinitionAt(const unsigned int ident,
                          NindReadBuffer &buffer,
                          const unsigned int bytesNb = 0) const;
+
+    /**\brief Thread-safe (const) place of a definition in the file, without reading it
+    *\param ident ident of definition
+    *\param buffer read buffer of the caller (for the indirection)
+    *\param offset receives the definition's offset in the file
+    *\param length receives its length
+    *\return true if the definition exists */
+    bool getDefinitionRefAt(const unsigned int ident,
+                            NindReadBuffer &buffer,
+                            uint64_t &offset,
+                            unsigned int &length) const;
 
     /**\brief Read from file datas of specified definition and leave result into read buffer 
     *\param ident ident of definition

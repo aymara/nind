@@ -89,7 +89,7 @@ def main():
 #
 # <blocIdentification>    ::= <flagIdentification=53> <maxIdentifiant> <identifieurUnique> 
 # <flagIdentification=53> ::= <Entier1>
-# <maxIdentifiant>        ::= <Entier3>
+# <maxIdentifiant>        ::= <Entier4>
 # <identifieurUnique>     ::= <dateHeure>
 # <dateHeure >            ::= <Entier4>
 #############################################################""    
@@ -134,8 +134,8 @@ class NindPadFile(NindFile):
         """
         #en lecture uniquement
         NindFile.__init__(self, padFileName, enEjcriture, enModification)
-        self.entriesBlocksMap = []
         if enEjcriture and not enModification:
+            self.entriesBlocksMap = []
             self.tailleEntreje = tailleEntreje
             self.tailleSpejcifiques = tailleSpejcifiques
             #ejcrit la partie fixe
@@ -152,6 +152,17 @@ class NindPadFile(NindFile):
             self.tailleSpejcifiques = self.litNombre3()
         
     #############################################################
+    def __getattr__(self, name):
+        # Parsed on first use, not at open: the map of indirection blocks (vejrifieFichier).
+        # Opening a reader (NindLexiconindex, NindTermindex, NindLocalindex) then parses
+        # nothing in Python: its lookups go through nind._native, only the diagnostic methods
+        # read the envelope here.
+        if name == 'entriesBlocksMap' and not self.__dict__.get('_vejrifiejEnCours'):
+            self._vejrifiejEnCours = True
+            self.vejrifieFichier()
+            return self.__dict__['entriesBlocksMap']
+        raise AttributeError("%s has no attribute %r" % (type(self).__name__, name))
+
     # vejrifie l'intejgritej du fichier (pour pouvoir analyser un fichier dejconnant)
     def vejrifieFichier(self):
         """Check the file's structural integrity (French *vérifieFichier* = "checks file").
@@ -164,6 +175,11 @@ class NindPadFile(NindFile):
 
         :raises Exception: if the file's structure is invalid.
         """
+        # these diagnostics parse format v1; format v2 (10-byte indirections) is read by
+        # nind._native only, until they move there
+        if self.tailleEntreje == 10:
+            raise NotImplementedError('%s: format v2 file; the Python diagnostics read format v1 only '
+                                      '(nind._native reads both)' % self.latFileName)
         #ejtablit la carte des index sur les diffejrents blocs
         self.__ejtablitCarteIndex()
         # vejrifie les spejcifiques

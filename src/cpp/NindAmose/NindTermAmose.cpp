@@ -111,7 +111,7 @@ void NindTermAmose::addDocsToTerm(const unsigned int ident,
 //param fileIdentification unique identification of file */
 void NindTermAmose::removeDocFromTerm(const unsigned int ident,
                                       const AmoseTypes type,
-                                      const unsigned int documentId,
+                                      const NindDocId documentId,
                                       const Identification &fileIdentification)
 {
     //rejcupehre la dejfinition de ce terme
@@ -153,7 +153,7 @@ void NindTermAmose::removeDocFromTerm(const unsigned int ident,
 //param documentIds structure to receive the list of documents ids
 //return true if term was found, false otherwise */
 bool NindTermAmose::getDocList(const unsigned int termId,
-                               list<unsigned int> &documentIds)
+                               list<NindDocId> &documentIds)
 {
     //raz resultat
     documentIds.clear();

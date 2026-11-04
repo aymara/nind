@@ -124,7 +124,9 @@ def test_search_bm25_parameters(engine):
 
 
 def test_underlying_files_are_structurally_consistent(engine):
-    engine.lexicon.analyseFichierLexiconindex(False)   # raises on inconsistency
+    # (the files are format v2: the structural analysis through nind._native; the Python
+    # per-format diagnostics, format v1 only, are tested on the v1 golden files)
+    engine.lexicon.analyseFichierIndex(False)   # raises on inconsistency
     assert engine.term_index.analyseFichierIndex(False) is True
     assert engine.local_index.analyseFichierIndex(False) is True
 
@@ -964,7 +966,7 @@ def test_document_names_are_stored_compactly(tmp_path):
     NindIndexer(str(tmp_path / "jsonl"), prefix="corpus").index_jsonl(path)
     names_file = generations(tmp_path / "jsonl")[0] / "corpus.ninddocnames"
     # consecutive document ids aren't stored: 8 bytes per document plus the names
-    assert names_file.stat().st_size == 20 + 4 + 8 * 2000 + sum(len(r["id"]) for r in records)
+    assert names_file.stat().st_size == 24 + 4 + 8 * 2000 + sum(len(r["id"]) for r in records)
 
 
 # -- concurrent searches ----------------------------------------------------------
@@ -987,7 +989,11 @@ def answers(engine):
     return [(engine.search(q, top_k=20), engine.bm25_score(q, 3), engine.get_df(q.split()[0])) for q in CONCURRENCY_QUERIES]
 
 
-def test_concurrent_searches_answer_like_sequential_ones(tmp_path):
+@pytest.mark.parametrize("pruning", [False, True])
+def test_concurrent_searches_answer_like_sequential_ones(tmp_path, monkeypatch, pruning):
+    if pruning:         # (block-max MaxScore: the native scorer's other path)
+        from nind import nind_engine
+        monkeypatch.setattr(nind_engine, "PRUNING_DOCS_PER_RESULT", 1)
     _, engine = build_with(tmp_path, "concurrent", concurrency_corpus(1))
     expected = answers(engine)
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1017,3 +1023,165 @@ def test_concurrent_searches_while_a_new_build_is_published(tmp_path):
             assert result in (old[i], new[i])
     # once published, every new call answers from the new build
     assert one_pass(0) == new
+
+
+def test_opening_an_engine_parses_nothing_in_python(tmp_path):
+    # the readers' lookups go through nind._native; the Python envelope (indirection blocks,
+    # the local index's id table) is parsed on first use, by the diagnostic methods only
+    _, engine = build_with(tmp_path, "lazy", ["alpha beta", "beta gamma", "gamma"])
+    snapshot = engine._snapshot
+    assert engine.search("beta") and engine.get_df("gamma") == 2
+    for reader in (snapshot.lexicon, snapshot.term_index, snapshot.local_index):
+        assert "entriesBlocksMap" not in reader.__dict__
+    assert "docIdTradExtInt" not in snapshot.local_index.__dict__
+    assert "nombreIndirection" not in snapshot.lexicon.__dict__
+    # ... and on demand the Python diagnostics refuse the format v2 files cleanly (they parse v1)
+    assert snapshot.term_index.analyseFichierIndex(False) is True      # (through nind._native)
+    with pytest.raises(NotImplementedError, match="format v2"):
+        snapshot.term_index.entriesBlocksMap
+    with pytest.raises(NotImplementedError, match="format v2"):
+        snapshot.local_index.docIdTradExtInt
+
+
+def test_block_max_pruning_returns_the_exhaustive_top_k(tmp_path):
+    # Bm25Scorer.search(prune=True) skips the blocks that can't reach the top k: the results
+    # (scores, ties in index order) must be exactly the exhaustive search's (opt-in: not faster
+    # than the exhaustive top k yet, see docs/proposals/format-v2-blocks.md)
+    rng = random.Random(11)
+    vocabulary = ["z%d" % i for i in range(400)]
+    weights = [1.0 / (i + 1) for i in range(len(vocabulary))]        # Zipf-like: a few very frequent words
+    texts = [" ".join(rng.choices(vocabulary, weights, k=rng.randint(3, 60))) for _ in range(3000)]
+    texts[17] = texts[5]                                               # equal scores: ties
+    _, engine = build_with(tmp_path, "zipf", texts, indexer_kwargs={"local_index": False})
+    queries = ["z0", "z0 z1", "z0 z1 z2 z3", "z399", "z0 z250", "z1 z1 z7", "z5 z0 z2 z300 z9"]
+    queries += [" ".join(rng.choices(vocabulary, weights, k=rng.randint(1, 6))) for _ in range(200)]
+    queries += [" ".join(rng.sample(vocabulary, rng.randint(1, 5))) for _ in range(100)]
+    snapshot = engine._snapshot
+    term_index = snapshot.term_index._native
+    for query in queries:
+        term_ids = [snapshot.term_id(t) or 0 for t in engine.tokenize(query)]
+        everything = snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, -1)
+        for k in (1, 3, 10, 50):
+            pruned = snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k, prune=True)
+            assert pruned == everything[:k], (query, k)
+            assert snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k) == everything[:k], (query, k)
+
+
+
+def test_block_max_pruning_on_a_format_v1_term_index():
+    # format v1 (every list inline, read-only): the same results as the exhaustive search
+    import itertools
+    from array import array
+    golden = os.path.join(os.path.dirname(__file__), "..", "cpp", "unit", "NindIndex", "golden", "v1", "golden")
+    term_index = native.NindTermIndex(golden, is_writer=False, lexicon_identification=native.Identification(0, 0),
+                                      specifics_number=2)
+    terms = {}
+    for ident in range(1, 13):
+        definition = term_index.get_term_def(ident)
+        if definition:
+            terms[ident] = definition
+    doc_ids = sorted({d.ident for definition in terms.values() for category in definition for d in category.documents})
+    lengths = [1 + doc_id % 17 for doc_id in doc_ids]
+    scorer = native.Bm25Scorer(array('Q', doc_ids), array('I', lengths), sum(lengths) / len(lengths))
+    single = [ident for ident, definition in terms.items() if len(definition) == 1]
+    assert len(single) >= 3
+    queries = [[i] for i in terms] + [list(q) for q in itertools.combinations(terms, 2)]
+    queries += [list(q) for q in itertools.combinations(single, 3)] + [[single[0], single[0], single[1]]]
+    for query in queries:
+        everything = scorer.search(term_index, query, 1.2, 0.75, -1)
+        for k in (1, 2, 3, 5):
+            assert scorer.search(term_index, query, 1.2, 0.75, k, prune=True) == everything[:k], (query, k)
+
+
+def test_engine_search_prunes_when_k_is_small_for_the_corpus(tmp_path, monkeypatch):
+    # NindEngine turns pruning on from PRUNING_DOCS_PER_RESULT documents per result: same results
+    from nind import nind_engine
+    rng = random.Random(5)
+    vocabulary = ["w%d" % i for i in range(200)]
+    weights = [1.0 / (i + 1) for i in range(len(vocabulary))]
+    texts = [" ".join(rng.choices(vocabulary, weights, k=rng.randint(3, 40))) for _ in range(1500)]
+    _, engine = build_with(tmp_path, "gate", texts, indexer_kwargs={"local_index": False})
+    queries = [" ".join(rng.choices(vocabulary, weights, k=rng.randint(1, 5))) for _ in range(100)]
+    exhaustive = [engine.search(query, top_k=None) for query in queries]
+    monkeypatch.setattr(nind_engine, "PRUNING_DOCS_PER_RESULT", 1)
+    for query, everything in zip(queries, exhaustive):
+        for k in (1, 10, 100):
+            assert engine.search(query, top_k=k) == everything[:k], (query, k)
+
+
+# the texts of the format v1 indexes in tst/py/data/v1 (written by NindIndexer before format v2,
+# named "n0".."n7"; see tst/py/data/v1/README.md)
+V1_TEXTS = ["the quick brown fox", "jumps over the lazy dog", "the dog sleeps", "a fox and a dog",
+            "quick quick quick", "lazy afternoon in the sun", "brown bread and brown sugar", "sun and moon"]
+V1_QUERIES = ["the dog", "quick", "brown sun", "moon unknown", "a a fox", "lazy the"]
+
+
+@pytest.mark.parametrize("layout, flat", [("with-local", False), ("without-local", False), ("with-local", True)])
+def test_a_format_v1_index_is_read_then_migrated_by_its_first_update(tmp_path, layout, flat):
+    # indexes written by nind before format v2: read as they are, rebuilt in format v2 by the
+    # first update (document ids and names kept); flat: the generation's files in the index
+    # directory itself, no CURRENT (indexes written before generations existed)
+    import glob
+    import shutil
+    index_dir = tmp_path / "v1"
+    source = os.path.join(os.path.dirname(__file__), "data", "v1", layout)
+    if flat:
+        index_dir.mkdir()
+        for path in glob.glob(os.path.join(source, "corpus.gen-*", "corpus.*")):
+            shutil.copy(path, str(index_dir))
+    else:
+        shutil.copytree(source, str(index_dir))
+    kwargs = {} if layout == "with-local" else {"local_index": False}
+    names = ["n%d" % i for i in range(len(V1_TEXTS))]
+    reference_indexer, reference = build_with(tmp_path, "reference", V1_TEXTS, kwargs, doc_names=names)
+    engine = NindEngine(str(index_dir))
+    assert not engine._snapshot.lexicon._native.is_format_v2()
+    report = native.verify_index(engine._snapshot.base, cross_check=True)
+    assert report.ok and not report.format_v2, report.problems
+    for query in V1_QUERIES:
+        assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
+        assert engine.search(query, top_k=2, doc_names=True) == reference.search(query, top_k=2, doc_names=True)
+    # an update: migrated, then updated
+    more = write_texts(tmp_path / "more", ["a new dog", "the sun"])
+    for indexer in (NindIndexer(str(index_dir), prefix="corpus", **kwargs), reference_indexer):
+        with indexer.update() as update:
+            update.add_file(more[0], name="m0")
+            update.add_file(more[1], name="n5")        # replaces document 5
+            update.remove(2)
+    for query in V1_QUERIES + ["new", "sun"]:
+        assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
+    snapshot = engine._snapshot
+    assert snapshot.lexicon._native.is_format_v2() and snapshot.term_index._native.is_format_v2()
+    if snapshot.local_index is not None:
+        assert snapshot.local_index._native.is_format_v2()
+    assert engine.doc_id("m0") == reference.doc_id("m0") and engine.doc_name(5) == "n5"
+    report = native.verify_index(engine._snapshot.base, cross_check=True)
+    assert report.ok and report.format_v2 and report.documents_nb == (8 if layout == "with-local" else 0), report
+
+
+@pytest.mark.parametrize("local_index", [True, False])
+def test_documents_with_64_bit_ids_are_replaced_and_removed(tmp_path, local_index):
+    # format v2: external ids over 32 bits, through updates (a replaced document's terms come from
+    # the local index's get_term_idents, or from a scan of the terms without one)
+    big = 2 ** 40 + 3
+    index_dir = tmp_path / "big"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus", local_index=local_index)
+    paths = write_texts(tmp_path / "docs", ["alpha beta", "beta gamma", "gamma delta"])
+    with indexer.update() as update:
+        update.add_file(paths[0], doc_id=7)
+        update.add_file(paths[1], doc_id=big)
+        update.add_file(paths[2], doc_id=2 ** 64 - 1)
+    engine = NindEngine(str(index_dir))
+    assert [d for d, _ in engine.search("beta", top_k=None)] == [big, 7] or \
+        sorted(d for d, _ in engine.search("beta", top_k=None)) == [7, big]
+    with indexer.update() as update:
+        update.add_file(paths[0], doc_id=big)          # replaced: alpha beta
+        update.remove(2 ** 64 - 1)
+    assert sorted(d for d, _ in engine.search("alpha", top_k=None)) == [7, big]
+    assert engine.search("gamma", top_k=None) == []
+    if local_index:
+        local = engine._snapshot.local_index._native
+        assert sorted(t.term for t in local.get_local_def(big)) == sorted(local.get_term_idents(big))
+        assert local.get_local_def(2 ** 64 - 1) is None
+    assert native.verify_index(engine._snapshot.base, cross_check=True).ok

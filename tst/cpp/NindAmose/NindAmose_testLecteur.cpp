@@ -100,14 +100,14 @@ int main(int argc, char *argv[]) {
                     }
                     //rejcupehre la liste des documents ouh est indexej ce terme
                     nbGetTerm++;
-                    list<unsigned int> documentIds;
+                    list<NindDocId> documentIds;
                     const bool trouvej = nindTermAmose.getDocList(id, documentIds);
                     if (!trouvej) {
                         cerr<<lemme<<" INCONNU dans "<<nindTermAmose.getFileName()<<endl;
                     }
                     continue;
                     //le doc doit estre dans la liste
-                    list<unsigned int>::const_iterator itdoc = documentIds.begin();
+                    list<NindDocId>::const_iterator itdoc = documentIds.begin();
                     while (itdoc != documentIds.end()) {
                         if (*itdoc == noDoc) break;
                         itdoc++;

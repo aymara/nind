@@ -22,6 +22,7 @@
 #define NindTermIndex_H
 ////////////////////////////////////////////////////////////
 #include "NindIndex.h"
+#include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
 #include <stdio.h>
@@ -51,10 +52,10 @@ public:
 
     /**\brief Structures to hold datas of a term */
     struct Document {
-        unsigned int ident;
+        NindDocId ident;                //external document identifier (64 bits; the v1 format stores 32)
         unsigned int frequency;
         Document(): ident(0), frequency(0) {}
-        Document(const unsigned int id, const unsigned int freq): ident(id), frequency(freq) {}
+        Document(const NindDocId id, const unsigned int freq): ident(id), frequency(freq) {}
         ~Document() {}
         bool operator< (const Document &doc2) { return (this->ident < doc2.ident); }
     };
@@ -66,6 +67,45 @@ public:
         TermCG(const unsigned char cat, const unsigned int freq): cg(cat), frequency(freq), documents() {}
         ~TermCG() {}
     };
+
+    /**\brief A block of a category's postings (format v2), as its descriptor gives it */
+    struct Block {
+        NindDocId first, last;          //its first and last documents
+        uint64_t docsNb;
+        unsigned int maxFrequency;      //the largest frequency in it
+        unsigned int minLength;         //the shortest document length in it, 0 = unknown
+        uint64_t offset, length;        //in the definition
+    };
+    /**\brief A term's directory: per category, its inline postings or its blocks' descriptors */
+    struct TermDirectory {
+        struct Category {
+            unsigned char cg;
+            unsigned int frequency;
+            uint64_t docsNb;
+            std::vector<Document> inlinePostings;   //a short list (or every list of a v1 file)
+            std::vector<Block> blocks;              //a long list (format v2)
+        };
+        uint64_t offset;                //the definition's place in the file
+        unsigned int length;
+        std::vector<Category> categories;
+    };
+
+    /**\brief Thread-safe (const) read of a term's directory only (format v2: the blocks aren't
+    * read; format v1: everything is inline)
+    *\return true if the term was found */
+    bool getTermDirectory(const unsigned int ident,
+                          TermDirectory &directory,
+                          NindReadBuffer &buffer) const;
+
+    /**\brief Thread-safe (const) read of blocks [firstBlock, endBlock) of a category of a
+    * directory (contiguous in the file: one read), postings appended to postings */
+    void getTermBlocks(const unsigned int ident,
+                       const TermDirectory &directory,
+                       const size_t category,
+                       const size_t firstBlock,
+                       const size_t endBlock,
+                       std::vector<Document> &postings,
+                       NindReadBuffer &buffer) const;
 
     /**\brief Read a full term definition as a list of structures
     *\param ident ident of term
@@ -124,6 +164,30 @@ private:
                             NindReadBuffer &in,
                             std::vector<Document> &postings,
                             std::vector<size_t> &categoryEnds) const;
+    //format v2: the definition's header and directory (in at the definition's first byte)
+    void parseDirectoryV2(const unsigned int ident,
+                          NindReadBuffer &in,
+                          TermDirectory &directory) const;
+    //format v2: one block, in positioned at its first byte, checked against its descriptor
+    void decodeBlock(const unsigned int ident,
+                     const Block &block,
+                     NindReadBuffer &in,
+                     std::vector<Document> &postings) const;
+    //format v2: the whole definition (inline postings and blocks) into flat postings, per category
+    //(category, term frequency) if categories isn't null
+    void decodeTermDefV2(const unsigned int ident,
+                         NindReadBuffer &in,
+                         std::vector<Document> &postings,
+                         std::vector<size_t> &categoryEnds,
+                         std::vector<std::pair<unsigned char, unsigned int> > *categories) const;
+    //format v2: forms the definition (directory, then blocks) in the write buffer
+    void writeTermDefV2(const unsigned int ident,
+                        const std::list<struct TermCG> &termDef);
+public:
+    /**\brief number of postings per block of a long list (format v2; a list of at most this many
+    * documents is written inline) */
+    static const unsigned int BLOCK_SIZE = 128;
+private:
 
     unsigned int m_specificsNumber;
 

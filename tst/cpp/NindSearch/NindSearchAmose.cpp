@@ -110,9 +110,9 @@ int main(int argc, char *argv[]) {
             const unsigned int nbDocs = nindTermAmose.getDocFreq(ident);                        //3.5 getDocFreq()
             cout<<nbDocs<<" documents trouvés"<<endl;
             //recupere l'index inverse pour ce terme
-            list<unsigned int> documents;
+            list<NindDocId> documents;
             nindTermAmose.getDocList(ident, documents);                                         //3.1 getDocList()
-            for (list<unsigned int>::const_iterator it2 = documents.begin(); it2 != documents.end(); it2++) {
+            for (list<NindDocId>::const_iterator it2 = documents.begin(); it2 != documents.end(); it2++) {
                 unsigned int noDoc = (*it2);
                 list<NindLocalIndex::Term> localDef;
                 nindLocalAmose.getLocalDef(noDoc, localDef);

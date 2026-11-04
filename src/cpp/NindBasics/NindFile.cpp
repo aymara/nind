@@ -338,6 +338,9 @@ signed int NindFile::getSInt3() { return m_in.getSInt3(); }
 unsigned int NindFile::getInt4() { return m_in.getInt4(); }
 signed int NindFile::getSInt4() { return m_in.getSInt4(); }
 uint64_t NindFile::getInt5() { return m_in.getInt5(); }
+uint64_t NindFile::getInt6() { return m_in.getInt6(); }
+uint64_t NindFile::getInt8() { return m_in.getInt8(); }
+uint64_t NindFile::getUIntLat64() { return m_in.getUIntLat64(); }
 unsigned int NindFile::getUIntLat() { return m_in.getUIntLat(); }
 signed int NindFile::getSIntLat() { return m_in.getSIntLat(); }
 string NindFile::getString() { return m_in.getString(); }
@@ -417,8 +420,10 @@ void NindFile::putInt3(const unsigned int int4,
 ////////////////////////////////////////////////////////////
 //brief Put a 4-bytes integer into the internal buffer
 //param int4 integer to write as 4-bytes*/
-void NindFile::putInt4(const unsigned int int4)
+void NindFile::putInt4(const uint64_t int4)
 {
+    //document ids are 64 bits: a v1 field of 4 bytes refuses what it can't hold
+    if (int4 > 0xFFFFFFFFull) throw OutOfBoundException("value over 4 bytes " + m_fileName);
     //petit boutiste
     if (m_wbufferEnd - m_wPtr < 4) throw OutWriteBufferException("in write buffer (F) " + m_fileName);
     m_wPtr += 4;
@@ -446,10 +451,48 @@ void NindFile::putInt5(const uint64_t int8)
     m_wPtr[-5] = (int8>>32)&0xFF;
 }
 ////////////////////////////////////////////////////////////
+void NindFile::putInt6(const uint64_t int8)
+{
+    if (int8 > 0xFFFFFFFFFFFFull) throw OutOfBoundException("value over 6 bytes " + m_fileName);
+    if (m_wbufferEnd - m_wPtr < 6) throw OutWriteBufferException("in write buffer (G6) " + m_fileName);
+    m_wPtr += 6;
+    for (int i = 1; i <= 6; i++) m_wPtr[-i] = (unsigned char)((int8 >> (8 * (i - 1))) & 0xFF);
+}
+////////////////////////////////////////////////////////////
+void NindFile::putInt8(const uint64_t int8)
+{
+    if (m_wbufferEnd - m_wPtr < 8) throw OutWriteBufferException("in write buffer (G8) " + m_fileName);
+    m_wPtr += 8;
+    for (int i = 1; i <= 8; i++) m_wPtr[-i] = (unsigned char)((int8 >> (8 * (i - 1))) & 0xFF);
+}
+////////////////////////////////////////////////////////////
+void NindFile::putInt4(const uint64_t int4,
+                       const unsigned int offset)
+{
+    if (int4 > 0xFFFFFFFFull) throw OutOfBoundException("value over 4 bytes " + m_fileName);
+    if ((uint64_t)offset + 4 > (uint64_t)(m_wbufferEnd - m_wbuffer))
+        throw OutWriteBufferException("in write buffer (E4) " + m_fileName);
+    unsigned char *wPtr = m_wbuffer + offset;
+    //en little-endian quelle que soit la plate-forme, comme putInt4
+    for (int i = 0; i < 4; i++) wPtr[i] = (unsigned char)((int4 >> (8 * i)) & 0xFF);
+}
+////////////////////////////////////////////////////////////
+void NindFile::putUIntLat64(const uint64_t int8)
+{
+    if (int8 <= 0xFFFFFFFFull) {
+        putUIntLat(int8);
+        return;
+    }
+    putInt1(0xF8);
+    putInt8(int8);
+}
+////////////////////////////////////////////////////////////
 //brief Put an unsigned latecon integer into the internal buffer
 //param int4 unsigned integer to write as latecon integer*/
-void NindFile::putUIntLat(const unsigned int int4)
+void NindFile::putUIntLat(const uint64_t int4)
 {
+    //a latecon integer holds 32 bits: refuses what it can't hold (EntierULat64 is v2's)
+    if (int4 > 0xFFFFFFFFull) throw OutOfBoundException("value over 32 bits as latecon integer " + m_fileName);
     //il faut que ca aille vite pour les petits nombres
     if (m_wbufferEnd - m_wPtr < 1) throw OutWriteBufferException("in write buffer (H) " + m_fileName);
     m_wPtr += 1;

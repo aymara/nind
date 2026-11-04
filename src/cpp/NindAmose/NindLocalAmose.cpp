@@ -95,7 +95,7 @@ void NindLocalAmose::getTermPositionIndocs(const vector<unsigned int>& termIds,
 //param docId identifier of the document
 //param termType type of terms (0: simple term, 1: multi-term, 2: named entity)
 //param termsSet set de termes uniques dans le document */
-bool NindLocalAmose::getDocTerms(const unsigned int docId,
+bool NindLocalAmose::getDocTerms(const NindDocId docId,
                                  const AmoseTypes termType,
                                  set<string> &termsSet,
                                  unsigned int *unknownTermCount)
@@ -138,7 +138,7 @@ bool NindLocalAmose::getDocTerms(const unsigned int docId,
 ////////////////////////////////////////////////////////////
 //brief get length of a document
 //return  an integer, the number of occurrences of terms    */
-unsigned int NindLocalAmose::getDocLength(const unsigned int docId)
+unsigned int NindLocalAmose::getDocLength(const NindDocId docId)
 {
     //les index locaux du document
     unsigned int localLength;

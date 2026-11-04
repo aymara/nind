@@ -157,7 +157,7 @@ class NindLocalindex(NindIndex):
         :raises Exception: if the file's pad-file envelope is invalid, or
             its specifics block has the wrong size.
         """
-        NindIndex.__init__(self, localindexFileName)
+        NindIndex.__init__(self, localindexFileName, lazy=True)
         if native is None:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         self._has_lexicon_identification = lexicon_identification is not None
@@ -167,6 +167,23 @@ class NindLocalindex(NindIndex):
         if base.endswith(NINDLOCALINDEX_EXT): base = base[:-len(NINDLOCALINDEX_EXT)]
         self._native = native.NindLocalIndex(base, is_writer=False,
                                               lexicon_identification=effective_identification)
+  
+    #######################################################################
+    #trouve les donnejes 
+    def __getattr__(self, name):
+        # the table of external -> internal identifiers, on first use: only the diagnostic
+        # methods (and donneidentifiantsExternes, for indexes written without document
+        # lengths) need it; reading every document's header is O(documents) in Python
+        if name in ('docIdTradExtInt', 'maxIdentifiantInterne') and not self.__dict__.get('_tradEnCours'):
+            self._tradEnCours = True
+            self.__construitTradExtInt()
+            return self.__dict__[name]
+        return NindIndex.__getattr__(self, name)
+
+    def __construitTradExtInt(self):
+        if self.tailleEntreje == 10:
+            raise NotImplementedError('%s: format v2 file; the Python diagnostics read format v1 only '
+                                      '(nind._native reads both)' % self.latFileName)
         #rejcupehre l'adresse et la longueur des spejcifiques
         (offsetSpejcifiques, tailleSpejcifiques) = self.donneSpejcifiques()
         if tailleSpejcifiques != TAILLE_SPEJCIFIQUES: 
@@ -188,9 +205,7 @@ class NindLocalindex(NindIndex):
                 raise Exception('%s : %d pas trouvé à %08X'%(self.latFileName, ident, offsetDejfinition+1))
             noDocExterne = self.litNombre4()
             self.docIdTradExtInt[noDocExterne] = noDocInterne       
-  
-    #######################################################################
-    #trouve les donnejes 
+
     def __donneDonnejes(self, identifiant):
         #lit la définition du mot
         (offsetDejfinition, longueurDejfinition) = self.donneAdresseDejfinition(identifiant)
@@ -344,38 +359,34 @@ class NindLocalindex(NindIndex):
     def dumpeFichier(self, outFile):
         """Dump every document's full term/position data to a text file, for inspection.
 
-        French *dumpeFichier* = "dumps file".
+        French *dumpeFichier* = "dumps file". Read through ``nind._native``:
+        formats v1 and v2.
 
         :param outFile: a writable text file object (UTF-8).
         :return: the number of documents written.
         """
         nbLignes = 0
-        #trouve le max des identifiants
-        maxIdent = self.donneMaxIdentifiant()
-        for identifiant in range(maxIdent):
-            #trouve les donnejes 
-            trouvej, longueurDonnejes, tailleExtension, identifiantExterne = self.__donneDonnejes(identifiant)
-            if not trouvej: continue      #identifiant pas trouve
+        #par identifiant interne croissant
+        for identifiantExterne, identifiant in sorted(self._native.get_doc_ident_pairs(), key=lambda pair: pair[1]):
+            dejfinition = self._native.get_local_def(identifiantExterne)
+            if dejfinition is None: continue      #document effacej
             nbLignes +=1
             outFile.write('%07d/%07d:: '%(identifiant, identifiantExterne))
-            #examine les données
-            noTerme = localisationAbsolue = 0
-            finDonnejes = self.tell() + longueurDonnejes
-            while self.tell() < finDonnejes:
-                #<identTermeRelatif> <catejgorie> <nbreLocalisations> <localisations>
-                noTerme += self.litNombreSLat()
-                catejgorie = self.litNombre1()
-                nbreLocalisations = self.litNombre1()
-                outFile.write('[%d](%d)'%(noTerme, catejgorie))
-                localisationsList = []
-                for i in range (nbreLocalisations):
-                    #<localisationRelatif> <longueur>
-                    localisationAbsolue += self.litNombreSLat()
-                    longueur = self.litNombre1()
-                    localisationsList.append('%d(%d)'%(localisationAbsolue, longueur))
-                outFile.write('<%s> '%(','.join(localisationsList)))
+            outFile.write(self.__formateDocument(dejfinition))
             outFile.write('\n')
         return nbLignes
+
+    #les termes d'un document et leurs localisations
+    @staticmethod
+    def __formateDocument(dejfinition):
+        rejsultat = StringIO()
+        for terme in dejfinition:
+            #<identTerme> <catejgorie> <localisations>
+            rejsultat.write('[%d](%d)'%(terme.term, terme.cg))
+            localisationsList = ['%d(%d)'%(localisation.position, localisation.length)
+                                 for localisation in terme.localisation]
+            rejsultat.write('<%s> '%(','.join(localisationsList)))
+        return rejsultat.getvalue()
 
     #######################################################################
     def donneidentifiantsExternes(self):
@@ -388,7 +399,8 @@ class NindLocalindex(NindIndex):
 
         :return: a list of ``(noDocExterne, noDocInterne)`` tuples.
         """
-        return list(self.docIdTradExtInt.items())
+        # through nind._native: it reads both formats (the Python table below, format v1 only)
+        return [tuple(pair) for pair in self._native.get_doc_ident_pairs()]
 
     #######################################################################
     #dejcode les donnejes associejes ah un terme
@@ -396,37 +408,17 @@ class NindLocalindex(NindIndex):
         """Format one document's full term/position data as a human-readable string.
 
         French *afficheDocument* = "displays document". Same content as
-        one :meth:`dumpeFichier` line, computed for a single document.
+        one :meth:`dumpeFichier` line, computed for a single document. Read
+        through ``nind._native``: formats v1 and v2.
 
         :param noDocExterne: the document's external identifier.
         :return: a formatted string, or ``"<id> : inconnu"`` if
             ``noDocExterne`` is unknown.
         """
-        rejsultat = StringIO()
-        #trouve l'identifiant interne
-        if noDocExterne not in self.docIdTradExtInt: return '%d : inconnu'%(noDocExterne)
-        noDocInterne = self.docIdTradExtInt[noDocExterne]
-        rejsultat.write('%07d/%07d:: '%(noDocInterne, noDocExterne))
-        #trouve les donnejes 
-        trouvej, longueurDonnejes, tailleExtension, identifiantExterne = self.__donneDonnejes(noDocInterne)
-        if not trouvej: longueurDonnejes = 0                #identifiant pas trouvej, document effacej
-        #examine les données
-        noTerme = localisationAbsolue = 0
-        finDonnejes = self.tell() + longueurDonnejes
-        while self.tell() < finDonnejes:
-            #<identTermeRelatif> <catejgorie> <nbreLocalisations> <localisations>
-            noTerme += self.litNombreSLat()
-            catejgorie = self.litNombre1()
-            nbreLocalisations = self.litNombre1()
-            rejsultat.write('[%d](%d)'%(noTerme, catejgorie))
-            localisationsList = []
-            for i in range (nbreLocalisations):
-                #<localisationRelatif> <longueur>
-                localisationAbsolue += self.litNombreSLat()
-                longueur = self.litNombre1()
-                localisationsList.append('%d(%d)'%(localisationAbsolue, longueur))
-            rejsultat.write('<%s> '%(','.join(localisationsList)))
-        return rejsultat.getvalue()
+        dejfinition = self._native.get_local_def(noDocExterne) if 0 <= noDocExterne < 2 ** 64 else None
+        if dejfinition is None: return '%d : inconnu'%(noDocExterne)
+        noDocInterne = dict(self._native.get_doc_ident_pairs())[noDocExterne]
+        return '%07d/%07d:: '%(noDocInterne, noDocExterne) + self.__formateDocument(dejfinition)
     #######################################################################
         
 if __name__ == '__main__':
