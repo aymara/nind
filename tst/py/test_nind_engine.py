@@ -1017,3 +1017,20 @@ def test_concurrent_searches_while_a_new_build_is_published(tmp_path):
             assert result in (old[i], new[i])
     # once published, every new call answers from the new build
     assert one_pass(0) == new
+
+
+def test_opening_an_engine_parses_nothing_in_python(tmp_path):
+    # the readers' lookups go through nind._native; the Python envelope (indirection blocks,
+    # the local index's id table) is parsed on first use, by the diagnostic methods only
+    _, engine = build_with(tmp_path, "lazy", ["alpha beta", "beta gamma", "gamma"])
+    snapshot = engine._snapshot
+    assert engine.search("beta") and engine.get_df("gamma") == 2
+    for reader in (snapshot.lexicon, snapshot.term_index, snapshot.local_index):
+        assert "entriesBlocksMap" not in reader.__dict__
+    assert "docIdTradExtInt" not in snapshot.local_index.__dict__
+    assert "nombreIndirection" not in snapshot.lexicon.__dict__
+    # ... and still is, on demand
+    assert len(snapshot.local_index.docIdTradExtInt) == 3
+    assert snapshot.lexicon.nombreIndirection > 0
+    assert snapshot.term_index.entriesBlocksMap
+    snapshot.term_index.analyseFichierIndex(False)

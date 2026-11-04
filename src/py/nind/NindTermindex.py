@@ -143,7 +143,7 @@ class NindTermindex(NindIndex):
             methods work without it.
         :raises Exception: if the file's pad-file envelope is invalid.
         """
-        NindIndex.__init__(self, termindexFileName)
+        NindIndex.__init__(self, termindexFileName, lazy=True)
         if native is None:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
         self._has_lexicon_identification = lexicon_identification is not None
