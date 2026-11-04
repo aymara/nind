@@ -3,6 +3,7 @@
 #include "TestTempDir.h"
 #include "doctest.h"
 #include <list>
+#include <vector>
 #include <string>
 using namespace latecon::nindex;
 using namespace std;
@@ -48,6 +49,72 @@ TEST_CASE("NindTermIndexTest.SetThenGetTermDefRoundTrips") {
     REQUIRE_EQ(2u, readSpecifics.size());
     CHECK_EQ(10u, readSpecifics.front());
     CHECK_EQ(20u, readSpecifics.back());
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.GetTermPostingsMatchesGetTermDef") {
+    TestTempDir tmp;
+    NindTermIndex index(tmp.file("postings"), true, kNoCheck, 0, 8);
+    list<TermCG> written;
+    written.push_back(TermCG(1, 4));
+    written.back().documents.push_back(Document(2, 1));
+    written.back().documents.push_back(Document(70000, 3));
+    written.push_back(TermCG(7, 2));
+    written.back().documents.push_back(Document(2, 2));
+    written.push_back(TermCG(9, 0));                       // a category without documents
+    written.push_back(TermCG(3, 1));
+    written.back().documents.push_back(Document(4000000000u, 1));
+    index.setTermDef(5, written, kNoCheck, list<unsigned int>());
+
+    vector<Document> postings(3, Document(99, 99));        // cleared, capacity reused
+    vector<size_t> categoryEnds(2, 42);
+    REQUIRE(index.getTermPostings(5, postings, categoryEnds));
+    vector<size_t> expectedEnds;
+    expectedEnds.push_back(2);
+    expectedEnds.push_back(3);
+    expectedEnds.push_back(3);
+    expectedEnds.push_back(4);
+    CHECK(categoryEnds == expectedEnds);
+    size_t i = 0;
+    for (list<TermCG>::const_iterator cg = written.begin(); cg != written.end(); cg++)
+        for (list<Document>::const_iterator doc = cg->documents.begin(); doc != cg->documents.end(); doc++, i++) {
+            REQUIRE(i < postings.size());
+            CHECK_EQ(doc->ident, postings[i].ident);
+            CHECK_EQ(doc->frequency, postings[i].frequency);
+        }
+    CHECK_EQ(i, postings.size());
+
+    CHECK_FALSE(index.getTermPostings(3, postings, categoryEnds));     // never written
+    CHECK_FALSE(index.getTermPostings(999, postings, categoryEnds));   // out of range
+    CHECK(postings.empty());
+    CHECK(categoryEnds.empty());
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.DefinitionOver16MiBIsRefused") {
+    // a definition's length is a 3-byte field: a longer one used to be written truncated,
+    // leaving a corrupt file; it is refused instead, and the index stays readable
+    TestTempDir tmp;
+    NindTermIndex index(tmp.file("big"), true, kNoCheck, 0, 8);
+    list<TermCG> small;
+    small.push_back(TermCG(0, 1));
+    small.back().documents.push_back(Document(3, 1));
+    index.setTermDef(1, small, kNoCheck, list<unsigned int>());
+
+    list<TermCG> big;
+    big.push_back(TermCG(0, 0));
+    // 2-byte deltas, 2-byte frequencies: 4 bytes per posting, ~18 MB
+    for (unsigned int i = 0; i < 4500000; i++) big.back().documents.push_back(Document(i * 900, 200));
+    CHECK_THROWS_AS(index.setTermDef(2, big, kNoCheck, list<unsigned int>()), OutOfBoundException);
+    big.clear();
+
+    list<TermCG> read;
+    REQUIRE(index.getTermDef(1, read));
+    REQUIRE_EQ(1u, read.size());
+    CHECK_EQ(3u, read.front().documents.front().ident);
+    read.clear();
+    CHECK_FALSE(index.getTermDef(2, read));
+    NindTermIndex reader(tmp.file("big"), false, kNoCheck, 0);
+    read.clear();
+    CHECK(reader.getTermDef(1, read));
 }
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindTermIndexTest.UnknownIdentReturnsFalse") {

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string>
 #include <list>
+#include <vector>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
@@ -72,6 +73,16 @@ public:
     *\return true if term was found, false otherwise */
     bool getTermDef(const unsigned int ident,
                     std::list<struct TermCG> &termDef);
+
+    /**\brief Read the postings of a term into flat, reusable arrays (no allocation per posting)
+    *\param ident ident of term
+    *\param postings receives (document, frequency) of every category of the term, one category
+    * after the other, each in ascending document order (cleared first; its capacity is kept)
+    *\param categoryEnds receives the end, in postings, of each category, in file order (cleared first)
+    *\return true if term was found, false otherwise (both left empty) */
+    bool getTermPostings(const unsigned int ident,
+                         std::vector<Document> &postings,
+                         std::vector<size_t> &categoryEnds);
 
     /**\brief Read specifics as a list of words
     *\param specifics list to receive all specifics */

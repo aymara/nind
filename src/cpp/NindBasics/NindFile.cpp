@@ -469,6 +469,8 @@ void NindFile::putInt2(const unsigned int int4)
 //param int4 integer to write as 3-bytes*/
 void NindFile::putInt3(const unsigned int int4)
 {
+    //a value over 3 bytes would be written truncated: a corrupt file (e.g. a definition over 16 MiB)
+    if (int4 > 0xFFFFFFu) throw OutOfBoundException("value over 3 bytes " + m_fileName);
     //petit boutiste
     if (m_wbufferEnd - m_wPtr < 3) throw OutWriteBufferException("in write buffer (D) " + m_fileName);
     m_wPtr += 3;
@@ -484,6 +486,7 @@ void NindFile::putInt3(const unsigned int int4)
 void NindFile::putInt3(const unsigned int int4,
                        const unsigned int offset)
 {
+    if (int4 > 0xFFFFFFu) throw OutOfBoundException("value over 3 bytes " + m_fileName);
     //petit boutiste
     if ((uint64_t)offset + 3 > (uint64_t)(m_wbufferEnd - m_wbuffer))
         throw OutWriteBufferException("in write buffer (E) " + m_fileName);
@@ -512,6 +515,8 @@ void NindFile::putInt4(const unsigned int int4)
 //param int8 long integer to write as 5-bytes*/
 void NindFile::putInt5(const uint64_t int8)
 {
+    //a value over 5 bytes would be written truncated (e.g. an offset past 1 TiB)
+    if (int8 > 0xFFFFFFFFFFull) throw OutOfBoundException("value over 5 bytes " + m_fileName);
     //gros boutiste
     if (m_wbufferEnd - m_wPtr < 5) throw OutWriteBufferException("in write buffer (G) " + m_fileName);
     m_wPtr += 5;

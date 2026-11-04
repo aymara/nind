@@ -502,7 +502,7 @@ class NindEngine:
 
         return score
 
-    def search(self, query, top_k=10, doc_names=False):
+    def search(self, query, top_k=10, doc_names=False, k1=1.5, b=0.75):
         """Search the corpus with BM25 and return the top-scoring documents.
 
         :param query: the query text.
@@ -510,6 +510,8 @@ class NindEngine:
         :param doc_names: return the documents' names (see :meth:`doc_name`;
             ``None`` for a document without name) instead of their
             identifiers in the index - like pyserini's hits' ``docid``.
+        :param k1: BM25 term-frequency saturation parameter.
+        :param b: BM25 document-length normalization parameter.
         :return: a list of ``(doc_id, score)`` tuples (``(name, score)``
             with ``doc_names``), sorted by descending score, of length at
             most ``top_k`` (only documents with a positive score are included).
@@ -522,7 +524,7 @@ class NindEngine:
         """
         limit = top_k if isinstance(top_k, int) and top_k >= 0 else -1
         with self._session() as snapshot:
-            results = snapshot.search(self.tokenize(query), 1.5, 0.75, limit)
+            results = snapshot.search(self.tokenize(query), k1, b, limit)
             if limit < 0:
                 results = results[:top_k]
             if doc_names:

@@ -108,6 +108,21 @@ def test_search_respects_top_k(engine):
     assert len(results) == 1
 
 
+def test_search_bm25_parameters(engine):
+    # the defaults are those of bm25_score
+    assert engine.search("dog cat") == [(d, engine.bm25_score("dog cat", d)) for d, _ in engine.search("dog cat")]
+    for k1, b in ((0.9, 0.4), (1.2, 0.0), (2.0, 1.0)):
+        results = engine.search("dog cat", k1=k1, b=b)
+        assert results == [(d, engine.bm25_score("dog cat", d, k1=k1, b=b)) for d, _ in results]
+        assert {d for d, _ in results} == {0, 1}
+    # b = 0: no length normalization; k1 = 0: term frequency ignored, docs 0 and 1 tie on "dog"
+    assert [s for _, s in engine.search("dog", k1=0.0, b=0.0)] == [engine.bm25_score("dog", 0, k1=0.0, b=0.0)] * 2
+    # the per-document length normalization is cached for the last (k1, b): switching back and forth
+    for k1, b in ((1.5, 0.75), (0.9, 0.4), (1.5, 0.75), (1.5, 0.4), (0.9, 0.4)) * 2:
+        results = engine.search("dog cat bird", k1=k1, b=b)
+        assert results == [(d, engine.bm25_score("dog cat bird", d, k1=k1, b=b)) for d, _ in results], (k1, b)
+
+
 def test_underlying_files_are_structurally_consistent(engine):
     engine.lexicon.analyseFichierLexiconindex(False)   # raises on inconsistency
     assert engine.term_index.analyseFichierIndex(False) is True
@@ -830,6 +845,27 @@ def test_search_with_several_categories_per_term(tmp_path):
     for query in ["cat", "cat dog", "cat cat bird"]:
         assert engine.search(query) == full_scan_search(engine, query), query
     assert [doc_id for doc_id, _ in engine.search("cat")] == [1, 3, 0]   # tf 3; tf 2 in 1 token; tf 2 in 2
+
+
+def test_search_with_sparse_document_ids(tmp_path):
+    # ids far above the number of documents: the scorer finds positions by binary search
+    # instead of a dense table; its scratch arrays are reused (and reset) from one search to the next
+    rng = random.Random(7)
+    words = ["s%d" % i for i in range(15)]
+    texts = [" ".join(rng.choice(words) for _ in range(rng.randint(1, 12))) for _ in range(30)]
+    indexer, engine = build_with(tmp_path, "sparse", texts)
+    with indexer.update() as update:
+        for i, doc_id in enumerate((3_000_000, 4_000_000_000, 123_456_789)):
+            update.add_text(texts[i] + " s0 rare" + "abc"[i], doc_id=doc_id)
+    engine = NindEngine(str(tmp_path / "sparse"))
+    assert engine.total_docs == 33
+    queries = ["s0", "s0 s1", "rareb", "rarec s3 s3", "s14 unknown", " ".join(words)]
+    expected = {query: full_scan_search(engine, query, None) for query in queries}
+    assert [doc_id for doc_id, _ in expected["rareb"]] == [4_000_000_000]
+    for _ in range(3):
+        for query in queries:
+            assert engine.search(query, top_k=None) == expected[query], query
+            assert engine.search(query, top_k=5) == expected[query][:5], query
 
 
 def test_search_scales_with_the_postings_not_the_corpus(tmp_path):

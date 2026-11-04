@@ -276,7 +276,12 @@ void buildTermIndex(const string &base) {
 void readTermIndex(const string &base) {
     NindTermIndex index(base, false, kNoCheck, 2);
     list<TermCG> def;
-    for (unsigned int id = 0; id < 12; id++) index.getTermDef(id, def);
+    vector<Document> postings;
+    vector<size_t> categoryEnds;
+    for (unsigned int id = 0; id < 12; id++) {
+        index.getTermDef(id, def);
+        index.getTermPostings(id, postings, categoryEnds);
+    }
     list<unsigned int> specifics;
     index.getSpecificWords(specifics);
     index.analyseIndex();

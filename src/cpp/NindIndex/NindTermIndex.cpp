@@ -123,6 +123,48 @@ bool NindTermIndex::getTermDef(const unsigned int ident,
     return true;
 }
 ////////////////////////////////////////////////////////////
+//brief Read the postings of a term into flat, reusable arrays (no allocation per posting)
+//param ident ident of term
+//param postings receives (document, frequency) of every category, one after the other
+//param categoryEnds receives the end, in postings, of each category, in file order
+//return true if term was found, false otherwise */
+bool NindTermIndex::getTermPostings(const unsigned int ident,
+                                    vector<Document> &postings,
+                                    vector<size_t> &categoryEnds)
+{
+    postings.clear();
+    categoryEnds.clear();
+    const bool existe = getDefinition(ident);
+    if (!existe) return false;
+    //same format and checks as getTermDef
+    //<flagDejfinition=17> <identifiantTerme> <longueurDonnejes> <donnees>
+    if (m_file.getInt1() != FLAG_DEJFINITION)
+        throw NindTermIndexException("NindTermIndex::getTermPostings A : " + m_fileName);
+    const unsigned int identTerme = m_file.getInt4();
+    if (identTerme != ident)
+        throw NindTermIndexException("NindTermIndex::getTermPostings B : " + m_fileName);
+    const unsigned int longueurDonnejes = m_file.getInt3();
+    m_file.setEndInBuffer(longueurDonnejes);
+    //<flagCg> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
+    while (!m_file.endOfInBuffer()) {
+        if (m_file.getInt1() != FLAG_CG)
+            throw NindTermIndexException("NindTermIndex::getTermPostings C : " + m_fileName);
+        m_file.getInt1();                       //catejgorie
+        m_file.getUIntLat();                    //frejquenceTerme
+        const unsigned int nbreDocs = m_file.getUIntLat();
+        //nbreDocs comes from the file: no reserve on it, every read is bounded by the buffer
+        unsigned int identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
+        for (unsigned int it = 0; it != nbreDocs; it++) {
+            //<identDocRelatif> <frejquenceDoc>
+            identDocument += m_file.getUIntLat();
+            const unsigned int frejquenceDoc = m_file.getUIntLat();
+            postings.push_back(Document(identDocument, frejquenceDoc));
+        }
+        categoryEnds.push_back(postings.size());
+    }
+    return true;
+}
+////////////////////////////////////////////////////////////
 //brief Read specifics as a list of words
 //param specifics list to receive all specifics */
 void NindTermIndex::getSpecificWords(list<unsigned int> &specifics)
