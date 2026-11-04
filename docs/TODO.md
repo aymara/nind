@@ -20,9 +20,8 @@ of 3.0.0 (format v2).
   some?).
 - [x] Bit-packed blocks (flag 73): 18% smaller index, MaxScore 19–26% faster
   (nind ≥ 3.1 needed to read them).
-- [ ] Everything in the C++ API (Amose and other clients use it directly):
-  move `Bm25Scorer` (block-max MaxScore) and `IndexBuilder` out of
-  `src/cpp/NindPy/bindings.cpp` into the `NindIndex` library, and
+- [x] Everything in the C++ API (Amose and other clients use it directly):
+  `NindBm25Scorer` (block-max MaxScore), `NindIndexBuilder`, and
   `IndexUpdate`'s change logic (done: `NindIndexUpdate`); Python keeps the
   generations and publishing.
 
