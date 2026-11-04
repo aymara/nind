@@ -22,4 +22,4 @@ set_target_properties(NindBasics PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSIO
 install(TARGETS NindBasics DESTINATION lib)
 
 ########### install files ###############
-install(FILES NindFile.h NindPadFile.h NindSignalCatcher.h DESTINATION include/NindBasics)
+install(FILES NindFile.h NindPadFile.h NindSignalCatcher.h NindReadBuffer.h NindDocId.h DESTINATION include/NindBasics)

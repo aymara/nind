@@ -46,7 +46,10 @@ public:
 
     virtual ~NindTermAmose();
 
-    /**\brief Add doc references to the specified term
+    /**\brief Add doc references to the specified term (a document already there: its frequency
+    * increased). Documents after the term's last one (the usual case: ids given in increasing
+    * order) are appended in place, only the last block rewritten, when the definition has room
+    * (NindTermIndex::updateTermDef); otherwise the definition is rewritten whole, with room.
     *\param ident ident of term
     *\param type type of term (SIMPLE_TERM, MULTI_TERM, NAMED_ENTITY)
     *\param newDocuments list of documents ids + frequencies where term is in
@@ -73,6 +76,21 @@ public:
     *\return true if term was found, false otherwise */
     bool getDocList(const unsigned int termId,
                     std::list<NindDocId> &documentIds);
+
+    /** \brief Read the documents where a term is indexed, with their frequencies (no need to
+    * read the local index for them), by increasing document id
+    *\param termId ident of term
+    *\param postings receives the (document id, frequency) pairs (the term's first category, as
+    * getDocList)
+    *\return true if term was found, false otherwise */
+    bool getDocPostings(const unsigned int termId,
+                        std::vector<Document> &postings);
+
+    /** \brief Thread-safe (const) getDocPostings: several threads can read one term index at once,
+    * each with its own buffer (see NindFile::readAt); a writer in bulk mode can't */
+    bool getDocPostings(const unsigned int termId,
+                        std::vector<Document> &postings,
+                        NindReadBuffer &buffer) const;
 
     /** \brief Number of occurrences in index of a given term
     *\param termId: identifier of the term

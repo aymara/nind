@@ -18,3 +18,8 @@ add_subdirectory(NindLexicon)
 add_subdirectory(NindRetrolexicon)
 add_subdirectory(NindIndex)
 add_subdirectory(NindAmose)
+
+# every installed header compiles on its own against the installed headers only
+add_test(NAME InstalledHeaders
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tst/cpp/install/check-installed-headers.sh ${CMAKE_BINARY_DIR} ${CMAKE_CXX_COMPILER})
+set_tests_properties(InstalledHeaders PROPERTIES TIMEOUT 300)
