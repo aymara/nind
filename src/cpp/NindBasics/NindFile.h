@@ -113,8 +113,9 @@ public:
     /**\brief Read bytesNb bytes at offset into buffer, without moving the file position nor
     * touching the internal buffer: thread-safe (const), several threads can read one file at
     * once, each into its own buffer. Positioned reads (pread, ReadFile with an offset) on a
-    * read-only handle of its own, opened at the first positioned read (so that a file only
-    * read sequentially keeps one descriptor). Checks the bytes are in the file.
+    * descriptor that doesn't move the sequential API's position: on POSIX the stream's own
+    * (pread takes an offset and leaves the position alone), on Windows a read-only handle of
+    * its own, opened at the first positioned read. Checks the bytes are in the file.
     * On Windows, concurrent reads of one handle are serialized by the system: correct, but
     * not parallel.
     *\param offset where to read in the file
@@ -315,8 +316,8 @@ private:
     unsigned char *m_wbufferEnd;     //fin buffer d'ecriture
     unsigned char *m_wPtr;           //pointeur buffer d'ecriture
     NindReadBuffer m_in;             //buffer de lecture (et ses dejcodeurs)
-    //descripteur (POSIX) ou HANDLE (Windows) en lecture seule, pour readAt : ouvert au premier
-    //besoin (readHandle), -1 sinon
+    //HANDLE (Windows) en lecture seule pour readAt, ouvert au premier besoin (readHandle), -1 sinon ;
+    //inutiliseje sous POSIX (readAt y lit par le descripteur du FILE*)
     mutable std::atomic<intptr_t> m_readHandle;
     mutable std::mutex m_readHandleMutex;
     intptr_t readHandle() const;
@@ -366,7 +367,8 @@ inline long int NindFile::getFileSize() const
 //return identifiant of file */
 inline long int NindFile::getFileIdent() const
 {
-    return (long int)m_file;
+    //par intptr_t : sous Windows, long fait 32 bits et un pointeur 64 (une erreur pour GCC/MinGW)
+    return (long int)(intptr_t)m_file;
 }
 ////////////////////////////////////////////////////////////
 //brief Return the effective size of read buffer 

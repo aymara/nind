@@ -29,11 +29,7 @@
 #include <windows.h>
 #else
 #include <sys/file.h>
-#include <fcntl.h>
 #include <unistd.h>
-#ifndef O_CLOEXEC
-#define O_CLOEXEC 0
-#endif
 #endif
 //#include <iostream>
 using namespace latecon::nindex;
@@ -135,37 +131,35 @@ void NindFile::close()
         fclose(m_file);
         m_file = 0;
     }
+#ifdef _WIN32
     std::lock_guard<std::mutex> lock(m_readHandleMutex);
     const intptr_t handle = m_readHandle.exchange(-1);
-    if (handle != -1) {
-#ifdef _WIN32
-        CloseHandle((HANDLE)handle);
-#else
-        ::close((int)handle);
+    if (handle != -1) CloseHandle((HANDLE)handle);
 #endif
-    }
 }
 ////////////////////////////////////////////////////////////
-//le descripteur en lecture seule des lectures positionnejes (readAt), ouvert au premier besoin :
-//elles ne dejplacent pas la position du FILE* de l'API sejquentielle (sous Windows, ReadFile avec
-//un dejcalage dejplace le pointeur du handle, d'oug un handle sejparej). -1 s'il ne s'ouvre pas.
+//le descripteur des lectures positionnejes (readAt) : elles ne doivent pas dejplacer la position
+//du FILE* de l'API sejquentielle. POSIX : pread ne la dejplace pas, c'est donc celui du FILE*
+//(pas de 2e descripteur, et un fichier supprimej depuis son ouverture reste lisible). Windows :
+//ReadFile avec un dejcalage dejplace le pointeur du handle, d'oug un handle ah lui, ouvert au
+//premier besoin (un fichier ouvert n'y est pas supprimable). -1 si aucun.
 intptr_t NindFile::readHandle() const
 {
+#ifndef _WIN32
+    return (m_file != 0) ? (intptr_t)fileno(m_file) : -1;
+#else
     intptr_t handle = m_readHandle.load(std::memory_order_acquire);
     if (handle != -1) return handle;
     std::lock_guard<std::mutex> lock(m_readHandleMutex);
     handle = m_readHandle.load(std::memory_order_acquire);
     if (handle != -1 || m_file == 0) return handle;
-#ifdef _WIN32
     HANDLE opened = CreateFileA(m_fileName.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     handle = (opened == INVALID_HANDLE_VALUE) ? -1 : (intptr_t)opened;
-#else
-    handle = ::open(m_fileName.c_str(), O_RDONLY | O_CLOEXEC);
-#endif
     m_readHandle.store(handle, std::memory_order_release);
     return handle;
+#endif
 }
 ////////////////////////////////////////////////////////////
 //brief Size of the file now, from the read handle (thread-safe)
