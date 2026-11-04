@@ -308,6 +308,84 @@ What the decisions reach beyond the term index's grammar:
   large N, scoring block by block into a bounded accumulator (document-at-a-
   time over blocks) replaces it.
 
+## The v2 grammar
+
+As precise as the v1 grammar in the source comments, written before the code
+(principle 2). Only what changes from v1 is shown; the retrolexicon and the
+identification block (`<maxIdentifiant>` and `<dateHeure>`, both `Entier4`)
+are unchanged.
+
+```
+// integers
+<EntierULat64>          ::= <EntierULat>                        // values < 2^32: as in v1
+                          | <flagULat64=0xF8> <Entier8>          // values >= 2^32
+<Entier6>               ::= <Octet>{6}                           // big-endian, as Entier5
+<Entier8>               ::= <Octet>{8}                           // big-endian
+
+// NindPadFile / NindIndex envelope (lexicon, term and local indexes)
+<fichier>               ::= <tailleEntreje=10> <tailleSpejcifiques> { <blocIndexej> <blocEnVrac> }
+                            <blocSpejcifique> <blocIdentification>
+<blocIndexej>           ::= <flagIndexej=47> <addrBlocSuivant> <nombreIndex> { <indirection> }
+<addrBlocSuivant>       ::= <Entier6>
+<indirection>           ::= <offsetDejfinition> <longueurDejfinition>
+<offsetDejfinition>     ::= <Entier6>
+<longueurDejfinition>   ::= <Entier4>
+
+// .nindlexiconindex
+<dejfinition>           ::= <flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
+<identifiantHash>       ::= <Entier4>
+<longueurDonnejes>      ::= <Entier4>
+
+// .nindlocalindex
+<dejfinition>           ::= <flagDejfinition=19> <identifiantDoc> <identifiantExterne>
+                            <longueurDonnejes> <donnejesDoc>
+<identifiantDoc>        ::= <Entier4>
+<identifiantExterne>    ::= <Entier8>
+<longueurDonnejes>      ::= <Entier4>
+
+// .nindtermindex
+<dejfinition>           ::= <flagDejfinition=23> <identifiantTerme> <longueurDonnejes> { <catejgorieV2> }
+<identifiantTerme>      ::= <Entier4>
+<longueurDonnejes>      ::= <Entier4>
+<catejgorieV2>          ::= <flagCg=67> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
+                            ( <postingsEnLigne>              // nbreBlocs = 0
+                            | { <descripteurBloc> } )        // nbreBlocs > 0
+<catejgorie>            ::= <Entier1>
+<frejquenceTerme>       ::= <EntierULat64>
+<nbreDocs>              ::= <EntierULat64>
+<nbreBlocs>             ::= <EntierULat>
+<postingsEnLigne>       ::= { <identDocRelatif> <frejquenceDoc> }      // nbreDocs times
+<descripteurBloc>       ::= <premierDocRelatif> <dernierDocRelatif> <nbreDocsBloc>
+                            <frejquenceMax> <longueurMin> <offsetBloc> <longueurBloc>
+<premierDocRelatif>     ::= <EntierULat64>      // from the previous block's last document (0 first)
+<dernierDocRelatif>     ::= <EntierULat64>      // from this block's first document
+<nbreDocsBloc>          ::= <EntierULat>
+<frejquenceMax>         ::= <EntierULat>        // largest frequency in the block
+<longueurMin>           ::= <EntierULat>        // shortest document length in the block, 0 = unknown
+<offsetBloc>            ::= <Entier6>
+<longueurBloc>          ::= <EntierULat>
+<bloc>                  ::= <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
+                            { <identDocRelatif> <frejquenceDoc> }      // the first one relative to premierDoc
+<identDocRelatif>       ::= <EntierULat64>
+<frejquenceDoc>         ::= <EntierULat>
+```
+
+- Blocks are written in the bulk area ("en vrac") like definitions and are
+  addressed only by their descriptor; the indirection still points at the
+  definition (the directory). A block repeats its term and category, so a
+  descriptor pointing at the wrong place is detected.
+- The block size (128 by default) is the writer's: readers only follow the
+  descriptors, so blocks of different sizes can coexist (a block split by an
+  update holds fewer).
+- `<longueurMin>` is 0 when the writer doesn't know the documents' lengths
+  (Amose's writers today): a top-k search then bounds the block by its max
+  frequency alone.
+- Every count, offset and length above is read from the file: bounded
+  against the definition or the file before use, never used to `reserve`.
+- A two-level directory isn't needed at first: a category of 7.7M documents
+  (MS MARCO's `the`) has ~60k descriptors, ~1 MB, well below the 4-byte
+  length.
+
 ## Implementation order
 
 Each step keeps every test passing (ASan, TSan, golden v1 files) and is
