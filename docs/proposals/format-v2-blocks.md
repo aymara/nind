@@ -475,11 +475,27 @@ uses MaxScore only when `top_k * PRUNING_DOCS_PER_RESULT <= documents`
 the corpus (2.7 ms → 14.4 ms for 4 times the documents): its score array
 (8 bytes per document) no longer fits in the cache.
 
+**With `<longueurMin>` filled.** Writers that know the documents' lengths now
+fill it: `IndexBuilder`, `IndexUpdate` and `merge_indexes(doc_ids=,
+doc_lengths=)`, through `NindTermIndex::setDocumentLengths`. Blocks are then
+bounded by their own shortest document. Native scorer, µs per query, 500
+queries, exhaustive → MaxScore (ratio). The results are identical:
+
+| corpus | k = 10 | k = 100 | k = 1000 |
+|---|---|---|---|
+| FiQA (57.6k) | 675 → 593 (0.88) | 680 → 893 (1.31) | 940 → 1455 (1.55) |
+| MS MARCO 4M | 10245 → 3233 (0.32) | 10204 → 5314 (0.52) | 10730 → 8183 (0.76) |
+| MS MARCO 8.8M | 25199 → 5810 (0.23) | 25317 → 10136 (0.40) | 25958 → 15360 (0.59) |
+| MS MARCO 8.8M, stopwords kept | 202775 → 8708 (0.04) | 197099 → 14424 (0.07) | 197772 → 27601 (0.14) |
+
+At 4M, `<longueurMin>` speeds MaxScore up by 7% at k = 10 (3473 → 3233 µs)
+and by 12% at k = 1000 (9293 → 8183 µs). MaxScore wins at every k on the
+target sizes. It loses only where a corpus has few documents per result
+(FiQA, 1,920 documents per result or fewer). The threshold of 4,000
+documents per result is consistent with every measurement and is kept.
+
 Still open:
 
-- **Tighter bounds.** The writers don't fill `<longueurMin>` yet (0: the
-  bound uses the corpus's shortest document); `IndexBuilder` knows the
-  lengths.
 - **Faster large k.** Use the exhaustive search below a document count, or
   keep a score array instead of the candidates once θ stops rising.
 - **Several categories** (Amose) aren't pruned.

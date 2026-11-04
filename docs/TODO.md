@@ -6,7 +6,7 @@ of 3.0.0 (format v2).
 
 ## In progress (branch `v2-perf`)
 
-- [ ] Writers fill each block's `<longueurMin>` (the shortest document length
+- [x] Writers fill each block's `<longueurMin>` (the shortest document length
   in the block: tighter MaxScore bounds); MaxScore's threshold
   (`PRUNING_DOCS_PER_RESULT`) measured again at the target sizes (≥ 4M
   documents; 1–2M isn't a target).
