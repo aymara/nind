@@ -30,6 +30,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <shared_mutex>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
@@ -73,6 +74,12 @@ public:
     bool getLocalDef(const unsigned int ident,
                      std::list<struct Term> &localDef);
 
+    /**\brief Thread-safe (const) getLocalDef: reads into the caller's buffer (see NindFile::readAt);
+    * several threads can read one local index at once, each with its own buffer */
+    bool getLocalDef(const unsigned int ident,
+                     std::list<struct Term> &localDef,
+                     NindReadBuffer &buffer) const;
+
     /**\brief Return the length of a full document in term of terms 
     *\param ident ident of doc
     *\param localLength the resulting length
@@ -111,15 +118,26 @@ private:
 
     //Rejcupehre l'identifiant interne 
     unsigned int getInternalIdent(const unsigned int ident);
+    unsigned int getInternalIdentAt(const unsigned int ident,
+                                    NindReadBuffer &buffer) const;
+    void fillDocIdTradExtIntAt(const unsigned int intIdMin,
+                               const unsigned int intIdMax,
+                               NindReadBuffer &buffer) const;
+    void decodeLocalDef(const unsigned int ident,
+                        const unsigned int identInt,
+                        NindReadBuffer &in,
+                        std::list<struct Term> &localDef) const;
     
     //met ah jour la map de traduction des id externes -> id internes (intIdMin..intIdMax inclus)
     void fillDocIdTradExtInt(const unsigned int intIdMin,
                              const unsigned int intIdMax);
    
     //map de traduction des identifiants externes vers les identifiants internes
-    std::map<unsigned int, unsigned int> m_docIdTradExtInt;
+    //(mutable : complejteje par les lecteurs, sous m_docIdMutex, lectures partagejes, mises ah jour exclusives)
+    mutable std::map<unsigned int, unsigned int> m_docIdTradExtInt;
     //max des identifiants internes, pour la numejrotation
-    unsigned int m_currIdent;
+    mutable unsigned int m_currIdent;
+    mutable std::shared_timed_mutex m_docIdMutex;
 };
 ////////////////////////////////////////////////////////////
     } // end namespace

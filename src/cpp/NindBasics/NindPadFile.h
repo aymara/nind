@@ -23,6 +23,9 @@
 #define NindPadFile_H
 ////////////////////////////////////////////////////////////
 #include "NindFile.h"
+#include <atomic>
+#include <mutex>
+#include <memory>
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
 #include <cstdint>
@@ -187,6 +190,26 @@ protected:
     uint64_t m_bulkPos;                         //position courante connue du fichier (sinon BULK_POS_UNKNOWN)
 
 public:
+    /**\brief Thread-safe (const) position of an entry, with reader synchronization: like
+    * getEntryPos, but reads (readAt) into buffer, never the shared stream, and finds the map of
+    * entries blocks in an immutable snapshot (one atomic load). A reader that misses an entry
+    * maps the blocks again (a writer may have added some) only if the file grew since.
+    *\param ident ident of entry
+    *\param buffer read buffer of the caller
+    *\return position of the entry in the file, 0 if none */
+    uint64_t getEntryPosAt(const unsigned int ident,
+                           NindReadBuffer &buffer) const;
+
+    /**\brief Thread-safe (const) getSpecifics: reads the specifics into buffer, cursor after
+    * their flag (a reader's: a writer in bulk mode keeps them in memory) */
+    void getSpecificsAt(NindReadBuffer &buffer) const;
+
+    /**\brief Thread-safe (const) getMaxIdent: number of entries in the shared map */
+    unsigned int getMaxIdentAt() const;
+
+    /**\brief true if this object writes the file */
+    bool isWriter() const { return m_isWriter; }
+
     /**\brief get file name
     * \return file name */
     std::string getFileName();
@@ -210,6 +233,25 @@ private:
 
     //retourne la position d'une entreje sans synchronisation
     uint64_t getJustEntryPos(const unsigned int ident);
+
+    //carte des blocs d'entrejes partagejes entre fils d'exejcution (getEntryPosAt) : immuable une
+    //fois publieje, remplaceje d'un bloc (atomique), les anciennes gardejes jusqu'ah la destruction
+    typedef std::vector<std::pair<uint64_t, unsigned int> > EntriesMap;
+    static uint64_t entryPosIn(const EntriesMap &map,
+                               const unsigned int ident,
+                               const unsigned int dataEntrySize);
+    void publishEntriesMap();
+    void publishEntriesMap(EntriesMap *map) const;
+    EntriesMap *mapEntriesBlocksAt(NindReadBuffer &buffer,
+                                   uint64_t fileSize) const;
+    bool entriesBlockOk(const uint64_t blockAddr,
+                        const unsigned int entriesNb,
+                        const uint64_t nextBlockAddr,
+                        const uint64_t fileSize) const;
+    mutable std::atomic<const EntriesMap *> m_sharedMap;
+    mutable std::atomic<uint64_t> m_sharedMapFileSize;     //taille du fichier quand la carte a ejtej vejrifieje
+    mutable std::mutex m_sharedMapMutex;
+    mutable std::vector<std::unique_ptr<EntriesMap> > m_sharedMaps;  //toutes celles publiejes (libejrejes aussi si le constructeur ejchoue)
 
     //ejtablit la carte des blocs d'entrejes
     void mapEntriesBlocks();

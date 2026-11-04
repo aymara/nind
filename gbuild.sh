@@ -17,6 +17,8 @@ Synopsis: $0 [OPTIONS]
 Options default values are in parentheses.
 
   -a asan           <(OFF)|ON> compile with adress sanitizer
+  -s tsan           <(OFF)|ON> compile with thread sanitizer (exclusive with -a ON; for the
+                    C++ unit tests, e.g. the concurrent readers' stress tests)
   -j n              <INTEGER> set the compilation to a number of parallel processes.
                     Default 0 => the value is derived from CPUs available.
   -m mode           <(Debug)|Release|RelWithDebInfo> compile mode
@@ -40,15 +42,20 @@ version="val"
 resources="build"
 CMAKE_GENERATOR="Ninja"
 WITH_ASAN="OFF"
+WITH_TSAN="OFF"
 WITH_ARCH="OFF"
 WITH_PACK="OFF"
 RUN_UNIT_TESTS="OFF"
 
-while getopts ":a:j:m:n:p:t:v:G:" o; do
+while getopts ":a:j:m:n:p:s:t:v:G:" o; do
     case "${o}" in
         a)
             WITH_ASAN=${OPTARG}
             [[ "$WITH_ASAN" == "ON" || "$WITH_ASAN" == "OFF" ]] || usage
+            ;;
+        s)
+            WITH_TSAN=${OPTARG}
+            [[ "$WITH_TSAN" == "ON" || "$WITH_TSAN" == "OFF" ]] || usage
             ;;
         j)
             j=${OPTARG}
@@ -179,7 +186,12 @@ fi
 
 echo "version='$version' release='$release'"
 
-build_dir=$build_prefix/$mode-$WITH_ASAN/$current_project
+if [[ "$WITH_TSAN" == "ON" ]]; then
+  [[ "$WITH_ASAN" == "OFF" ]] || { echoerr "-a ON and -s ON are exclusive"; exit 1; }
+  build_dir=$build_prefix/$mode-TSAN/$current_project
+else
+  build_dir=$build_prefix/$mode-$WITH_ASAN/$current_project
+fi
 mkdir -p $build_dir
 pushd $build_dir
 
@@ -202,6 +214,7 @@ cmake -G "$generator"  \
   -DCMAKE_INSTALL_PREFIX:PATH=$NIND_DIST \
   -DWITH_ARCH=$WITH_ARCH \
   -DWITH_ASAN=$WITH_ASAN \
+  -DWITH_TSAN=$WITH_TSAN \
   $source_dir
 result=$?
 if [ "$result" != "0" ]; then echoerr "Failed to configure NIND."; popd; exit $result; fi

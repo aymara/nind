@@ -4,7 +4,7 @@ orphan: true
 
 # Proposal: nind format v2, block-structured postings
 
-Status: **proposal, not implemented** (2026-11-04). Written after the
+Status: **accepted, being implemented** (2026-11-04; decisions below). Written after the
 comparison benchmark (`bench/retrieval/`, `bench/README.md` section 4), whose
 MS MARCO runs reached the limits of the current format.
 
@@ -264,26 +264,81 @@ two formats.
   MS MARCO and its prefixes; then a corpus over 16.7M documents with a local
   index.
 
-## Open questions
+## Decisions (2026-11-04)
 
-1. **Document ids: 32 or 64 bits?** 32 bits caps one index at 4.29G documents.
-   In postings, ids are delta-encoded varints, so 64-bit ids cost nothing
-   there. The fixed-width fields that hold them (local index external id,
-   `.ninddocnames`, `.ninddoclengths`, `Bm25Scorer`) grow by 4 bytes per
-   document. Either 64 bits now, or 32 bits plus search across indexes at
-   Amose's level (which the sharding design rejected).
-2. **Block size**: 128 (finer skipping) or 256 (less overhead)? To measure on
-   MS MARCO.
-3. **Block statistics**: are `frejquenceMax` and `longueurMin` enough for
-   Amose's scoring, or does it need others (e.g. per-category ones)?
-4. **The local index**: v2 only widens its fields. Its per-document
-   definitions are small, so no blocks are needed there.
-5. **The author's other documents**: LAT2014.JYS.440 (*nind, indexation
+1. **Document ids are 64 bits.** 32 bits would cap an index at 4.29G
+   documents, below the 10G target.
+2. **Blocks of 128 postings** by default (a build-time parameter stored in
+   the file's specifics; 256 to be measured).
+3. **Block statistics: max term frequency and min document length.** More
+   can be added later under a new flag.
+
+## Implementation inventory
+
+What the decisions reach beyond the term index's grammar:
+
+- **64-bit document ids** go through public C++ structures that Amose
+  compiles against: `NindTermIndex::Document::ident`, the local index's
+  external id (`setLocalDef`/`getLocalDef`/`getDocIdents`), `NindIndexMerge`'s
+  document lists, `NindAmose`'s `NindTermAmose`. One type for them
+  (`NindDocId`, `uint64_t`), so the change is visible in one place.
+- **Varints**: `EntierULat` decodes at most 32 bits. A 64-bit form,
+  `<EntierULat64>`, encodes values below 2^32 exactly as `EntierULat` does,
+  and larger ones as the byte `0xF8` followed by 8 bytes, big-endian: a
+  first byte of the form `11111xxx` is rejected by today's decoder, so it is
+  free. Postings deltas and block descriptors use it.
+- **Auxiliary files**: `.ninddoclengths` (`NINDDL01`: 32-bit ids and lengths)
+  and `.ninddocnames` (`NindDocNames`: `uint32_t` ids) need 64-bit versions
+  (`NINDDL02`, a new `NindDocNames` version), their readers accepting both.
+- **Python**: `array('I')` for document ids in `nind_engine` (`IndexBuilder`
+  chunks, document lengths, names), `Bm25Scorer`'s `UIntView` of document
+  ids. `array('Q')` for ids.
+- **Python parses v1 bytes at open time**: `NindPadFile.py` (the header and
+  the map of indirection blocks), `NindLexiconindex.__init__`
+  (`donneMaxIdentifiant`), `NindLocalindex.__init__` (its own external ->
+  internal id map, from every document's header: O(N) Python reads at each
+  open). With 10-byte entries `NindEngine` would fail at open, so moving what
+  is parsed at open into `nind._native` comes first. **The diagnostic
+  methods** (`dumpeFichier`, `afficheTerme`, ...) then refuse v2 files with a
+  clear error until they move to `nind._native` too (the planned follow-up
+  in CLAUDE.md); the native `verify` of the Testing section covers v2.
+- **`Bm25Scorer`'s memory**: one N-sized scratch per concurrent search
+  (~12 bytes per document: ~1.4 GB for 16 threads on MS MARCO, terabytes at
+  10G documents). Block skipping reduces the work, not the array; at very
+  large N, scoring block by block into a bounded accumulator (document-at-a-
+  time over blocks) replaces it.
+
+## Implementation order
+
+Each step keeps every test passing (ASan, TSan, golden v1 files) and is
+measured against the previous one (`bench/retrieval/`):
+
+1. **Open-time parsing in `nind._native`** (no format change): the Python
+   wrappers stop parsing the envelope; the diagnostics keep working on v1.
+2. **Reconcile the v1 grammar comments with the code**, then write the v2
+   grammar (this document's section 2 made precise), with `EntierULat64`.
+3. **64-bit document ids** (still the v1 term and local formats: ids above
+   2^32 refused there): `NindDocId`, the C++ structures, Python arrays,
+   `NINDDL02`, the new `NindDocNames` version.
+4. **The v2 envelope** (entry size 10; 4-byte local document and lexicon
+   bucket numbers; 4-byte lengths): v2 readers read v1 and v2, writers write
+   v2. Golden v2 files.
+5. **Blocks in the term index** (flag 23): writers, readers, `getTermPostings`
+   over blocks, in-place updates of the last block, `NindIndexMerge` copying
+   blocks, `NindAmose`.
+6. **Block-max top-k in `Bm25Scorer`**, results identical to today's.
+7. **Migration** (rebuild of v1 indexes), native `verify`, the diagnostics.
+
+## Remaining questions
+
+1. **Build memory** (not part of the format): `NindIndexer` keeps ~17 bytes
+   per token in memory (8.8 GB for MS MARCO). Sharded builds plus a
+   block-copying merge would bound it per shard.
+2. **The author's other documents**: LAT2014.JYS.440 (*nind, indexation
    post-S2*, the main design), LAT2015.JYS.448 (the Amose adaptation),
    LAT2017.JYS.468 (*synchronisation des lecteurs par les fichiers*),
    LAT2016.JYS.465 (measurements) and LAT2016.JYS.466 (hashing of the
    sample's words) are referenced but not available here. 448 and 466
    especially could change the block statistics and the lexicon sizing.
-6. **Build memory** (not part of the format): `NindIndexer` keeps ~17 bytes
-   per token in memory (8.8 GB for MS MARCO). Sharded builds plus a
-   block-copying merge would bound it per shard.
+3. **The local index**: v2 only widens its fields; its per-document
+   definitions are small, so no blocks are needed there.

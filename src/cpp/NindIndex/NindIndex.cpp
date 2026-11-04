@@ -138,6 +138,24 @@ void NindIndex::endBulk()
     vector<pair<uint64_t, unsigned int> >().swap(m_bulkIndirections);
 }
 ////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of a definition into buffer (see getDefinition)
+bool NindIndex::getDefinitionAt(const unsigned int ident,
+                                NindReadBuffer &buffer,
+                                const unsigned int bytesNb) const
+{
+    if (m_isBulk) throw NindIndexException("NindIndex::getDefinitionAt in bulk mode : " + m_fileName);
+    const uint64_t indirection = getEntryPosAt(ident, buffer);
+    if (indirection == 0) return false;
+    //<offsetDejfinition> <longueurDejfinition>
+    m_file.readAt(indirection, TAILLE_INDIRECTION, buffer);
+    const uint64_t offsetDejfinition = buffer.getInt5();
+    const unsigned int longueurDejfinition = (bytesNb == 0) ? buffer.getInt3() : bytesNb;
+    //si la dejfinition n'a pas encore ete indexe, retourne false
+    if (offsetDejfinition == 0) return false;
+    m_file.readAt(offsetDejfinition, longueurDejfinition, buffer);
+    return true;
+}
+////////////////////////////////////////////////////////////
 //brief Read from file datas of a specified definition and leave result into read buffer 
 //param ident ident of definition
 //param bytesNb optional number of bytes to read, in case of partial read

@@ -4,9 +4,16 @@ orphan: true
 
 # Proposal: thread-safe readers, one index shared by many search threads
 
-Status: **proposal, not implemented** (2026-11-04). Companion to
-{doc}`format-v2-blocks`; independent of it (no format change), and best done
-first, since v2's block reads need the same read path.
+Status: **implemented** (2026-11-04) except the `mmap` mode (section 3), on
+branch `thread-safe-readers`. Companion to {doc}`format-v2-blocks`; independent
+of it (no format change), and done first, since v2's block reads need the same
+read path. Differences from what was proposed: the indirection map is
+published as a plain atomic pointer to an immutable map (superseded maps are
+kept until the object is destroyed) rather than an atomically loaded
+`shared_ptr` (no shared reference count per lookup); the local index's id map
+stays behind a `shared_timed_mutex` (not on the search path); and a file
+written in place gives readers the same guarantee as cross-process readers
+today, not more (see Testing).
 
 ## Why
 
@@ -139,10 +146,15 @@ needs the read path above (concurrent block reads), so it comes after it.
 - **Stress tests (C++)**: N threads issuing random lookups (postings, local
   definitions, lexicon) on one shared reader. Every result must equal the
   single-threaded one, under TSan and ASan.
-- **A concurrent in-place writer**: one writer appending terms (new
-  indirection blocks included) while N reader threads look up old and new
-  terms. Each read returns the old definition, the new one, or "not yet",
-  never a mix or an exception. This is the Amose case.
+- **A concurrent writer**: one writer appending terms (new indirection
+  blocks included) while N reader threads look up old and new terms. Each
+  read returns the definition or "not yet". That holds for appended
+  definitions only: the writer also rewrites a definition in place when the
+  new one fits, and reuses freed areas, so a reader concurrent with a
+  rewrite may see it half-written - exactly as cross-process readers can
+  today (decoding then usually fails; a mix the format can't detect is
+  possible). Published Python generations are never modified, so their
+  readers are exact.
 - **Corrupt input**: the `*RobustnessTest.cpp` sweeps run through the
   `const` path too, for `pread` and for `mmap`.
 - **Python**: `ThreadPoolExecutor` searches give the same results as

@@ -112,7 +112,15 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         lexicon.getEntries(entries);
         shardIdentifications[shard] = lexicon.getIdentification();
         vector<unsigned int> &toUnion = shardToUnion[shard];
-        toUnion.assign(shardIdentifications[shard].lexiconWordsNb + 1, 0);
+        //la table est dimensionneje par les identifiants rejellement prejsents (bornejs par le fichier),
+        //pas par le nombre de mots de l'identification, lu dans le fichier : corrompu, il ferait
+        //allouer jusqu'ah 16 Go (et autant pour toMerged)
+        unsigned int maxIdent = 0;
+        for (size_t i = 0; i < entries.size(); i++)
+            maxIdent = max(maxIdent, max(entries[i].ident, entries[i].prefixIdent));
+        if (maxIdent > shardIdentifications[shard].lexiconWordsNb)
+            throw NindIndexException("NindIndexMerge::merge word ident beyond the lexicon's words number : " + m_shardNames[shard]);
+        toUnion.assign((size_t)maxIdent + 1, 0);
         //les entrejes sont par identifiant croissant : le prejfixe d'un mot composej est dejjah traitej
         for (size_t i = 0; i < entries.size(); i++) {
             const NindLexiconIndex::Entry &entry = entries[i];

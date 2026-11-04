@@ -85,6 +85,15 @@ protected:
 
     virtual ~NindIndex();
     
+    /**\brief Thread-safe (const) read of a definition into buffer (see getDefinition)
+    *\param ident ident of definition
+    *\param buffer read buffer of the caller, receives the definition
+    *\param bytesNb bytes to read, 0 for the whole definition
+    *\return true if the definition exists */
+    bool getDefinitionAt(const unsigned int ident,
+                         NindReadBuffer &buffer,
+                         const unsigned int bytesNb = 0) const;
+
     /**\brief Read from file datas of specified definition and leave result into read buffer 
     *\param ident ident of definition
     *\param bytesNb optional number of bytes to read, in case of partial read

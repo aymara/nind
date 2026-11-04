@@ -91,36 +91,53 @@ NindTermIndex::~NindTermIndex()
 bool NindTermIndex::getTermDef(const unsigned int ident,
                                list<struct TermCG> &termDef)
 {
-    const bool existe = getDefinition(ident);
-    if (!existe) return false;
+    if (!getDefinition(ident)) return false;
+    decodeTermDef(ident, m_file.inBuffer(), termDef);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of a full term definition (see getTermDef)
+bool NindTermIndex::getTermDef(const unsigned int ident,
+                               list<struct TermCG> &termDef,
+                               NindReadBuffer &buffer) const
+{
+    if (!getDefinitionAt(ident, buffer)) return false;
+    decodeTermDef(ident, buffer, termDef);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//dejcode la dejfinition d'un terme lue dans in
+void NindTermIndex::decodeTermDef(const unsigned int ident,
+                                  NindReadBuffer &in,
+                                  list<struct TermCG> &termDef) const
+{
     //<flagDejfinition=17> <identifiantTerme> <longueurDonnejes> <donnees>
-    if (m_file.getInt1() != FLAG_DEJFINITION) 
+    if (in.getInt1() != FLAG_DEJFINITION) 
         throw NindTermIndexException("NindTermIndex::getTermDef A : " + m_fileName);
-    const unsigned int identTerme = m_file.getInt4();
+    const unsigned int identTerme = in.getInt4();
     if (identTerme != ident) 
         throw NindTermIndexException("NindTermIndex::getTermDef B : " + m_fileName);
-    const unsigned int longueurDonnejes = m_file.getInt3();
+    const unsigned int longueurDonnejes = in.getInt3();
     //positionne la fin de buffer en fonction de la longueur effective des donnejesTerme
-    m_file.setEndInBuffer(longueurDonnejes);
+    in.setEndInBuffer(longueurDonnejes);
     //<flagCg> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
-    while (!m_file.endOfInBuffer()) {
-        if (m_file.getInt1() != FLAG_CG) 
+    while (!in.endOfInBuffer()) {
+        if (in.getInt1() != FLAG_CG) 
             throw NindTermIndexException("NindTermIndex::getTermDef C : " + m_fileName);
-        const unsigned char catejgorie = m_file.getInt1();
-        const unsigned int frejquenceTerme = m_file.getUIntLat();
-        const unsigned int nbreDocs = m_file.getUIntLat();
+        const unsigned char catejgorie = in.getInt1();
+        const unsigned int frejquenceTerme = in.getUIntLat();
+        const unsigned int nbreDocs = in.getUIntLat();
         termDef.push_back(TermCG(catejgorie, frejquenceTerme));
         struct TermCG &termCG = termDef.back();
         list<Document> &documents = termCG.documents;
         unsigned int identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
         for (unsigned int it = 0; it != nbreDocs; it++) {
             //<identDocRelatif> <frejquenceDoc>
-            identDocument += m_file.getUIntLat();
-            const unsigned int frejquenceDoc = m_file.getUIntLat();
+            identDocument += in.getUIntLat();
+            const unsigned int frejquenceDoc = in.getUIntLat();
             documents.push_back(Document(identDocument, frejquenceDoc));
         }
     }
-    return true;
 }
 ////////////////////////////////////////////////////////////
 //brief Read the postings of a term into flat, reusable arrays (no allocation per posting)
@@ -134,35 +151,56 @@ bool NindTermIndex::getTermPostings(const unsigned int ident,
 {
     postings.clear();
     categoryEnds.clear();
-    const bool existe = getDefinition(ident);
-    if (!existe) return false;
+    if (!getDefinition(ident)) return false;
+    decodeTermPostings(ident, m_file.inBuffer(), postings, categoryEnds);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of the postings of a term (see getTermPostings)
+bool NindTermIndex::getTermPostings(const unsigned int ident,
+                                    vector<Document> &postings,
+                                    vector<size_t> &categoryEnds,
+                                    NindReadBuffer &buffer) const
+{
+    postings.clear();
+    categoryEnds.clear();
+    if (!getDefinitionAt(ident, buffer)) return false;
+    decodeTermPostings(ident, buffer, postings, categoryEnds);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//dejcode les postings d'un terme lus dans in
+void NindTermIndex::decodeTermPostings(const unsigned int ident,
+                                       NindReadBuffer &in,
+                                       vector<Document> &postings,
+                                       vector<size_t> &categoryEnds) const
+{
     //same format and checks as getTermDef
     //<flagDejfinition=17> <identifiantTerme> <longueurDonnejes> <donnees>
-    if (m_file.getInt1() != FLAG_DEJFINITION)
+    if (in.getInt1() != FLAG_DEJFINITION)
         throw NindTermIndexException("NindTermIndex::getTermPostings A : " + m_fileName);
-    const unsigned int identTerme = m_file.getInt4();
+    const unsigned int identTerme = in.getInt4();
     if (identTerme != ident)
         throw NindTermIndexException("NindTermIndex::getTermPostings B : " + m_fileName);
-    const unsigned int longueurDonnejes = m_file.getInt3();
-    m_file.setEndInBuffer(longueurDonnejes);
+    const unsigned int longueurDonnejes = in.getInt3();
+    in.setEndInBuffer(longueurDonnejes);
     //<flagCg> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
-    while (!m_file.endOfInBuffer()) {
-        if (m_file.getInt1() != FLAG_CG)
+    while (!in.endOfInBuffer()) {
+        if (in.getInt1() != FLAG_CG)
             throw NindTermIndexException("NindTermIndex::getTermPostings C : " + m_fileName);
-        m_file.getInt1();                       //catejgorie
-        m_file.getUIntLat();                    //frejquenceTerme
-        const unsigned int nbreDocs = m_file.getUIntLat();
+        in.getInt1();                       //catejgorie
+        in.getUIntLat();                    //frejquenceTerme
+        const unsigned int nbreDocs = in.getUIntLat();
         //nbreDocs comes from the file: no reserve on it, every read is bounded by the buffer
         unsigned int identDocument = 0;         //pour calculer le no de doc absolu avec la numerotation relative
         for (unsigned int it = 0; it != nbreDocs; it++) {
             //<identDocRelatif> <frejquenceDoc>
-            identDocument += m_file.getUIntLat();
-            const unsigned int frejquenceDoc = m_file.getUIntLat();
+            identDocument += in.getUIntLat();
+            const unsigned int frejquenceDoc = in.getUIntLat();
             postings.push_back(Document(identDocument, frejquenceDoc));
         }
         categoryEnds.push_back(postings.size());
     }
-    return true;
 }
 ////////////////////////////////////////////////////////////
 //brief Read specifics as a list of words
