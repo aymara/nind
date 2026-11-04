@@ -31,6 +31,7 @@
 #include "NindIndex/NindTermIndex.h"
 #include "NindIndex/NindLocalIndex.h"
 #include "NindIndex/NindIndexMerge.h"
+#include "NindIndex/NindIndexVerify.h"
 #include "NindIndex/NindTokenizer.h"
 #include "NindIndex/NindDocNames.h"
 #include <unordered_map>
@@ -809,6 +810,7 @@ PYBIND11_MODULE(_native, m) {
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
         .def("is_format_v2", &NindIndex::isFormatV2)
+        .def("get_max_ident", &NindPadFile::getMaxIdentAt)   //the indirections' capacity
         .def("get_word_id", [](NindLexiconIndex &self, const std::list<std::string> &components) {
             // a reader: thread-safe const path, GIL released; a writer: the sequential API
             if (self.isWriter()) return self.getWordId(components);
@@ -884,6 +886,7 @@ PYBIND11_MODULE(_native, m) {
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
         .def("is_format_v2", &NindIndex::isFormatV2)
+        .def("get_max_ident", &NindPadFile::getMaxIdentAt)   //the indirections' capacity
         .def("set_term_def", &NindTermIndex::setTermDef,
              py::arg("ident"), py::arg("term_def"), py::arg("file_identification"), py::arg("specifics"),
              py::call_guard<py::gil_scoped_release>())
@@ -957,7 +960,7 @@ PYBIND11_MODULE(_native, m) {
         .def(py::init<const std::string &, bool, const NindPadFile::Identification &, unsigned int>(),
              py::arg("file_name_extensionless"), py::arg("is_writer"),
              py::arg("lexicon_identification"), py::arg("indirection_bloc_size") = 0)
-        .def("get_local_def", [](NindLocalIndex &self, unsigned int ident) -> py::object {
+        .def("get_local_def", [](NindLocalIndex &self, NindDocId ident) -> py::object {
             std::list<NindLocalIndex::Term> localDef;
             bool found;
             if (self.isWriter()) found = self.getLocalDef(ident, localDef);
@@ -969,12 +972,12 @@ PYBIND11_MODULE(_native, m) {
             if (!found) return py::none();
             return py::cast(localDef);
         }, py::arg("ident"))
-        .def("get_local_length", [](NindLocalIndex &self, unsigned int ident) -> py::object {
+        .def("get_local_length", [](NindLocalIndex &self, NindDocId ident) -> py::object {
             unsigned int length = 0;
             if (!self.getLocalLength(ident, length)) return py::none();
             return py::cast(length);
         }, py::arg("ident"))
-        .def("get_term_idents", [](NindLocalIndex &self, unsigned int ident) -> py::object {
+        .def("get_term_idents", [](NindLocalIndex &self, NindDocId ident) -> py::object {
             std::set<unsigned int> termIdents;
             if (!self.getTermIdents(ident, termIdents)) return py::none();
             return py::cast(termIdents);
@@ -985,6 +988,7 @@ PYBIND11_MODULE(_native, m) {
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
         .def("is_format_v2", &NindIndex::isFormatV2)
+        .def("get_max_ident", &NindPadFile::getMaxIdentAt)   //the indirections' capacity
         .def("set_local_def", &NindLocalIndex::setLocalDef,
              py::arg("ident"), py::arg("local_def"), py::arg("file_identification"),
              py::call_guard<py::gil_scoped_release>())
@@ -993,7 +997,7 @@ PYBIND11_MODULE(_native, m) {
         // Term per term id (ascending, all with category cg), each keeping
         // its localisations in occurrence order. Releases the GIL while
         // writing, so a writer must not be shared between Python threads.
-        .def("set_local_def_arrays", [](NindLocalIndex &self, unsigned int ident,
+        .def("set_local_def_arrays", [](NindLocalIndex &self, NindDocId ident,
                                         const py::buffer &termIds, const py::buffer &positions,
                                         const py::buffer &lengths,
                                         const NindPadFile::Identification &fileIdentification,
@@ -1083,6 +1087,30 @@ PYBIND11_MODULE(_native, m) {
     }, py::arg("shards"), py::arg("target"), py::arg("with_retrolexicon") = false,
        py::arg("lexicon_indirection_bloc_size") = 0, py::arg("retro_indirection_bloc_size") = 0,
        py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0);
+
+    // ---- NindIndexVerify ------------------------------------------------
+    py::class_<NindIndexVerify::Report>(m, "VerifyReport")
+        .def_readonly("format_v2", &NindIndexVerify::Report::formatV2)
+        .def_readonly("words_nb", &NindIndexVerify::Report::wordsNb)
+        .def_readonly("terms_nb", &NindIndexVerify::Report::termsNb)
+        .def_readonly("postings_nb", &NindIndexVerify::Report::postingsNb)
+        .def_readonly("documents_nb", &NindIndexVerify::Report::documentsNb)
+        .def_readonly("with_local_index", &NindIndexVerify::Report::withLocalIndex)
+        .def_readonly("problems_nb", &NindIndexVerify::Report::problemsNb)
+        .def_readonly("problems", &NindIndexVerify::Report::problems)
+        .def_property_readonly("ok", &NindIndexVerify::Report::ok)
+        .def("__bool__", &NindIndexVerify::Report::ok)
+        .def("__repr__", [](const NindIndexVerify::Report &r) {
+            return "<VerifyReport " + std::string(r.ok() ? "ok" : std::to_string(r.problemsNb) + " problems")
+                + ", format v" + (r.formatV2 ? "2" : "1") + ", " + std::to_string(r.wordsNb) + " words, "
+                + std::to_string(r.termsNb) + " terms, " + std::to_string(r.documentsNb) + " documents>";
+        });
+    // Checks an index (see NindIndexVerify.h): never throws on a damaged index, reports it.
+    // Releases the GIL.
+    m.def("verify_index", [](const std::string &base, const bool crossCheck, const size_t maxProblems) {
+        py::gil_scoped_release release;
+        return NindIndexVerify::verify(base, crossCheck, maxProblems);
+    }, py::arg("base"), py::arg("cross_check") = false, py::arg("max_problems") = 100);
 
     // ---- NindRetrolexicon -----------------------------------------------
     // ---- NindTokenizer ----------------------------------------------------

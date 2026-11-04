@@ -447,6 +447,14 @@ dynamic **block-max MaxScore**, document at a time
   The last one can only come from a format v1 file: v2 writers keep at most
   128 postings inline. Such a list would otherwise be read whole as a single
   block.
+- **Trusted descriptors.** A block that is read is checked against its
+  descriptor (`decodeBlock`: first and last documents, count, exact largest
+  frequency), so a mismatch throws. A block that MaxScore skips is never
+  read. If such a block's descriptor understates it (a damaged file, a buggy
+  writer), the search can't notice and may miss documents, where the
+  exhaustive search would throw. Block-max skipping can't avoid this:
+  `nind._native.verify_index` (`NindIndexVerify`) checks every descriptor
+  against its block.
 
 The native scorer's search times (µs per query, single thread, MS MARCO without
 stopwords). Each row's four numbers come from the same run. Absolute times vary

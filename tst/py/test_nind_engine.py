@@ -1116,18 +1116,28 @@ V1_TEXTS = ["the quick brown fox", "jumps over the lazy dog", "the dog sleeps", 
 V1_QUERIES = ["the dog", "quick", "brown sun", "moon unknown", "a a fox", "lazy the"]
 
 
-@pytest.mark.parametrize("layout", ["with-local", "without-local"])
-def test_a_format_v1_index_is_read_then_migrated_by_its_first_update(tmp_path, layout):
+@pytest.mark.parametrize("layout, flat", [("with-local", False), ("without-local", False), ("with-local", True)])
+def test_a_format_v1_index_is_read_then_migrated_by_its_first_update(tmp_path, layout, flat):
     # indexes written by nind before format v2: read as they are, rebuilt in format v2 by the
-    # first update (document ids and names kept)
+    # first update (document ids and names kept); flat: the generation's files in the index
+    # directory itself, no CURRENT (indexes written before generations existed)
+    import glob
     import shutil
     index_dir = tmp_path / "v1"
-    shutil.copytree(os.path.join(os.path.dirname(__file__), "data", "v1", layout), str(index_dir))
+    source = os.path.join(os.path.dirname(__file__), "data", "v1", layout)
+    if flat:
+        index_dir.mkdir()
+        for path in glob.glob(os.path.join(source, "corpus.gen-*", "corpus.*")):
+            shutil.copy(path, str(index_dir))
+    else:
+        shutil.copytree(source, str(index_dir))
     kwargs = {} if layout == "with-local" else {"local_index": False}
     names = ["n%d" % i for i in range(len(V1_TEXTS))]
     reference_indexer, reference = build_with(tmp_path, "reference", V1_TEXTS, kwargs, doc_names=names)
     engine = NindEngine(str(index_dir))
     assert not engine._snapshot.lexicon._native.is_format_v2()
+    report = native.verify_index(engine._snapshot.base, cross_check=True)
+    assert report.ok and not report.format_v2, report.problems
     for query in V1_QUERIES:
         assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
         assert engine.search(query, top_k=2, doc_names=True) == reference.search(query, top_k=2, doc_names=True)
@@ -1145,3 +1155,33 @@ def test_a_format_v1_index_is_read_then_migrated_by_its_first_update(tmp_path, l
     if snapshot.local_index is not None:
         assert snapshot.local_index._native.is_format_v2()
     assert engine.doc_id("m0") == reference.doc_id("m0") and engine.doc_name(5) == "n5"
+    report = native.verify_index(engine._snapshot.base, cross_check=True)
+    assert report.ok and report.format_v2 and report.documents_nb == (8 if layout == "with-local" else 0), report
+
+
+@pytest.mark.parametrize("local_index", [True, False])
+def test_documents_with_64_bit_ids_are_replaced_and_removed(tmp_path, local_index):
+    # format v2: external ids over 32 bits, through updates (a replaced document's terms come from
+    # the local index's get_term_idents, or from a scan of the terms without one)
+    big = 2 ** 40 + 3
+    index_dir = tmp_path / "big"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus", local_index=local_index)
+    paths = write_texts(tmp_path / "docs", ["alpha beta", "beta gamma", "gamma delta"])
+    with indexer.update() as update:
+        update.add_file(paths[0], doc_id=7)
+        update.add_file(paths[1], doc_id=big)
+        update.add_file(paths[2], doc_id=2 ** 64 - 1)
+    engine = NindEngine(str(index_dir))
+    assert [d for d, _ in engine.search("beta", top_k=None)] == [big, 7] or \
+        sorted(d for d, _ in engine.search("beta", top_k=None)) == [7, big]
+    with indexer.update() as update:
+        update.add_file(paths[0], doc_id=big)          # replaced: alpha beta
+        update.remove(2 ** 64 - 1)
+    assert sorted(d for d, _ in engine.search("alpha", top_k=None)) == [7, big]
+    assert engine.search("gamma", top_k=None) == []
+    if local_index:
+        local = engine._snapshot.local_index._native
+        assert sorted(t.term for t in local.get_local_def(big)) == sorted(local.get_term_idents(big))
+        assert local.get_local_def(2 ** 64 - 1) is None
+    assert native.verify_index(engine._snapshot.base, cross_check=True).ok

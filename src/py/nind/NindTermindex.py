@@ -309,7 +309,8 @@ class NindTermindex(NindIndex):
     def dumpeFichier(self, outFile):
         """Dump every term's full posting lists to a text file, for inspection.
 
-        French *dumpeFichier* = "dumps file".
+        French *dumpeFichier* = "dumps file". Read through ``nind._native``:
+        formats v1 and v2.
 
         :param outFile: a writable text file object (UTF-8).
         :return: the number of terms written.
@@ -317,41 +318,29 @@ class NindTermindex(NindIndex):
             inconsistent with its declared total.
         """
         nbLignes = 0
-        #trouve le max des identifiants
-        maxIdent = self.donneMaxIdentifiant()
-        for identifiant in range(maxIdent):
-            #trouve les donnejes 
-            trouvej, longueurDonnejes, tailleExtension = self.__donneDonnejes(identifiant)
-            if not trouvej: continue      #identifiant pas trouve
+        for identifiant in range(1, self._native.get_max_ident()):
+            dejfinition = self._native.get_term_def(identifiant)
+            if dejfinition is None: continue      #identifiant pas trouve
             outFile.write('%06d:\n'%(identifiant))
-            frejquenceGlobale = 0
             nbLignes +=1
-            #examine les données
-            finDonnejes = self.tell() + longueurDonnejes
-            while self.tell() < finDonnejes:
-                #<flagCg=61> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
-                if self.litNombre1() != FLAG_CG: 
-                    raise Exception('NindTermindex.dumpeFichier %s : pas FLAG_CG'%(self.latFileName))
-                catejgorie = self.litNombre1()
-                frejquenceTerme = self.litNombreULat()
-                nbreDocs = self.litNombreULat()
-                outFile.write('[%d] (%d) <%d>'%(catejgorie, frejquenceTerme, nbreDocs))
-                frejquenceGlobale += frejquenceTerme
-                totalFrequences = 0
-                noDoc = 0
-                docList = []
-                for i in range(nbreDocs):
-                    #<identDocRelatif> <frejquenceDoc>
-                    incrementIdentDoc = self.litNombreULat()
-                    frejquenceDoc = self.litNombreULat()
-                    totalFrequences += frejquenceDoc
-                    noDoc += incrementIdentDoc
-                    docList.append('%05d (%d)'%(noDoc, frejquenceDoc))
-                outFile.write(' :: %s\n'%(', '.join(docList)))
-                if totalFrequences != frejquenceTerme: raise Exception('fréquences incompatibles sur terme %d'%(identifiant))
+            outFile.write(self.__formateTerme(identifiant, dejfinition))
+            frejquenceGlobale = sum(termCG.frequency for termCG in dejfinition)
             outFile.write('frequence totale de %06d : %d\n'%(identifiant, frejquenceGlobale))
             outFile.write('\n')
         return nbLignes
+
+    #les catejgories d'un terme, une ligne chacune
+    @staticmethod
+    def __formateTerme(identifiant, dejfinition):
+        rejsultat = StringIO()
+        for termCG in dejfinition:
+            #<catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
+            rejsultat.write('[%d] (%d) <%d>'%(termCG.cg, termCG.frequency, len(termCG.documents)))
+            docList = ['%05d (%d)'%(document.ident, document.frequency) for document in termCG.documents]
+            rejsultat.write(' :: %s\n'%(', '.join(docList)))
+            if sum(document.frequency for document in termCG.documents) != termCG.frequency:
+                raise Exception('fréquences incompatibles sur terme %d'%(identifiant))
+        return rejsultat.getvalue()
 
     #######################################################################
     #dejcode les donnejes associejes ah un terme
@@ -359,7 +348,8 @@ class NindTermindex(NindIndex):
         """Format one term's full posting lists as a human-readable string.
 
         French *afficheTerme* = "displays term". Same content as one
-        :meth:`dumpeFichier` line, computed for a single term.
+        :meth:`dumpeFichier` line, computed for a single term. Read through
+        ``nind._native``: formats v1 and v2.
 
         :param identifiant: the term identifier to format.
         :return: a formatted multi-line string, or ``"<id> : inconnu"`` if
@@ -367,36 +357,9 @@ class NindTermindex(NindIndex):
         :raises Exception: if the term's posting-list frequencies are
             inconsistent with its declared total.
         """
-        rejsultat = StringIO()
-        rejsultat.write('%06d:  '%(identifiant))
-        #trouve les donnejes 
-        trouvej, longueurDonnejes, tailleExtension = self.__donneDonnejes(identifiant)
-        if not trouvej: return '%d : inconnu'%(identifiant)
-        frejquenceGlobale = 0
-        #examine les données
-        finDonnejes = self.tell() + longueurDonnejes
-        while self.tell() < finDonnejes:
-            #<flagCg=61> <catejgorie> <frejquenceTerme> <nbreDocs> <listeDocuments>
-            if self.litNombre1() != FLAG_CG: 
-                raise Exception('NindTermindex.afficheTerme %s : pas FLAG_CG'%(self.latFileName))
-            catejgorie = self.litNombre1()
-            frejquenceTerme = self.litNombreULat()
-            nbreDocs = self.litNombreULat()
-            rejsultat.write('[%d] (%d) <%d>'%(catejgorie, frejquenceTerme, nbreDocs))
-            frejquenceGlobale += frejquenceTerme
-            totalFrequences = 0
-            noDoc = 0
-            docList = []
-            for i in range(nbreDocs):
-                #<identDocRelatif> <frejquenceDoc>
-                incrementIdentDoc = self.litNombreULat()
-                frejquenceDoc = self.litNombreULat()
-                totalFrequences += frejquenceDoc
-                noDoc += incrementIdentDoc
-                docList.append('%05d (%d)'%(noDoc, frejquenceDoc))
-            rejsultat.write(' :: %s\n'%(', '.join(docList)))
-            if totalFrequences != frejquenceTerme: raise Exception('fréquences incompatibles sur terme %d'%(identifiant))
-        return rejsultat.getvalue()
+        dejfinition = self._native.get_term_def(identifiant) if identifiant > 0 else None
+        if dejfinition is None: return '%d : inconnu'%(identifiant)
+        return '%06d:  '%(identifiant) + self.__formateTerme(identifiant, dejfinition)
     #######################################################################
             
 if __name__ == '__main__':

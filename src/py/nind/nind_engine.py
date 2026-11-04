@@ -290,6 +290,7 @@ class _Snapshot:
 
     def __init__(self, base):
         # every file is opened here, while the generation can't be deleted (see _index_store)
+        self.base = base
         self.lexicon = NindLexiconindex(base + ".nindlexiconindex")
         lexicon_identification = self.lexicon.donneIdentification()
         self.term_index = NindTermindex(base + ".nindtermindex", lexicon_identification)
@@ -1136,6 +1137,11 @@ class NindIndexer:
 
     def update(self):
         """Start an incremental update of the index (created if there is none yet).
+
+        The first update of an index written in format v1 (by a nind older
+        than format v2) first rebuilds it in format v2. This costs about as
+        much as rewriting the index (term ids change, document ids and names
+        don't).
 
         :return: an :class:`IndexUpdate`, to use as a context manager; its
             changes are published together when the ``with`` block ends.

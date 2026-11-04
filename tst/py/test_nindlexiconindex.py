@@ -11,6 +11,8 @@ a list of terms and gets back the resulting {term: ident} mapping.
 """
 import os
 
+import pytest
+
 from nind.nind_engine import NindIndexer
 from nind.NindLexiconindex import NindLexiconindex
 
@@ -88,3 +90,33 @@ def test_python_diagnostics_read_the_v1_golden_files(tmp_path):
     lexicon = NindLexiconindex(str(tmp_path / "golden.nindlexiconindex"))
     lexicon.analyseFichierLexiconindex(False)
     assert lexicon.donneIdentifiant(["alpha"]) == 1
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_display_diagnostics_read_both_formats(tmp_path, version):
+    # dumpeFichier/afficheTerme/afficheDocument go through nind._native: the golden v1 and v2 files
+    # hold the same index, displayed as the original pure-Python (v1 only) code did
+    # (tst/py/data/golden-diagnostics.json, written by it)
+    import io
+    import json
+    import shutil
+    from nind.NindTermindex import NindTermindex
+    from nind.NindLocalindex import NindLocalindex
+    here = os.path.dirname(__file__)
+    golden = os.path.join(here, "..", "cpp", "unit", "NindIndex", "golden", version)
+    for extension in (".nindlexiconindex", ".nindretrolexicon", ".nindtermindex", ".nindlocalindex"):
+        shutil.copy(os.path.join(golden, "golden" + extension), str(tmp_path / ("golden" + extension)))
+    with open(os.path.join(here, "data", "golden-diagnostics.json"), encoding="utf-8") as f:
+        expected = json.load(f)
+    terms = NindTermindex(str(tmp_path / "golden.nindtermindex"))
+    out = io.StringIO()
+    assert terms.dumpeFichier(out) == expected["term_dump_n"]
+    assert out.getvalue() == expected["term_dump"]
+    for ident, text in expected["term_affiche"].items():
+        assert terms.afficheTerme(int(ident)) == text
+    local = NindLocalindex(str(tmp_path / "golden.nindlocalindex"))
+    out = io.StringIO()
+    assert local.dumpeFichier(out) == expected["local_dump_n"]
+    assert out.getvalue() == expected["local_dump"]
+    for doc_id, text in expected["local_affiche"].items():
+        assert local.afficheDocument(int(doc_id)) == text
