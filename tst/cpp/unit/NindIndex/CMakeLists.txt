@@ -14,6 +14,7 @@ add_executable(NindIndexUnitTests
   NindTermUpdateTest.cpp
   NindIndexUpdateTest.cpp
   NindBm25ScorerTest.cpp
+  NindIndexBuilderTest.cpp
 )
 target_compile_definitions(NindIndexUnitTests PRIVATE NIND_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
 find_package(Threads REQUIRED)
