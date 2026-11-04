@@ -156,6 +156,19 @@ protected:
     * buffer contains datas of specified definition + specific datas + identification
     *\param ident ident of definition */
     void setDefinition(const unsigned int ident);
+
+    /**\brief (bulk mode) Rewrite parts of a definition in place, its place and length unchanged:
+    * the write buffer holds the parts, in order, then the specifics and identification
+    *\param ident ident of definition
+    *\param parts (offset in the definition, length) of each part */
+    void setDefinitionPartsBulk(const unsigned int ident,
+                                const std::vector<std::pair<unsigned int, unsigned int> > &parts);
+
+    /**\brief (bulk mode) The place of a definition (as it will be once the bulk session ends)
+    *\return false if there is none */
+    bool getDefinitionAreaBulk(const unsigned int ident,
+                               uint64_t &offset,
+                               unsigned int &length);
         
     /**\brief check if indirection exists and create indirection block if necessary
     *\param ident ident of definition

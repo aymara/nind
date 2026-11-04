@@ -32,6 +32,7 @@
 #include "NindIndex/NindLocalIndex.h"
 #include "NindIndex/NindIndexMerge.h"
 #include "NindIndex/NindIndexVerify.h"
+#include "NindIndex/NindIndexUpdate.h"
 #include "NindIndex/NindTokenizer.h"
 #include "NindIndex/NindDocNames.h"
 #include <unordered_map>
@@ -1171,6 +1172,50 @@ PYBIND11_MODULE(_native, m) {
        py::arg("lexicon_indirection_bloc_size") = 0, py::arg("retro_indirection_bloc_size") = 0,
        py::arg("term_indirection_bloc_size") = 0, py::arg("local_indirection_bloc_size") = 0,
        py::arg("doc_ids") = py::none(), py::arg("doc_lengths") = py::none());
+
+    // ---- NindIndexUpdate ------------------------------------------------
+    py::class_<NindIndexUpdate::Options>(m, "IndexUpdateOptions")
+        .def(py::init<>())
+        .def_readwrite("with_local_index", &NindIndexUpdate::Options::withLocalIndex)
+        .def_readwrite("with_retrolexicon", &NindIndexUpdate::Options::withRetrolexicon)
+        .def_readwrite("lexicon_min_buckets", &NindIndexUpdate::Options::lexiconMinBuckets)
+        .def_readwrite("lexicon_max_load", &NindIndexUpdate::Options::lexiconMaxLoad)
+        .def_readwrite("indirection_bloc_min", &NindIndexUpdate::Options::indirectionBlocMin);
+    py::class_<NindIndexUpdate::Occurrence>(m, "Occurrence")
+        .def(py::init([](const std::list<std::string> &word, unsigned char cg, unsigned int position, unsigned int length) {
+            return NindIndexUpdate::Occurrence{word, cg, position, length};
+        }), py::arg("word"), py::arg("cg") = 0, py::arg("position") = 0, py::arg("length") = 1)
+        .def_readwrite("word", &NindIndexUpdate::Occurrence::word)
+        .def_readwrite("cg", &NindIndexUpdate::Occurrence::cg)
+        .def_readwrite("position", &NindIndexUpdate::Occurrence::position)
+        .def_readwrite("length", &NindIndexUpdate::Occurrence::length);
+    py::class_<NindIndexUpdate::Stats>(m, "IndexUpdateStats")
+        .def_readonly("added_docs_nb", &NindIndexUpdate::Stats::addedDocsNb)
+        .def_readonly("removed_docs_nb", &NindIndexUpdate::Stats::removedDocsNb)
+        .def_readonly("new_words_nb", &NindIndexUpdate::Stats::newWordsNb)
+        .def_readonly("terms_nb", &NindIndexUpdate::Stats::termsNb)
+        .def_readonly("in_place_terms_nb", &NindIndexUpdate::Stats::inPlaceTermsNb)
+        .def_readonly("migrated", &NindIndexUpdate::Stats::migrated)
+        .def_readonly("rebuilt", &NindIndexUpdate::Stats::rebuilt);
+    // An incremental update (see NindIndexUpdate.h): documents added (or replaced) and removed,
+    // written by commit() (GIL released)
+    py::class_<NindIndexUpdate>(m, "NindIndexUpdate")
+        .def(py::init<const std::string &, const NindIndexUpdate::Options &>(),
+             py::arg("file_name_extensionless"), py::arg("options") = NindIndexUpdate::Options())
+        .def("set_document_lengths", [](NindIndexUpdate &self, const py::buffer &docIds, const py::buffer &lengths) {
+            self.setDocumentLengths(docLengthPairs(docIds, lengths));
+        }, py::arg("doc_ids"), py::arg("lengths"))
+        .def("add_document", [](NindIndexUpdate &self, NindDocId ident, const std::vector<std::string> &words,
+                                unsigned char cg, long length) {
+            self.addDocument(ident, words, cg, length);
+        }, py::arg("ident"), py::arg("words"), py::arg("cg") = 0, py::arg("length") = -1)
+        .def("add_document_occurrences", [](NindIndexUpdate &self, NindDocId ident,
+                                            const std::vector<NindIndexUpdate::Occurrence> &occurrences, long length) {
+            self.addDocument(ident, occurrences, length);
+        }, py::arg("ident"), py::arg("occurrences"), py::arg("length") = -1)
+        .def("remove_document", &NindIndexUpdate::removeDocument, py::arg("ident"))
+        .def("pending_nb", &NindIndexUpdate::pendingNb)
+        .def("commit", &NindIndexUpdate::commit, py::call_guard<py::gil_scoped_release>());
 
     // ---- NindIndexVerify ------------------------------------------------
     py::class_<NindIndexVerify::Report>(m, "VerifyReport")

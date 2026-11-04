@@ -19,6 +19,8 @@ SET(NindIndex_LIB_SRCS
   NindDocNames.cpp
   NindIndexVerify.h
   NindIndexVerify.cpp
+  NindIndexUpdate.h
+  NindIndexUpdate.cpp
 )
 
 add_library(NindIndex SHARED ${NindIndex_LIB_SRCS})
@@ -29,4 +31,4 @@ set_target_properties(NindIndex PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSION
 install(TARGETS NindIndex DESTINATION lib)
 
 ########### install files ###############
-install(FILES NindIndex.h NindLexiconIndex.h NindTermIndex.h NindLocalIndex.h NindIndexMerge.h NindTokenizer.h NindDocNames.h NindIndexVerify.h DESTINATION include/NindIndex)
+install(FILES NindIndex.h NindLexiconIndex.h NindTermIndex.h NindLocalIndex.h NindIndexMerge.h NindTokenizer.h NindDocNames.h NindIndexVerify.h NindIndexUpdate.h DESTINATION include/NindIndex)

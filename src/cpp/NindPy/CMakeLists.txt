@@ -46,6 +46,7 @@ pybind11_add_module(_native
   ${NIND_CPP_ROOT}/NindIndex/NindTokenizer.cpp
   ${NIND_CPP_ROOT}/NindIndex/NindDocNames.cpp
   ${NIND_CPP_ROOT}/NindIndex/NindIndexVerify.cpp
+  ${NIND_CPP_ROOT}/NindIndex/NindIndexUpdate.cpp
 )
 
 target_include_directories(_native PRIVATE ${NIND_CPP_ROOT})

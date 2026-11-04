@@ -321,6 +321,45 @@ void NindIndex::setDefinitionBulk(const unsigned int ident,
     entry = pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition);
 }
 ////////////////////////////////////////////////////////////
+//brief (bulk mode) rewrite parts of a definition in place, its place and length unchanged
+void NindIndex::setDefinitionPartsBulk(const unsigned int ident,
+                                       const vector<pair<unsigned int, unsigned int> > &parts)
+{
+    if (!m_isBulk) throw NindIndexException("NindIndex::setDefinitionPartsBulk not in bulk mode : " + m_fileName);
+    if (m_bulkIndirections.size() < getMaxIdent())
+        m_bulkIndirections.resize(getMaxIdent(), pair<uint64_t, unsigned int>(0, 0));
+    if (ident >= m_bulkIndirections.size()) throw NindIndexException("NindIndex::setDefinitionPartsBulk : " + m_fileName);
+    const pair<uint64_t, unsigned int> entry = m_bulkIndirections[ident];
+    const unsigned int tailleQueue = getSpecificsAndIdentificationSize();
+    unsigned int position = 0;
+    for (size_t i = 0; i < parts.size(); i++) {
+        if (entry.first == 0 || (uint64_t)parts[i].first + parts[i].second > entry.second)
+            throw NindIndexException("NindIndex::setDefinitionPartsBulk outside the definition : " + m_fileName);
+        position += parts[i].second;
+    }
+    if (m_file.getOutBufferSize() != position + tailleQueue)
+        throw NindIndexException("NindIndex::setDefinitionPartsBulk write buffer : " + m_fileName);
+    //la queue est toujours en fin de buffer (copieje avant les ejcritures, qui vident le buffer)
+    m_file.copyOutBuffer(position, tailleQueue, m_bulkTail);
+    position = 0;
+    for (size_t i = 0; i < parts.size(); i++) {
+        bulkWrite(entry.first + parts[i].first, position, parts[i].second);
+        position += parts[i].second;
+    }
+}
+////////////////////////////////////////////////////////////
+//brief (bulk mode) the place of a definition
+bool NindIndex::getDefinitionAreaBulk(const unsigned int ident,
+                                      uint64_t &offset,
+                                      unsigned int &length)
+{
+    if (!m_isBulk) throw NindIndexException("NindIndex::getDefinitionAreaBulk not in bulk mode : " + m_fileName);
+    if (ident >= m_bulkIndirections.size()) return false;
+    offset = m_bulkIndirections[ident].first;
+    length = m_bulkIndirections[ident].second;
+    return offset != 0;
+}
+////////////////////////////////////////////////////////////
 //brief verifie que l'indirection existe et cree un bloc supplementaire si c'est pertinent
 //param ident ident of definition
 //param fileIdentification unique identification of file 

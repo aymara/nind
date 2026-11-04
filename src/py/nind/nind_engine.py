@@ -34,7 +34,6 @@ import tempfile
 import threading
 import time
 from array import array
-from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
@@ -628,15 +627,15 @@ class IndexUpdate:
     #: Above this many words per hash bucket, the lexicon is rebuilt with twice
     #: as many buckets as words (the bucket count is fixed in the file).
     LEXICON_MAX_LOAD = 4
-    #: Touched term definitions are rewritten by batches of about this many postings.
-    UPDATE_BATCH_POSTINGS = 4000000
     #: Entries in each new indirection block of the term and local files (at least).
     INDIRECTION_BLOC_MIN = 4096
 
     def __init__(self, indexer):
         self._indexer = indexer
         self._stack = None
-        self._writers = None
+        #: What the last commit did (``nind._native.IndexUpdateStats``: ``terms_nb``,
+        #: ``in_place_terms_nb``, ``migrated``, ``rebuilt``...), ``None`` before.
+        self.stats = None
 
     # -- context ------------------------------------------------------------
     def __enter__(self):
@@ -690,16 +689,12 @@ class IndexUpdate:
     def __exit__(self, exc_type, exc, tb):
         stack, self._stack = self._stack, None
         if exc_type is not None:
-            self._close_writers()
             return stack.__exit__(exc_type, exc, tb)
         try:
             if not self._pending:
                 raise _CancelUpdate()       # nothing changes: nothing to publish
             self._commit()
-            self._close_writers()
-            self._compact_lexicon()
         except BaseException as error:
-            self._close_writers()
             try:
                 if not stack.__exit__(type(error), error, error.__traceback__):
                     raise
@@ -790,51 +785,28 @@ class IndexUpdate:
 
     # -- writing ------------------------------------------------------------
     def _commit(self):
-        pending = self._pending
-        vocabulary = sorted({token for tokens in pending.values() if tokens for token in tokens})
-        self._migrate_from_v1()
-        lexicon, term_index, local_index = self._open_writers(len(vocabulary), len(pending))
-        # the previous postings of every replaced or removed document go
-        removed = defaultdict(set)
-        replaced = [doc_id for doc_id in pending if doc_id in self._existing]
-        if replaced and local_index is not None:
-            for doc_id in replaced:
-                for term_id in local_index.get_term_idents(doc_id) or ():
-                    removed[term_id].add(doc_id)
-        elif replaced:
-            # no local index: find their terms in the whole term index
-            replaced = set(replaced)
-            for term_id in range(1, lexicon.get_identification().lexicon_words_nb + 1):
-                for term_cg in term_index.get_term_def(term_id) or ():
-                    for document in term_cg.documents:
-                        if document.ident in replaced:
-                            removed[term_id].add(document.ident)
-        # term/local files are opened with the lexicon's identification: they're written after it
-        term_to_id = dict(zip(vocabulary, lexicon.add_simple_words(vocabulary)))
-        identification = lexicon.get_identification()
-        added = defaultdict(dict)
-        for doc_id, tokens in pending.items():
-            for term, freq in Counter(tokens or ()).items():
-                added[term_to_id[term]][doc_id] = freq
-        doc_ids = sorted(pending)
-        for doc_id, tokens in pending.items():
-            if tokens:
-                self._lengths[doc_id] = len(tokens)
+        # the changes, written by the C++ API (nind._native.NindIndexUpdate): touched terms only,
+        # their last block in place when they only gain documents; a format v1 index migrated, a
+        # full lexicon rebuilt
+        options = native.IndexUpdateOptions()
+        options.with_local_index = self._local
+        options.with_retrolexicon = self._with_retrolexicon
+        options.lexicon_min_buckets = self.LEXICON_MIN_BUCKETS
+        options.lexicon_max_load = self.LEXICON_MAX_LOAD
+        options.indirection_bloc_min = self.INDIRECTION_BLOC_MIN
+        update = native.NindIndexUpdate(self._base, options)
+        # the lengths before the update (the blocks' shortest document)
+        update.set_document_lengths(*_lengths_arrays(self._lengths))
+        for doc_id, tokens in self._pending.items():
+            if tokens is None:
+                update.remove_document(doc_id)
             else:
+                update.add_document(doc_id, tokens)
+                if tokens:
+                    self._lengths[doc_id] = len(tokens)
+            if not tokens:
                 self._lengths.pop(doc_id, None)
-        # the documents' lengths after the update: the rewritten blocks' shortest document
-        term_index.set_document_lengths(*_lengths_arrays(self._lengths))
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(self._update_term_index, term_index, removed, added, identification)]
-            if local_index is not None:
-                futures.append(pool.submit(self._update_local_index, local_index, doc_ids, pending,
-                                           term_to_id, identification))
-            for future in futures:
-                future.result()
-        for writer in self._writers:
-            writer.end_bulk()
-        self._modulo = lexicon.get_modulo()
-        self._words_nb = identification.lexicon_words_nb
+        self.stats = update.commit()
         _write_doc_lengths(self._base, self._lengths)
         _write_meta(self._base, self._tokenizer_options, self._local)
         if self._names or self._had_names:
@@ -843,100 +815,6 @@ class IndexUpdate:
                 os.remove(self._base + DOC_NAMES_EXTENSION)
             _write_doc_names(self._base, {doc_id: name for doc_id, name in self._names.items()
                                           if doc_id in self._lengths})
-
-    def _open_writers(self, vocabulary_size, docs_nb):
-        # in bulk mode: nobody reads this generation before it is published
-        lexicon = native.NindLexiconIndex(
-            self._base, is_writer=True, with_retrolexicon=self._with_retrolexicon,
-            indirection_bloc_size=max(self.LEXICON_MIN_BUCKETS, 2 * vocabulary_size),
-            retro_indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, vocabulary_size + 1))
-        self._writers = [lexicon]
-        identification = lexicon.get_identification()
-        # an existing file keeps its blocks; these sizes are for the blocks added from now on
-        term_index = native.NindTermIndex(self._base, is_writer=True, lexicon_identification=identification,
-                                          specifics_number=0,
-                                          indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, vocabulary_size + 1))
-        self._writers.append(term_index)
-        local_index = None
-        if self._local:
-            local_index = native.NindLocalIndex(self._base, is_writer=True, lexicon_identification=identification,
-                                                indirection_bloc_size=max(self.INDIRECTION_BLOC_MIN, docs_nb + 1))
-            self._writers.append(local_index)
-        for writer in self._writers:
-            writer.begin_bulk()
-        return lexicon, term_index, local_index
-
-    def _close_writers(self):
-        # the native writers close their files when destroyed (ending bulk mode if needed)
-        self._writers = None
-
-    @staticmethod
-    def _update_term_index(term_index, removed, added, identification):
-        # every touched term is rewritten whole: previous postings, minus removed documents, plus added
-        # ones; written by batches of about UPDATE_BATCH_POSTINGS postings (memory stays bounded)
-        idents, ends, doc_ids, freqs = array('I'), array('I'), array('Q'), array('I')
-        for term_id in sorted(removed.keys() | added.keys()):
-            if len(doc_ids) >= IndexUpdate.UPDATE_BATCH_POSTINGS:
-                term_index.set_term_defs_arrays(idents, ends, doc_ids, freqs, identification)
-                idents, ends, doc_ids, freqs = array('I'), array('I'), array('Q'), array('I')
-            postings = {}
-            for term_cg in term_index.get_term_def(term_id) or ():
-                for document in term_cg.documents:
-                    postings[document.ident] = postings.get(document.ident, 0) + document.frequency
-            for doc_id in removed.get(term_id, ()):
-                postings.pop(doc_id, None)
-            postings.update(added.get(term_id, {}))
-            idents.append(term_id)
-            for doc_id in sorted(postings):         # no postings left: the term is erased
-                doc_ids.append(doc_id)
-                freqs.append(postings[doc_id])
-            ends.append(len(doc_ids))
-        term_index.set_term_defs_arrays(idents, ends, doc_ids, freqs, identification)
-
-    @staticmethod
-    def _update_local_index(local_index, doc_ids, pending, term_to_id, identification):
-        idents, ends, term_ids, positions = array('Q'), array('I'), array('I'), array('I')
-        for doc_id in doc_ids:
-            tokens = pending[doc_id] or ()          # no tokens: the document is erased
-            idents.append(doc_id)
-            term_ids.extend(term_to_id[token] for token in tokens)
-            positions.extend(range(len(tokens)))
-            ends.append(len(term_ids))
-        lengths = array('I', [1]) * len(term_ids)
-        local_index.set_local_defs_arrays(idents, ends, term_ids, positions, lengths, identification)
-
-    def _compact_lexicon(self):
-        # the hash bucket count is fixed in the file: past LEXICON_MAX_LOAD words per bucket, the
-        # index is rebuilt (term ids change, document ids don't) with twice as many buckets as words
-        if self._words_nb <= self.LEXICON_MAX_LOAD * self._modulo:
-            return
-        self._rebuild(2 * self._words_nb)
-
-    def _migrate_from_v1(self):
-        # an index written before format v2 is read, but its writers refuse to extend it: the copy
-        # is first rebuilt in format v2 (term ids change, document ids don't)
-        if not os.path.exists(self._base + ".nindlexiconindex"):
-            return                                  # a new index
-        lexicon = native.NindLexiconIndex(self._base, is_writer=False)
-        if lexicon.is_format_v2():
-            return
-        words_nb = lexicon.get_identification().lexicon_words_nb
-        del lexicon
-        self._rebuild(max(self.LEXICON_MIN_BUCKETS, 2 * words_nb))
-
-    def _rebuild(self, lexicon_buckets):
-        # the generation's index, rebuilt in place by a merge of itself (in the current format)
-        rebuild_dir = tempfile.mkdtemp(prefix=".rebuild-", dir=os.path.dirname(self._base))
-        try:
-            rebuilt = os.path.join(rebuild_dir, os.path.basename(self._base))
-            doc_ids, lengths = _lengths_arrays(self._lengths)
-            native.merge_indexes([self._base], rebuilt, with_retrolexicon=self._with_retrolexicon,
-                                 lexicon_indirection_bloc_size=lexicon_buckets, doc_ids=doc_ids, doc_lengths=lengths)
-            for extension in INDEX_EXTENSIONS:
-                if os.path.exists(rebuilt + extension):
-                    os.replace(rebuilt + extension, self._base + extension)
-        finally:
-            shutil.rmtree(rebuild_dir, ignore_errors=True)
 
 
 class NindIndexer:

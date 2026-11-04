@@ -163,6 +163,28 @@ public:
     *\param lengths (document, length) pairs, in any order (a document given twice: its last one) */
     void setDocumentLengths(const std::vector<std::pair<NindDocId, unsigned int> > &lengths);
 
+    /**\brief (writer) Change a term's postings: the removed documents leave every category,
+    * then the added postings go into category cg (a document already there: its frequency
+    * replaced); a term left without documents is erased. The definition is rewritten whole, with
+    * room for the next additions (format v2). Fast path, in bulk mode (format v2): when nothing
+    * is removed, the term's only category is cg and every added document comes after its last one,
+    * only its last block is rewritten, followed by the new blocks, and its directory, in place in
+    * the definition's room (left by an earlier rewrite), when there is enough. Each term at most
+    * once between beginBulk and endBulk.
+    *\param ident ident of term
+    *\param removed documents to remove, in increasing order
+    *\param cg category of the added postings
+    *\param added postings to add, by increasing document
+    *\param fileIdentification unique identification of lexicon
+    *\param specifics list of specific unsigned int
+    *\return true if the definition was rewritten in place (fast path) */
+    bool updateTermDef(const unsigned int ident,
+                       const std::vector<NindDocId> &removed,
+                       const unsigned char cg,
+                       const std::vector<Document> &added,
+                       const Identification &fileIdentification,
+                       const std::list<unsigned int> &specifics);
+
 private:
     void decodeTermDef(const unsigned int ident,
                        NindReadBuffer &in,
@@ -187,9 +209,35 @@ private:
                          std::vector<Document> &postings,
                          std::vector<size_t> &categoryEnds,
                          std::vector<std::pair<unsigned char, unsigned int> > *categories) const;
-    //format v2: forms the definition (directory, then blocks) in the write buffer
+    //format v2: forms the definition (directory, then blocks) in the write buffer; with room: a
+    //single category with blocks gets room after its directory and after its blocks, for
+    //additions written in place (updateTermDef)
     void writeTermDefV2(const unsigned int ident,
-                        const std::list<struct TermCG> &termDef);
+                        const std::list<struct TermCG> &termDef,
+                        const bool withRoom = false);
+    //a definition, from the write buffer's start, then the specifics and identification
+    void writeTermDef(const unsigned int ident,
+                      const std::list<struct TermCG> &termDef,
+                      const Identification &fileIdentification,
+                      const std::list<unsigned int> &specifics,
+                      const bool withRoom);
+    //format v2: a block's descriptor (<offsetBloc> <longueurBloc> as given); returns where they are
+    unsigned int putBlockDescriptor(const Block &block,
+                                    const NindDocId previousLast);
+    //format v2: a block (<flagBloc=71> ...) of documents [begin, end)
+    void putBlock(const unsigned int ident,
+                  const unsigned char cg,
+                  const Document *documents,
+                  const size_t docsNb);
+    //format v2: a block's descriptor fields from its documents (offset and length: 0)
+    Block describeBlock(const Document *documents,
+                        const size_t docsNb) const;
+    //the fast path of updateTermDef: false if it doesn't apply or there isn't room
+    bool appendInPlace(const unsigned int ident,
+                       const unsigned char cg,
+                       const std::vector<Document> &added,
+                       const Identification &fileIdentification,
+                       const std::list<unsigned int> &specifics);
 public:
     /**\brief number of postings per block of a long list (format v2; a list of at most this many
     * documents is written inline) */
