@@ -71,7 +71,9 @@ NindPadFile::NindPadFile(const string &fileName,
                          const Identification &referenceIdentification,
                          const unsigned int specificsSize,
                          const unsigned int dataEntrySize,
-                         const unsigned int dataEntriesBlocSize):
+                         const unsigned int dataEntriesBlocSize,
+                         const unsigned int nextBlockAddrSize,
+                         const unsigned int legacyDataEntrySize):
     m_file(fileName),
     m_fileName(fileName),
     m_isWriter(isWriter),
@@ -87,8 +89,11 @@ NindPadFile::NindPadFile(const string &fileName,
     m_sharedMaps(),
     m_specificsSize(specificsSize),
     m_dataEntrySize(dataEntrySize),
-    m_dataEntriesBlocSize(dataEntriesBlocSize)
+    m_dataEntriesBlocSize(dataEntriesBlocSize),
+    m_nextBlockAddrSize(nextBlockAddrSize)
 {
+    //the layout: a file of dataEntrySize entries has <addrBlocSuivant> of nextBlockAddrSize
+    //bytes; one of legacyDataEntrySize entries (format v1, if given) of 5 bytes
     if (m_isWriter) {
         //si fichier ejcrivain, ouvre en ecriture + lecture
         bool isOpened = m_file.open("r+b");
@@ -101,6 +106,8 @@ NindPadFile::NindPadFile(const string &fileName,
             m_file.setPos(0, SEEK_SET);
             m_file.readBuffer(TAILLE_ENTETE_FIXE);
             m_dataEntrySize = m_file.getInt1();
+            if (legacyDataEntrySize != 0 && m_dataEntrySize == legacyDataEntrySize)
+                throw NindPadFileException("NindPadFile::NindPadFile format v1 file, written by an older nind: rebuild it " + m_fileName);
             if (m_dataEntrySize != dataEntrySize)
                 throw NindPadFileException("NindPadFile::NindPadFile bad index size " + m_fileName);
             m_specificsSize = m_file.getInt3();
@@ -149,6 +156,10 @@ NindPadFile::NindPadFile(const string &fileName,
         m_file.readBuffer(TAILLE_ENTETE_FIXE);
         m_dataEntrySize = m_file.getInt1();
         m_specificsSize = m_file.getInt3();
+        //a reader reads both layouts
+        if (legacyDataEntrySize != 0 && m_dataEntrySize == legacyDataEntrySize) m_nextBlockAddrSize = 5;
+        else if (m_dataEntrySize != dataEntrySize && legacyDataEntrySize != 0)
+            throw NindPadFileException("NindPadFile::NindPadFile bad index size " + m_fileName);
         checkHeader();
         //ejtablit la carte des blocs d'entrejes
         mapEntriesBlocks();
@@ -247,7 +258,7 @@ NindPadFile::EntriesMap *NindPadFile::mapEntriesBlocksAt(NindReadBuffer &buffer,
             m_file.readAt(blockAddr, TAILLE_TETE_INDEX, buffer);
             if (buffer.getInt1() != FLAG_INDEXEJ)
                 throw NindPadFileException("NindPadFile::mapEntriesBlocksAt : " + m_fileName);
-            const uint64_t addrBlocSuivant = buffer.getInt5();
+            const uint64_t addrBlocSuivant = getNextBlockAddr(buffer);
             const unsigned int nombreIndex = buffer.getInt3();
             //le bloc suivant est toujours aprehs celui-ci : la chaisne est finie.
             //Un ejcrivain a pu ajouter un bloc depuis que fileSize a ejtej lu (il ejcrit le bloc et la
@@ -310,16 +321,17 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
         const uint64_t entriesBlock = m_bulkEnd;
         m_file.createBuffer(TAILLE_TETE_INDEX);
         m_file.putInt1(FLAG_INDEXEJ);
-        m_file.putInt5(0);
+        putNextBlockAddr(0);
         m_file.putInt3(m_dataEntriesBlocSize);
         bulkWrite(entriesBlock, 0, TAILLE_TETE_INDEX);
         m_file.writeValue(0, m_dataEntriesBlocSize*m_dataEntrySize);
         m_bulkPos += (uint64_t)m_dataEntriesBlocSize*m_dataEntrySize;
         m_bulkEnd = m_bulkPos;
         if (m_entriesBlocksMap.size() != 0) {
-            m_file.createBuffer(5);
-            m_file.putInt5(entriesBlock);
-            bulkWrite(m_entriesBlocksMap.back().first - 8, 0, 5);
+            //<addrBlocSuivant> of the previous block: its header's second field
+            m_file.createBuffer(m_nextBlockAddrSize);
+            putNextBlockAddr(entriesBlock);
+            bulkWrite(m_entriesBlocksMap.back().first - TAILLE_TETE_INDEX + 1, 0, m_nextBlockAddrSize);
         }
         m_entriesBlocksMap.push_back(pair<uint64_t, unsigned int>(entriesBlock + TAILLE_TETE_INDEX, m_dataEntriesBlocSize));
         publishEntriesMap();
@@ -332,7 +344,7 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
     m_file.createBuffer(TAILLE_TETE_INDEX);
     //<flagIndexej=47> <addrBlocSuivant> <nombreIndex>
     m_file.putInt1(FLAG_INDEXEJ);
-    m_file.putInt5(0);
+    putNextBlockAddr(0);
     m_file.putInt3(m_dataEntriesBlocSize);
     m_file.writeBuffer();                               //ecriture effective sur le fichier
     //remplit la zone d'indirection augenteje des spejcifiques avec des 0
@@ -348,9 +360,9 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
         pair<uint64_t, unsigned int> &indirectionBlocPrec = m_entriesBlocksMap.back();
         //se positionne sur le <addrBlocSuivant> du dernier bloc
         //<flagIndexej=47> <addrBlocSuivant> <nombreIndex> { <donnejesIndexejes> }
-        m_file.setPos(indirectionBlocPrec.first -8, SEEK_SET);   //pour pointer <addrBlocSuivant>
-        m_file.createBuffer(5);
-        m_file.putInt5(entriesBlock);
+        m_file.setPos(indirectionBlocPrec.first - TAILLE_TETE_INDEX + 1, SEEK_SET);   //pour pointer <addrBlocSuivant>
+        m_file.createBuffer(m_nextBlockAddrSize);
+        putNextBlockAddr(entriesBlock);
         m_file.writeBuffer();
     }
     //met ah jour la carte des entrejes
@@ -369,7 +381,7 @@ unsigned int NindPadFile::getFirstEntriesBlockSize()
     m_file.readBuffer(TAILLE_TETE_INDEX);
     if (m_file.getInt1() != FLAG_INDEXEJ)
         throw NindPadFileException("NindPadFile::getFirstEntriesBlockSize : " + m_fileName);
-    m_file.getInt5();
+    getNextBlockAddr(m_file.inBuffer());
     return m_file.getInt3();
 }
 ////////////////////////////////////////////////////////////
@@ -518,7 +530,7 @@ void NindPadFile::mapEntriesBlocks()
         m_file.readBuffer(TAILLE_TETE_INDEX);
         if (m_file.getInt1() != FLAG_INDEXEJ)
             throw NindPadFileException("NindPadFile::mapEntriesBlocks : " + m_fileName);
-        const uint64_t addrBlocSuivant = m_file.getInt5();
+        const uint64_t addrBlocSuivant = getNextBlockAddr(m_file.inBuffer());
         const unsigned int nombreIndex = m_file.getInt3();
         const uint64_t pos = m_file.getPos();
         checkEntriesBlock(pos - TAILLE_TETE_INDEX, nombreIndex, addrBlocSuivant);
@@ -665,7 +677,7 @@ NindPadFile::PadFileStats NindPadFile::analysePadFile()
         m_file.readBuffer(TAILLE_TETE_INDEX);
         if (m_file.getInt1() != FLAG_INDEXEJ)
             throw NindPadFileException("NindPadFile::analysePadFile : pas FLAG_INDEXEJ " + m_fileName);
-        const uint64_t addrBlocSuivant = m_file.getInt5();
+        const uint64_t addrBlocSuivant = getNextBlockAddr(m_file.inBuffer());
         const unsigned int nombreIndex = m_file.getInt3();
         checkEntriesBlock(addrIndex, nombreIndex, addrBlocSuivant);
         blocNum++;
