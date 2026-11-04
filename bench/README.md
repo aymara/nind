@@ -275,7 +275,10 @@ One laptop: Intel i7-1370P (20 threads), 62 GB, NVMe; 8 threads to build,
 (`prepare.py --stopwords`), for every system. MS MARCO: 500 dev queries
 (`--max-queries 500`); prefixes (`-1M`...) have no qrels; `nind+local`
 searches with the same scorer as `nind`, so only its build and update are run
-there. Sizes in MB, latencies in ms; every column in `WORK/report.md`.
+there. Sizes in MB, latencies in ms. Every column, the raw results and the
+full extrapolation are in `bench/retrieval/results/2026-11-04/`. The overflow
+guards added after these runs (commit `2c0bc0a`) were checked on a full
+MS MARCO build: indexes of exactly the same sizes.
 
 BEIR SciFact, NFCorpus, FiQA, with and without stopwords:
 
@@ -356,7 +359,7 @@ the stopword-free corpus:
 
 Growth with the corpus size, fitted as y = a N^p on the four stopword-free
 MS MARCO sizes (`extrapolate.py`; bm25s and the `+local`/`+pos` variants in
-its full output). The extrapolations are orders of magnitude, assuming the
+`results/2026-11-04/extrapolation.md`). The extrapolations are orders of magnitude, assuming the
 corpus keeps MS MARCO's statistics, and **ignore format limits** (see below):
 
 | system | metric | 1.0M | 2.0M | 4.0M | 8.8M | exponent p | 100M | 1G | 10G |
