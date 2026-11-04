@@ -44,7 +44,8 @@ public:
     // the documents of the corpus, in the order that breaks score ties
     // document ids: 64 bits (NindDocId); positions: 32 bits (at most 4.29G documents per index)
     Impl(const std::vector<NindDocId> &docIds, const std::vector<uint32_t> &lengths, const double avgDocLength):
-        m_docIds(), m_lengths(), m_dense(), m_sparse(), m_docsNb(docIds.size()), m_avgDocLength(avgDocLength),
+        m_docIds(), m_lengths(), m_shortLengths(), m_minLength(0), m_identity(false), m_dense(), m_sparse(), m_docsNb(docIds.size()),
+        m_avgDocLength(avgDocLength),
         m_poolMutex(), m_pool()
     {
         if (docIds.size() != lengths.size()) throw std::invalid_argument("doc_ids and lengths must have the same length");
@@ -72,9 +73,19 @@ public:
         }
         m_docIds.assign(docIds.begin(), docIds.end());
         m_lengths.assign(lengths.begin(), lengths.end());
+        //lengths under 2^16: 2 bytes each (more of them in the processor's caches)
+        uint32_t maxLength = 0;
+        for (size_t i = 0; i < lengths.size(); i++) maxLength = std::max(maxLength, lengths[i]);
+        if (maxLength < 65536) {
+            m_shortLengths.assign(lengths.begin(), lengths.end());
+            std::vector<uint32_t>().swap(m_lengths);
+        }
+        m_identity = true;
+        for (size_t i = 0; i < docIds.size() && m_identity; i++) m_identity = (docIds[i] == i);
+        if (m_identity) std::vector<uint32_t>().swap(m_dense);
         m_minLength = 0;
-        for (size_t i = 0; i < m_lengths.size(); i++)
-            if (i == 0 || m_lengths[i] < m_minLength) m_minLength = m_lengths[i];
+        for (size_t i = 0; i < lengths.size(); i++)
+            if (i == 0 || lengths[i] < m_minLength) m_minLength = lengths[i];
     }
 
     // the documents with a positive score for the query terms (in query order, repeats
@@ -113,6 +124,7 @@ public:
             }
         }
         collectAll(termIndex, distinctIds, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
+        const Params parameters = params(k1, b);
         // the scores, term occurrence by term occurrence in query order (as NindEngine._bm25_score)
         for (size_t o = 0; o < occurrences.size(); o++) {
             const double idf = idfs[occurrences[o]];
@@ -122,7 +134,7 @@ public:
                 const uint32_t position = termPostings[i].first;
                 double &score = scores[position];
                 if (score == 0.0) touched.push_back(position);
-                score += contribution(idf, termPostings[i].second, m_lengths[position], k1, b);
+                score += contribution(idf, termPostings[i].second, lengthOf(position), parameters);
             }
         }
         //(score, position) of the documents with a positive score; scores reset for the next search
@@ -145,14 +157,22 @@ public:
     size_t docsNb() const { return m_docsNb; }
 
 private:
-    // one term's BM25 contribution: the same operations, in the same order, everywhere (scores and
-    // bounds; -ffp-contract=off): each operation is monotonic, so a bound computed at a larger tf
-    // and a smaller length is never below a contribution
-    double contribution(const double idf, const double tf, const double docLength,
-                        const double k1, const double b) const {
-        const double numerator = tf * (k1 + 1);
-        const double denominator = tf + k1 * (1 - b + b * (docLength / m_avgDocLength));
-        return idf * (numerator / denominator);
+    // a query's BM25 constants: tf * (k1 + 1) / (tf + k1 * (1 - b) + k1 * b / avgDocLength * length)
+    struct Params {
+        double k1Plus1, base, perLength;
+    };
+    Params params(const double k1, const double b) const {
+        Params p;
+        p.k1Plus1 = k1 + 1;
+        p.base = k1 * (1 - b);
+        p.perLength = (m_avgDocLength > 0) ? k1 * b / m_avgDocLength : 0.0;
+        return p;
+    }
+    // one term's BM25 contribution: the same function everywhere (scores and bounds): monotonic in
+    // tf (increasing) and in the length (decreasing), so a bound computed at a larger tf and a
+    // smaller length is never below a contribution
+    static double contribution(const double idf, const double tf, const double docLength, const Params &p) {
+        return idf * (tf * p.k1Plus1 / (tf + p.base + p.perLength * docLength));
     }
     double idfOf(const uint64_t df) const {
         //same operations, in the same order, as NindEngine._bm25_score
@@ -195,65 +215,81 @@ private:
         }
     }
 
-    // Dynamic block-max MaxScore, document at a time, exact. The terms by increasing upper bound
-    // (their largest contribution); the shortest prefix of them whose bounds sum is below theta (the
-    // k-th best score so far) is non-essential: a document in none of the others can't reach the top
-    // k. The essential lists are read in document order (blocks read a few at a time); a document is
-    // then completed by the non-essential terms, by decreasing bound, each one first checked against
-    // its block's bound and read (that block only) if the document may still reach theta.
-    // Scores are accumulated in another order than NindEngine._bm25_score: every comparison with
-    // theta has a margin far above the rounding errors, and the candidates kept are scored again,
-    // exactly, in query order (identical scores and ranks).
-    // false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0, a
-    // long list without blocks (format v1).
     static constexpr double PRUNING_MARGIN = 1e-9;
-    static const size_t ESSENTIAL_READ_AHEAD = 16;      //blocks read at once from an essential list
+    static const size_t RAW_READ_AHEAD = 64;            //blocks whose bytes are read at once
+    // a query term's postings, read lazily: blocks' bytes RAW_READ_AHEAD at a time, one block
+    // decoded only when a window needs it
     struct MaxScoreTerm {
         NindTermIndex::TermDirectory directory;
+        unsigned int ident;
         double idf;
         unsigned int multiplicity;      //occurrences in the query
-        size_t blocksNb;                //a short list: 1 (its inline postings)
+        bool inlineList;                //a short list: one pseudo-block, its inline postings
+        size_t blocksNb;
         std::vector<NindDocId> blockFirst, blockLast;
         std::vector<double> blockBounds;
         double bound;                   //the largest of blockBounds
-        size_t chunkBegin, chunkEnd;    //blocks decoded in chunk
-        std::vector<NindTermIndex::Document> chunk;
-        size_t pos;                     //cursor in chunk
-        size_t probeBlock;              //(non-essential) the first block that may hold the next document
-        MaxScoreTerm(): directory(), idf(0), multiplicity(0), blocksNb(0), blockFirst(), blockLast(),
-            blockBounds(), bound(0), chunkBegin(0), chunkEnd(0), chunk(), pos(0), probeBlock(0) {}
-        bool exhausted() const { return pos >= chunk.size(); }     //(essential: see nextBlocks)
+        size_t block;                   //the first block that may hold documents >= the window
+        std::unique_ptr<NindReadBuffer> raw;    //the bytes of blocks [rawBegin, rawEnd)
+        size_t rawBegin, rawEnd;
+        std::vector<NindTermIndex::Document> docs;      //the decoded block (decoded: its index)
+        size_t decoded;
+        size_t pos;                     //cursor in docs
+        NindDocId matchedDoc;           //the last document scored with this term, its frequency
+        uint32_t matchedFrequency;
+        bool matched;
+        MaxScoreTerm(): directory(), ident(0), idf(0), multiplicity(0), inlineList(false), blocksNb(0),
+            blockFirst(), blockLast(), blockBounds(), bound(0), block(0), raw(), rawBegin(0), rawEnd(0),
+            docs(), decoded(NO_BLOCK), pos(0), matchedDoc(0), matchedFrequency(0), matched(false) {}
     };
-    void readBlocks(const NindTermIndex &termIndex, const unsigned int ident, MaxScoreTerm &term,
-                    const size_t first, const size_t end, NindReadBuffer &buffer) const {
-        term.chunk.clear();
-        termIndex.getTermBlocks(ident, term.directory, 0, first, end, term.chunk, buffer);
-        term.chunkBegin = first;
-        term.chunkEnd = end;
+    static const size_t NO_BLOCK = (size_t)-1;
+    // the postings of block b of a term in docs (decoded once), the cursor at its first document
+    void decode(const NindTermIndex &termIndex, MaxScoreTerm &term, const size_t b) const {
+        if (term.decoded == b) return;
         term.pos = 0;
+        term.decoded = b;
+        if (term.inlineList) return;            //(docs holds the inline postings)
+        if (b < term.rawBegin || b >= term.rawEnd) {
+            term.rawBegin = b;
+            term.rawEnd = std::min(b + RAW_READ_AHEAD, term.blocksNb);
+            if (!term.raw) term.raw.reset(new NindReadBuffer());
+            termIndex.readTermBlocks(term.ident, term.directory, 0, term.rawBegin, term.rawEnd, *term.raw);
+        }
+        term.docs.clear();
+        termIndex.decodeTermBlock(term.ident, term.directory, 0, term.rawBegin, b, *term.raw, term.docs);
     }
-    // an essential list's next blocks, until a posting (or the end)
-    void nextBlocks(const NindTermIndex &termIndex, const unsigned int ident, MaxScoreTerm &term,
-                    NindReadBuffer &buffer) const {
-        while (term.pos >= term.chunk.size() && term.chunkEnd < term.blocksNb)
-            readBlocks(termIndex, ident, term, term.chunkEnd,
-                       std::min(term.chunkEnd + ESSENTIAL_READ_AHEAD, term.blocksNb), buffer);
-    }
+    // Block-max MaxScore over windows, exact. The documents are taken window by window, a window
+    // ending at the next block boundary of any term, so that every term has at most one block in
+    // it: a document's score there is at most the sum of those blocks' bounds. In each window, the
+    // terms by increasing block bound; the longest prefix of them whose bounds sum is below theta
+    // (the k-th best score so far) is non-essential: a document in none of the others can't reach
+    // the top k. A window whose bounds sum is below theta is skipped (nothing decoded). Otherwise the
+    // essential terms' blocks are decoded and read in document order; a document is then completed by
+    // the non-essential terms, by decreasing bound, while it may still reach theta (each of their
+    // blocks decoded only if needed).
+    // Scores are accumulated in another order than the exhaustive search's: every comparison with
+    // theta has a margin far above the rounding errors, and the candidates kept are scored again
+    // in query order, as the exhaustive search does (identical scores and ranks).
+    // false (nothing done) when it doesn't apply: a term in several categories, an idf <= 0, a
+    // long list without blocks (format v1).
     bool searchMaxScore(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
                         const std::vector<size_t> &occurrences, const double k1, const double b,
                         const size_t topK, NindReadBuffer &buffer,
                         std::vector<std::pair<uint64_t, double> > &result) const
     {
         const double shortest = m_minLength;
+        const Params parameters = params(k1, b);
         // the query's terms present in the index (index in distinctIds -> in terms)
         std::vector<MaxScoreTerm> terms;
-        std::vector<unsigned int> termIdents;
         std::vector<size_t> termOf(distinctIds.size(), (size_t)-1);
+        terms.reserve(distinctIds.size());
         for (size_t d = 0; d < distinctIds.size(); d++) {
-            MaxScoreTerm term;
-            if (!termIndex.getTermDirectory(distinctIds[d], term.directory, buffer)) continue;
+            terms.push_back(MaxScoreTerm());
+            MaxScoreTerm &term = terms.back();
+            if (!termIndex.getTermDirectory(distinctIds[d], term.directory, buffer)) { terms.pop_back(); continue; }
             if (term.directory.categories.size() != 1) return false;
             const NindTermIndex::TermDirectory::Category &category = term.directory.categories[0];
+            term.ident = distinctIds[d];
             term.idf = idfOf(category.docsNb);
             if (!(term.idf > 0)) return false;
             //a format v1 file: every list inline, a long one would be read whole as one block
@@ -267,11 +303,12 @@ private:
                     term.blockLast.push_back(block.last);
                     const double length = std::max((double)block.minLength, shortest);
                     term.blockBounds.push_back(term.multiplicity *
-                                               contribution(term.idf, block.maxFrequency, length, k1, b));
+                                               contribution(term.idf, block.maxFrequency, length, parameters));
                 }
             }
             else {
-                if (category.inlinePostings.empty()) continue;
+                if (category.inlinePostings.empty()) { terms.pop_back(); continue; }
+                term.inlineList = true;
                 term.blocksNb = 1;
                 term.blockFirst.push_back(category.inlinePostings.front().ident);
                 term.blockLast.push_back(category.inlinePostings.back().ident);
@@ -280,87 +317,125 @@ private:
                     const NindTermIndex::Document &posting = category.inlinePostings[i];
                     const uint32_t position = positionOf(posting.ident);
                     if (position == NO_POSITION || posting.frequency == 0) continue;
-                    bound = std::max(bound, contribution(term.idf, posting.frequency, m_lengths[position], k1, b));
+                    bound = std::max(bound, contribution(term.idf, posting.frequency, lengthOf(position), parameters));
                 }
                 term.blockBounds.push_back(term.multiplicity * bound);
-                term.chunk = category.inlinePostings;
-                term.chunkEnd = 1;
+                term.docs = category.inlinePostings;
             }
             term.bound = *std::max_element(term.blockBounds.begin(), term.blockBounds.end());
-            termOf[d] = terms.size();
-            terms.push_back(std::move(term));
-            termIdents.push_back(distinctIds[d]);
+            termOf[d] = terms.size() - 1;
         }
         const size_t termsNb = terms.size();
         if (termsNb == 0) { result.clear(); return true; }
-        // by increasing bound; prefix[i]: the bounds sum of order[0..i]
-        std::vector<size_t> order(termsNb);
-        for (size_t i = 0; i < termsNb; i++) order[i] = i;
-        std::stable_sort(order.begin(), order.end(),
-                         [&](const size_t x, const size_t y) { return terms[x].bound < terms[y].bound; });
-        std::vector<double> prefix(termsNb);
-        for (size_t i = 0; i < termsNb; i++) prefix[i] = (i ? prefix[i - 1] : 0.0) + terms[order[i]].bound;
-        // the long lists: their first blocks
-        for (size_t i = 0; i < termsNb; i++) nextBlocks(termIndex, termIdents[i], terms[i], buffer);
         std::priority_queue<double, std::vector<double>, std::greater<double> > best;  //the k best approximations
         double threshold = 0.0;                 //theta minus the margin
-        size_t nonEssential = 0;                //order[0..nonEssential) are non-essential
         struct Candidate { uint32_t position; double approximation; };
         std::vector<Candidate> candidates;
         std::vector<uint32_t> candidateFrequencies;   //termsNb per candidate
-        std::vector<uint32_t> frequencies(termsNb);
-        while (nonEssential < termsNb) {
-            // the next document: the smallest current one of the essential lists
-            bool any = false;
-            NindDocId docId = 0;
-            for (size_t i = nonEssential; i < termsNb; i++) {
-                const MaxScoreTerm &term = terms[order[i]];
-                if (term.exhausted()) continue;
-                const NindDocId current = term.chunk[term.pos].ident;
-                if (!any || current < docId) { docId = current; any = true; }
-            }
-            if (!any) break;
-            const uint32_t position = positionOf(docId);
-            std::fill(frequencies.begin(), frequencies.end(), 0);
-            double approximation = 0.0;
-            for (size_t i = nonEssential; i < termsNb; i++) {
-                const size_t t = order[i];
+        // per window: the terms in it (by increasing bound), their bounds, the bounds' prefix sums
+        std::vector<size_t> order;
+        std::vector<double> windowBound(termsNb), prefix(termsNb);
+        order.reserve(termsNb);
+        NindDocId windowMin = ~(NindDocId)0;
+        for (size_t t = 0; t < termsNb; t++) windowMin = std::min(windowMin, terms[t].blockFirst[0]);
+        while (true) {
+            // each term's block at or after windowMin; the window: up to the next block boundary
+            NindDocId windowMax = ~(NindDocId)0;
+            order.clear();
+            for (size_t t = 0; t < termsNb; t++) {
                 MaxScoreTerm &term = terms[t];
-                if (term.exhausted() || term.chunk[term.pos].ident != docId) continue;
-                frequencies[t] = term.chunk[term.pos].frequency;
-                term.pos++;
-                nextBlocks(termIndex, termIdents[t], term, buffer);
-                if (position != NO_POSITION && frequencies[t] != 0)
-                    approximation += term.multiplicity * contribution(term.idf, frequencies[t], m_lengths[position], k1, b);
+                while (term.block < term.blocksNb && term.blockLast[term.block] < windowMin) term.block++;
+                if (term.block == term.blocksNb) continue;
+                if (term.blockFirst[term.block] > windowMin) windowMax = std::min(windowMax, term.blockFirst[term.block] - 1);
+                else windowMax = std::min(windowMax, term.blockLast[term.block]);
+                order.push_back(t);
             }
-            if (position == NO_POSITION) continue;
-            // the non-essential terms, by decreasing bound, while the document may reach theta
-            bool rejected = false;
-            for (size_t i = nonEssential; i-- > 0; ) {
-                if (approximation + prefix[i] < threshold) { rejected = true; break; }
+            if (order.empty()) break;
+            // the terms with a block in the window, by increasing bound (the others contribute 0)
+            size_t present = 0;
+            for (size_t i = 0; i < order.size(); i++) {
                 const size_t t = order[i];
-                MaxScoreTerm &term = terms[t];
-                while (term.probeBlock < term.blocksNb && term.blockLast[term.probeBlock] < docId) term.probeBlock++;
-                if (term.probeBlock == term.blocksNb || term.blockFirst[term.probeBlock] > docId) continue;   //not in it
-                const double others = i ? prefix[i - 1] : 0.0;
-                if (approximation + term.blockBounds[term.probeBlock] + others < threshold) { rejected = true; break; }
-                if (term.probeBlock < term.chunkBegin || term.probeBlock >= term.chunkEnd)
-                    readBlocks(termIndex, termIdents[t], term, term.probeBlock, term.probeBlock + 1, buffer);
-                while (term.pos < term.chunk.size() && term.chunk[term.pos].ident < docId) term.pos++;
-                if (term.pos == term.chunk.size() || term.chunk[term.pos].ident != docId) continue;
-                frequencies[t] = term.chunk[term.pos].frequency;
-                if (frequencies[t] != 0)
-                    approximation += term.multiplicity * contribution(term.idf, frequencies[t], m_lengths[position], k1, b);
+                windowBound[t] = (terms[t].blockFirst[terms[t].block] <= windowMax) ? terms[t].blockBounds[terms[t].block] : 0.0;
+                if (windowBound[t] > 0) order[present++] = t;
             }
-            if (rejected || !(approximation > 0) || approximation < threshold) continue;
-            candidates.push_back(Candidate{position, approximation});
-            candidateFrequencies.insert(candidateFrequencies.end(), frequencies.begin(), frequencies.end());
-            if (best.size() < topK) best.push(approximation);
-            else if (approximation > best.top()) { best.pop(); best.push(approximation); }
-            if (best.size() == topK) {
-                threshold = best.top() * (1 - PRUNING_MARGIN);
-                while (nonEssential < termsNb && prefix[nonEssential] < threshold) nonEssential++;
+            order.resize(present);
+            for (size_t i = 1; i < order.size(); i++)           //(few terms: insertion sort)
+                for (size_t j = i; j > 0 && windowBound[order[j]] < windowBound[order[j - 1]]; j--)
+                    std::swap(order[j], order[j - 1]);
+            double sum = 0.0;
+            for (size_t i = 0; i < order.size(); i++) prefix[i] = (sum += windowBound[order[i]]);
+            // the non-essential prefix: order[0..essential)
+            size_t essential = 0;
+            while (essential < order.size() && prefix[essential] < threshold) essential++;
+            if (essential < order.size()) {
+                // the essential terms' blocks, each cursor at its first document in the window
+                for (size_t i = essential; i < order.size(); i++) {
+                    MaxScoreTerm &term = terms[order[i]];
+                    decode(termIndex, term, term.block);
+                    while (term.pos < term.docs.size() && term.docs[term.pos].ident < windowMin) term.pos++;
+                }
+                // the window's documents in the essential lists, in order: each document's score and
+                // the next document in one pass
+                NindDocId docId = 0;
+                bool any = false;
+                for (size_t i = essential; i < order.size(); i++) {
+                    const MaxScoreTerm &term = terms[order[i]];
+                    if (term.pos >= term.docs.size()) continue;
+                    const NindDocId current = term.docs[term.pos].ident;
+                    if (current <= windowMax && (!any || current < docId)) { docId = current; any = true; }
+                }
+                while (any) {
+                    const uint32_t position = positionOf(docId);
+                    const double length = (position != NO_POSITION) ? lengthOf(position) : 0.0;
+                    double approximation = 0.0;
+                    NindDocId nextDoc = 0;
+                    bool anyNext = false;
+                    for (size_t i = essential; i < order.size(); i++) {
+                        MaxScoreTerm &term = terms[order[i]];
+                        if (term.pos >= term.docs.size()) continue;
+                        const NindTermIndex::Document &posting = term.docs[term.pos];
+                        if (posting.ident == docId) {
+                            term.matchedDoc = docId;
+                            term.matchedFrequency = posting.frequency;
+                            term.matched = true;
+                            if (posting.frequency != 0)
+                                approximation += term.multiplicity * contribution(term.idf, posting.frequency, length, parameters);
+                            if (++term.pos >= term.docs.size()) continue;
+                        }
+                        const NindDocId current = term.docs[term.pos].ident;
+                        if (current <= windowMax && (!anyNext || current < nextDoc)) { nextDoc = current; anyNext = true; }
+                    }
+                    const NindDocId thisDoc = docId;
+                    docId = nextDoc;
+                    any = anyNext;
+                    if (position == NO_POSITION) continue;
+                    // the non-essential terms, by decreasing bound, while the document may reach theta
+                    bool rejected = false;
+                    for (size_t i = essential; i-- > 0; ) {
+                        if (approximation + prefix[i] < threshold) { rejected = true; break; }
+                        MaxScoreTerm &term = terms[order[i]];
+                        decode(termIndex, term, term.block);
+                        while (term.pos < term.docs.size() && term.docs[term.pos].ident < thisDoc) term.pos++;
+                        if (term.pos == term.docs.size() || term.docs[term.pos].ident != thisDoc) continue;
+                        const uint32_t frequency = term.docs[term.pos].frequency;
+                        term.matchedDoc = thisDoc;
+                        term.matchedFrequency = frequency;
+                        term.matched = true;
+                        if (frequency != 0)
+                            approximation += term.multiplicity * contribution(term.idf, frequency, length, parameters);
+                    }
+                    if (rejected || !(approximation > 0) || approximation < threshold) continue;
+                    candidates.push_back(Candidate{position, approximation});
+                    for (size_t t = 0; t < termsNb; t++)
+                        candidateFrequencies.push_back((terms[t].matched && terms[t].matchedDoc == thisDoc) ? terms[t].matchedFrequency : 0);
+                    if (best.size() < topK) best.push(approximation);
+                    else if (approximation > best.top()) { best.pop(); best.push(approximation); }
+                    if (best.size() == topK) threshold = best.top() * (1 - PRUNING_MARGIN);
+                    //(a higher theta: fewer essential terms from the next window on)
+                }
             }
+            if (windowMax == ~(NindDocId)0) break;
+            windowMin = windowMax + 1;
         }
         // the candidates that may be in the top k, scored exactly as the exhaustive search does
         std::vector<std::pair<double, uint32_t> > ranked;
@@ -373,7 +448,7 @@ private:
                 if (t == (size_t)-1) continue;
                 const uint32_t frequency = candidateFrequencies[c * termsNb + t];
                 if (frequency == 0) continue;
-                score += contribution(terms[t].idf, frequency, m_lengths[position], k1, b);
+                score += contribution(terms[t].idf, frequency, lengthOf(position), parameters);
             }
             if (score > 0) ranked.push_back(std::make_pair(-score, position));
         }
@@ -385,6 +460,8 @@ private:
     }
 
     uint32_t positionOf(const uint64_t docId) const {
+        //ids 0..N-1 in order (an index NindIndexer built): the position is the id
+        if (m_identity) return docId < m_docsNb ? (uint32_t)docId : NO_POSITION;
         if (!m_dense.empty() || m_sparse.empty())
             return docId < m_dense.size() ? m_dense[docId] : NO_POSITION;
         const auto it = std::lower_bound(m_sparse.begin(), m_sparse.end(), docId,
@@ -394,8 +471,13 @@ private:
     }
 
     std::vector<uint64_t> m_docIds;     //position -> document id
-    std::vector<uint32_t> m_lengths;    //position -> length
+    std::vector<uint32_t> m_lengths;    //position -> length (or, all under 2^16:)
+    std::vector<uint16_t> m_shortLengths;
+    double lengthOf(const uint32_t position) const {
+        return m_shortLengths.empty() ? (double)m_lengths[position] : (double)m_shortLengths[position];
+    }
     uint32_t m_minLength;               //the shortest document
+    bool m_identity;                    //document i at position i: no table
     std::vector<uint32_t> m_dense;      //document id -> position (NO_POSITION: none), or empty
     std::vector<std::pair<uint64_t, uint32_t> > m_sparse;   //(document id, position), by id, when not dense
     size_t m_docsNb;

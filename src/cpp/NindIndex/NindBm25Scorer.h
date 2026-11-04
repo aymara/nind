@@ -36,8 +36,8 @@ namespace latecon {
 *   idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * length / avgDocLength)), idf =
 *   log((N - df + 0.5) / (df + 0.5) + 1), df counting the documents of every category; a document
 *   in several categories of a term counts in its first one only. Ties are broken by the order of
-*   the documents given to the constructor. (nind's Python NindEngine scores exactly so: compile
-*   with -ffp-contract=off for bit-identical scores.)
+*   the documents given to the constructor. (nind's Python NindEngine.bm25_score computes the
+*   same formula: the same scores to rounding, not bit for bit.)
 * - prune: block-max MaxScore, document at a time, over format v2 block descriptors (max
 *   frequency, shortest length): the same results as the exhaustive search, faster for a small
 *   top k on a large corpus (NindEngine uses it when topK * 4000 <= documents). It falls back

@@ -49,36 +49,51 @@ void packBits(const uint64_t *values, const size_t valuesNb, const unsigned int 
         }
     }
 }
-//valuesNb values of bits bits each, least significant bit first, from bytes (bytesNb of them)
+//valuesNb values of bits bits each, least significant bit first, from bytes (bytesNb of them,
+//enough for them): a bit accumulator, refilled a byte at a time, never past bytes
 void unpackBits(const unsigned char *bytes, const size_t bytesNb, const size_t valuesNb, const unsigned int bits,
                 uint64_t *values) {
     if (bits == 0) {
         for (size_t i = 0; i < valuesNb; i++) values[i] = 0;
         return;
     }
-    //a zero-padded copy: 8-byte loads never go past it
-    unsigned char padded[NindTermIndex::BLOCK_SIZE * 8 + 16];
-    const bool copy = bytesNb + 16 <= sizeof(padded);
-    if (copy) {
-        memcpy(padded, bytes, bytesNb);
-        memset(padded + bytesNb, 0, 16);
-    }
-    if (copy && bits <= 56) {
-        const uint64_t mask = (bits == 64) ? ~0ull : ((1ull << bits) - 1);
-        uint64_t bitPos = 0;
-        for (size_t i = 0; i < valuesNb; i++, bitPos += bits) {
-            uint64_t word;
-            memcpy(&word, padded + bitPos / 8, 8);          //(little-endian hosts)
-            values[i] = (word >> (bitPos % 8)) & mask;
+    const unsigned char *p = bytes, *const end = bytes + bytesNb;
+    if (bits <= 56) {
+        const uint64_t mask = (1ull << bits) - 1;
+        uint64_t accumulator = 0;
+        unsigned int available = 0;
+        for (size_t i = 0; i < valuesNb; i++) {
+            if (available < bits) {
+                if (end - p >= 8) {
+                    //a 64-bit load, as many whole bytes as fit taken (little-endian hosts):
+                    //available becomes 56..63
+                    uint64_t word;
+                    memcpy(&word, p, 8);
+                    accumulator |= word << available;
+                    p += (63 - available) >> 3;
+                    available |= 56;
+                }
+                else {
+                    //the end of the bytes: a byte at a time, zeros past them
+                    while (available < bits) {
+                        accumulator |= (uint64_t)(p < end ? *p : 0) << available;
+                        p++;
+                        available += 8;
+                    }
+                }
+            }
+            values[i] = accumulator & mask;
+            accumulator >>= bits;
+            available -= bits;
         }
         return;
     }
-    //wide values, or more bytes than a block holds: bit by bit
+    //wide values (gaps over 2^56): bit by bit
     uint64_t bitPos = 0;
     for (size_t i = 0; i < valuesNb; i++) {
         uint64_t value = 0;
         for (unsigned int b = 0; b < bits; b++, bitPos++)
-            if (bytes[bitPos / 8] & (1u << (bitPos % 8))) value |= 1ull << b;
+            if (bitPos / 8 < bytesNb && (bytes[bitPos / 8] & (1u << (bitPos % 8)))) value |= 1ull << b;
         values[i] = value;
     }
 }
@@ -426,20 +441,28 @@ void NindTermIndex::decodeBlock(const unsigned int ident,
         unpackBits(frequencyData, frequencyBytes, docsNb, frequencyBits, frequencies);
         if (!in.endOfInBuffer()) throw NindTermIndexException("NindTermIndex::getTermDef J : " + m_fileName);
         NindDocId identDocument = block.first;
-        unsigned int maxFrequency = 0;
+        uint64_t maxFrequency = 0;
         const size_t begin = postings.size();
         postings.resize(begin + docsNb);
+        Document *out = &postings[begin];
         for (size_t d = 0; d < docsNb; d++) {
             if (d > 0) {
                 //a gap of gaps[d - 1] + 1, within 64 bits
-                if (gaps[d - 1] >= ~(NindDocId)0 - identDocument)
+                if (gaps[d - 1] >= ~(NindDocId)0 - identDocument) {
+                    postings.resize(begin);
                     throw NindTermIndexException("NindTermIndex::getTermDef I : " + m_fileName);
+                }
                 identDocument += gaps[d - 1] + 1;
             }
             const uint64_t frequency = frequencies[d] + minFrequency;
-            if (frequency > 0xFFFFFFFFull) throw NindTermIndexException("NindTermIndex::getTermDef I : " + m_fileName);
-            if (frequency > maxFrequency) maxFrequency = (unsigned int)frequency;
-            postings[begin + d] = Document(identDocument, (unsigned int)frequency);
+            maxFrequency = std::max(maxFrequency, frequency);
+            out[d].ident = identDocument;
+            out[d].frequency = (unsigned int)frequency;
+        }
+        //(no frequency over 32 bits: checked once per block)
+        if (maxFrequency > 0xFFFFFFFFull) {
+            postings.resize(begin);
+            throw NindTermIndexException("NindTermIndex::getTermDef I : " + m_fileName);
         }
         if (identDocument != block.last || maxFrequency != block.maxFrequency)
             throw NindTermIndexException("NindTermIndex::getTermDef J : " + m_fileName);
@@ -580,6 +603,20 @@ void NindTermIndex::getTermBlocks(const unsigned int ident,
                                   vector<Document> &postings,
                                   NindReadBuffer &buffer) const
 {
+    readTermBlocks(ident, directory, category, firstBlock, endBlock, buffer);
+    for (size_t b = firstBlock; b < endBlock; b++)
+        decodeTermBlock(ident, directory, category, firstBlock, b, buffer, postings);
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of the bytes of blocks [firstBlock, endBlock) of a category
+void NindTermIndex::readTermBlocks(const unsigned int ident,
+                                   const TermDirectory &directory,
+                                   const size_t category,
+                                   const size_t firstBlock,
+                                   const size_t endBlock,
+                                   NindReadBuffer &buffer) const
+{
+    (void)ident;
     if (category >= directory.categories.size() || firstBlock >= endBlock
         || endBlock > directory.categories[category].blocks.size())
         throw NindTermIndexException("NindTermIndex::getTermBlocks bad block range : " + m_fileName);
@@ -593,11 +630,24 @@ void NindTermIndex::getTermBlocks(const unsigned int ident,
         end += blocks[b].length;
     }
     m_file.readAt(directory.offset + begin, (unsigned int)(end - begin), buffer);
-    for (size_t b = firstBlock; b < endBlock; b++) {
-        buffer.setInBufferPtr((unsigned int)(blocks[b].offset - begin));
-        buffer.setEndInBuffer((unsigned int)blocks[b].length);
-        decodeBlock(ident, blocks[b], buffer, postings);
-    }
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) decoding of a block read by readTermBlocks
+void NindTermIndex::decodeTermBlock(const unsigned int ident,
+                                    const TermDirectory &directory,
+                                    const size_t category,
+                                    const size_t firstBlock,
+                                    const size_t block,
+                                    NindReadBuffer &buffer,
+                                    vector<Document> &postings) const
+{
+    if (category >= directory.categories.size() || block < firstBlock
+        || block >= directory.categories[category].blocks.size())
+        throw NindTermIndexException("NindTermIndex::decodeTermBlock bad block : " + m_fileName);
+    const vector<Block> &blocks = directory.categories[category].blocks;
+    buffer.setInBufferPtr((unsigned int)(blocks[block].offset - blocks[firstBlock].offset));
+    buffer.setEndInBuffer((unsigned int)blocks[block].length);
+    decodeBlock(ident, blocks[block], buffer, postings);
 }
 ////////////////////////////////////////////////////////////
 //format v2: forme la dejfinition (rejpertoire, puis blocs) dans le buffer d'ejcriture

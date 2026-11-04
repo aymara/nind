@@ -112,6 +112,25 @@ public:
                        std::vector<Document> &postings,
                        NindReadBuffer &buffer) const;
 
+    /**\brief Thread-safe (const) read of the bytes of blocks [firstBlock, endBlock) of a category
+    * (one read), to decode them later, in any order and as needed, with decodeTermBlock */
+    void readTermBlocks(const unsigned int ident,
+                        const TermDirectory &directory,
+                        const size_t category,
+                        const size_t firstBlock,
+                        const size_t endBlock,
+                        NindReadBuffer &buffer) const;
+
+    /**\brief Thread-safe (const) decoding of block `block` of a category, from the bytes
+    * readTermBlocks read from firstBlock on into buffer; postings appended to postings */
+    void decodeTermBlock(const unsigned int ident,
+                         const TermDirectory &directory,
+                         const size_t category,
+                         const size_t firstBlock,
+                         const size_t block,
+                         NindReadBuffer &buffer,
+                         std::vector<Document> &postings) const;
+
     /**\brief Read a full term definition as a list of structures
     *\param ident ident of term
     *\param termDef structure to receive all datas of the specified term
