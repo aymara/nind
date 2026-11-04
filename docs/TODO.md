@@ -42,7 +42,7 @@ of 3.0.0 (format v2).
     to `NindTermAmose::getDocList` (64-bit `NindDocId` since 3.0.0).
   - `tf` is read from the local index once per posting
     (`DocListIteratorImpl.cpp:80`, unlocked): `NindTermAmose::getDocPostings`
-    (3.2) returns the postings with their frequencies.
+    (3.1.1) returns the postings with their frequencies.
   - Deletion only empties the node's local definition: postings and statistics
     keep the node until a rebuild (`NindTermAmose::removeDocFromTerm` exists).
   - One `QMutex` per reader around nind's sequential API: the `const` paths
@@ -52,7 +52,7 @@ of 3.0.0 (format v2).
   - List mode's MaxScore is compiled out (`SATURATION`): the block descriptors
     (`NindTermIndex::getTermDirectory`, `getTermBlocks`: max frequency, shortest
     length per 128 postings) could drive it.
-  On the nind side, done in 3.2: `NindTermAmose::addDocsToTerm` appends in
+  On the nind side, done in 3.1.1: `NindTermAmose::addDocsToTerm` appends in
   place (node-by-node indexing, no bulk mode: per call cost flat, 12.9 vs
   66.4 µs at 50k nodes).
 - **Build memory.** ~19 bytes per token (7.8 GB for MS MARCO 8.8M); sharded
