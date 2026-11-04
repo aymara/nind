@@ -14,6 +14,12 @@ of 3.0.0 (format v2).
   last blocks and directories), not every list a new document enters (332 s
   for 1% of MS MARCO, vs 2 s for Lucene).
 - [ ] Bit-packed blocks (Lucene-like): faster decoding than varints.
+- [ ] Everything in the C++ API (Amose and other clients use it directly):
+  move `Bm25Scorer` (block-max MaxScore) and `IndexBuilder` out of
+  `src/cpp/NindPy/bindings.cpp` into the `NindIndex` library, and
+  `IndexUpdate`'s change logic (touched terms, merge of postings, migration,
+  lexicon rebuild) out of `nind_engine.py`; Python keeps the generations and
+  publishing.
 
 ## Later
 
