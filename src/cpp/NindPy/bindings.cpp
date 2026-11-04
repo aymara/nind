@@ -506,7 +506,7 @@ PYBIND11_MODULE(_native, m) {
         .def("begin_bulk", &NindIndex::beginBulk, py::call_guard<py::gil_scoped_release>())
         .def("end_bulk", &NindIndex::endBulk, py::call_guard<py::gil_scoped_release>())
         .def("is_bulk", &NindIndex::isBulk)
-        .def("get_word_id", &NindLexiconIndex::getWordId, py::arg("components"))
+        .def("get_word_id", static_cast<unsigned int (NindLexiconIndex::*)(const std::list<std::string> &)>(&NindLexiconIndex::getWordId), py::arg("components"))
         .def("get_identification", &NindLexiconIndex::getIdentification)
         .def("get_modulo", &NindLexiconIndex::getModulo)
         .def("get_components", [](NindLexiconIndex &self, unsigned int ident) -> py::object {

@@ -78,7 +78,8 @@ NindLocalIndex::NindLocalIndex(const std::string &fileNameExtensionLess,
               TAILLE_DEJFINITION_MINIMUM, 
               indirectionBlocSize),
     m_docIdTradExtInt(),
-    m_currIdent(0)
+    m_currIdent(0),
+    m_docIdMutex()
 {
     //lit le plus grand identifiant interne utilisej
     getSpecifics();
@@ -99,43 +100,64 @@ bool NindLocalIndex::getLocalDef(const unsigned int ident,
 {
     //raz rejsultat
     localDef.clear();
-    //trouve l'identifiant interne du doc 
+    //trouve l'identifiant interne du doc
     const unsigned int identInt = getInternalIdent(ident);
     //si pas trouvej retourne faux
     if (identInt == 0) return false;
     //rejcupehre la dejfinition
-    const bool existe = getDefinition(identInt);
-    if (!existe) return false;
+    if (!getDefinition(identInt)) return false;
+    decodeLocalDef(ident, identInt, m_file.inBuffer(), localDef);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) getLocalDef (see getLocalDef)
+bool NindLocalIndex::getLocalDef(const unsigned int ident,
+                                 list<struct Term> &localDef,
+                                 NindReadBuffer &buffer) const
+{
+    localDef.clear();
+    const unsigned int identInt = getInternalIdentAt(ident, buffer);
+    if (identInt == 0) return false;
+    if (!getDefinitionAt(identInt, buffer)) return false;
+    decodeLocalDef(ident, identInt, buffer, localDef);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//dejcode la dejfinition d'un document lue dans in
+void NindLocalIndex::decodeLocalDef(const unsigned int ident,
+                                    const unsigned int identInt,
+                                    NindReadBuffer &in,
+                                    list<struct Term> &localDef) const
+{
     //<flagDejfinition=19> <identifiantDoc> <identifiantExterne> <longueurDonnejes> <donnejesDoc>
-    if (m_file.getInt1() != FLAG_DEJFINITION) 
+    if (in.getInt1() != FLAG_DEJFINITION) 
         throw NindLocalIndexException("NindLocalIndex::getLocalIndex A : " + m_fileName);
-    const unsigned int identDoc = m_file.getInt3();
+    const unsigned int identDoc = in.getInt3();
     if (identDoc != identInt) 
         throw NindLocalIndexException("NindLocalIndex::getLocalIndex B : " + m_fileName);
-    const unsigned int identExt = m_file.getInt4();
+    const unsigned int identExt = in.getInt4();
     if (identExt != ident) 
         throw NindLocalIndexException("NindLocalIndex::getLocalIndex C : " + m_fileName);
-    const unsigned int longueurDonnejes = m_file.getInt3();
+    const unsigned int longueurDonnejes = in.getInt3();
     //positionne la fin de buffer en fonction de la longueur effective des donnees
-    m_file.setEndInBuffer(longueurDonnejes);
+    in.setEndInBuffer(longueurDonnejes);
     //<identTermeRelatif> <catejgorie> <nbreLocalisations> <localisations>
     unsigned int identTerme = 0;      //l'ident du terme precedent
     unsigned int position = 0;        //la position de localisation precedente
-    while (!m_file.endOfInBuffer()) {
-        identTerme += m_file.getSIntLat();
-        const unsigned char catejgorie = m_file.getInt1();
-        const unsigned int nbreLocalisations = m_file.getInt1();
+    while (!in.endOfInBuffer()) {
+        identTerme += in.getSIntLat();
+        const unsigned char catejgorie = in.getInt1();
+        const unsigned int nbreLocalisations = in.getInt1();
         localDef.push_back(Term(identTerme, catejgorie));
         struct Term &term = localDef.back();
         list<Localisation> &localisation = term.localisation;
         for (unsigned int it = 0; it != nbreLocalisations; it++) {
             //<localisationRelatif> <longueur>
-            position += m_file.getSIntLat();
-            const unsigned int longueur = m_file.getInt1();
+            position += in.getSIntLat();
+            const unsigned int longueur = in.getInt1();
             localisation.push_back(Localisation(position, longueur));
         }
     }
-    return true;
 }
 ////////////////////////////////////////////////////////////
 bool NindLocalIndex::getLocalLength(const unsigned int ident,
@@ -219,6 +241,7 @@ void NindLocalIndex::setLocalDef(const unsigned int ident,
     }
     //section critique ah protejger des control-C (refermeje sur tout chemin de sortie, exceptions comprises)
     NindCriticalSection criticalSection(m_file);
+    std::unique_lock<std::shared_timed_mutex> lock(m_docIdMutex);
     //est-ce que ce document est dejah connu ?
     map<unsigned int, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
     //si non, on le creje
@@ -306,6 +329,7 @@ unsigned int NindLocalIndex::getDocCount()
 void NindLocalIndex::getDocIdents(vector<unsigned int> &docIdents)
 {
     docIdents.clear();
+    std::unique_lock<std::shared_timed_mutex> lock(m_docIdMutex);
     //un lecteur prend en compte les documents ajoutejs depuis son ouverture
     if (!m_isWriter) {
         getSpecifics();
@@ -330,6 +354,7 @@ void NindLocalIndex::writeSpecificsAndIdentification(const Identification &fileI
 //Rejcupehre l'identifiant interne 
 unsigned int NindLocalIndex::getInternalIdent(const unsigned int ident)
 {
+    std::unique_lock<std::shared_timed_mutex> lock(m_docIdMutex);
     //cherche l'identifiant dans la map courante
     map<unsigned int, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
     //si l'identifiant externe est connu, retourne l'identifiant interne
@@ -370,6 +395,52 @@ void NindLocalIndex::fillDocIdTradExtInt(const unsigned int intIdMin,
         if (identDoc != ident) 
             throw NindLocalIndexException("NindLocalIndex::fillDocIdTradExtInt B : " + m_fileName);
         const unsigned int identExt = m_file.getInt4();       //<identifiantExterne>
+        m_docIdTradExtInt[identExt] = identDoc;
+        m_currIdent = identDoc;
+    }
+}
+////////////////////////////////////////////////////////////
+//Rejcupehre l'identifiant interne, thread-safe (const)
+unsigned int NindLocalIndex::getInternalIdentAt(const unsigned int ident,
+                                                NindReadBuffer &buffer) const
+{
+    {
+        std::shared_lock<std::shared_timed_mutex> lock(m_docIdMutex);
+        map<unsigned int, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
+        if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+    }
+    //inconnu : complehte la map avec les documents ajoutejs depuis (un seul ah la fois)
+    std::unique_lock<std::shared_timed_mutex> lock(m_docIdMutex);
+    map<unsigned int, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
+    if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+    //<spejcifique> ::= <maxIdentifiantInterne> <nombreDocuments>
+    getSpecificsAt(buffer);
+    const unsigned int maxIdentifiantInterne = buffer.getInt4();
+    fillDocIdTradExtIntAt(m_currIdent + 1, maxIdentifiantInterne, buffer);
+    itident = m_docIdTradExtInt.find(ident);
+    if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+    return 0;
+}
+////////////////////////////////////////////////////////////
+//met ah jour la map de traduction (intIdMin..intIdMax inclus), thread-safe (const), sous m_docIdMutex exclusif
+void NindLocalIndex::fillDocIdTradExtIntAt(const unsigned int intIdMin,
+                                           const unsigned int intIdMax,
+                                           NindReadBuffer &buffer) const
+{
+    uint64_t identMax = intIdMax;
+    if (identMax >= getMaxIdentAt()) getEntryPosAt(intIdMax, buffer);
+    const uint64_t maxEntries = getMaxIdentAt();
+    if (maxEntries == 0) return;
+    if (identMax > maxEntries - 1) identMax = maxEntries - 1;
+    for (uint64_t ident = intIdMin; ident <= identMax; ident++) {
+        if (!getDefinitionAt(ident, buffer, TAILLE_TESTE_IDENT_EXTERNE)) continue;
+        //<flagDejfinition=19> <identifiantDoc> <identifiantExterne>
+        if (buffer.getInt1() != FLAG_DEJFINITION)
+            throw NindLocalIndexException("NindLocalIndex::fillDocIdTradExtIntAt A : " + m_fileName);
+        const unsigned int identDoc = buffer.getInt3();
+        if (identDoc != ident)
+            throw NindLocalIndexException("NindLocalIndex::fillDocIdTradExtIntAt B : " + m_fileName);
+        const unsigned int identExt = buffer.getInt4();
         m_docIdTradExtInt[identExt] = identDoc;
         m_currIdent = identDoc;
     }

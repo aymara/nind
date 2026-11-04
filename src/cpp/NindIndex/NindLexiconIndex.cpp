@@ -282,6 +282,19 @@ unsigned int NindLexiconIndex::getWordId(const list<string> &components)
     return sousMotId;
 }
 ////////////////////////////////////////////////////////////
+//brief Thread-safe (const) getWordId: reads into the caller's buffer
+unsigned int NindLexiconIndex::getWordId(const list<string> &components,
+                                         NindReadBuffer &buffer) const
+{
+    unsigned int sousMotId = 0;
+    for(list<string>::const_iterator swIt = components.begin(); swIt != components.end(); swIt++) {
+        const unsigned int motId = getIdentifiant(*swIt, sousMotId, buffer);
+        if (motId == 0) return 0;     //mot inconnu
+        sousMotId = motId;
+    }
+    return sousMotId;
+}
+////////////////////////////////////////////////////////////
 //brief get identification of lexicon
 //return unique identification of lexicon */
 NindIndex::Identification NindLexiconIndex::getIdentification()
@@ -297,41 +310,59 @@ unsigned int NindLexiconIndex::getIdentifiant(const string &motSimple,
     //l'identifiant dans le fichier est la clef calculee modulo la taille du bloc d'indirection
     const unsigned int ident =  clef(motSimple) % m_modulo;
     //lit ce qui concerne cet identifiant
-    const bool existe = getDefinition(ident);
-    if (!existe) return 0;              //pas trouve de dejfinition => mot inconnu
+    if (!getDefinition(ident)) return 0;              //pas trouve de dejfinition => mot inconnu
+    return decodeIdentifiant(ident, m_file.inBuffer(), motSimple, sousMotId);
+}
+////////////////////////////////////////////////////////////
+//Recupere l'identifiant d'un mot sur le fichier lexique, thread-safe (const)
+unsigned int NindLexiconIndex::getIdentifiant(const string &motSimple,
+                                              const unsigned int sousMotId,
+                                              NindReadBuffer &buffer) const
+{
+    const unsigned int ident =  clef(motSimple) % m_modulo;
+    if (!getDefinitionAt(ident, buffer)) return 0;
+    return decodeIdentifiant(ident, buffer, motSimple, sousMotId);
+}
+////////////////////////////////////////////////////////////
+//dejcode le seau ident lu dans in et y cherche le mot
+unsigned int NindLexiconIndex::decodeIdentifiant(const unsigned int ident,
+                                                 NindReadBuffer &in,
+                                                 const string &motSimple,
+                                                 const unsigned int sousMotId) const
+{
     //<flagDejfinition=13> <identifiantHash> <longueurDonnejes> <donnejesHash>
-    if (m_file.getInt1() != FLAG_DEJFINITION) 
+    if (in.getInt1() != FLAG_DEJFINITION) 
         throw NindLexiconIndexException("NindLexiconIndex::getIdentifiant A : " + m_fileName);
-    if (m_file.getInt3() != ident) 
+    if (in.getInt3() != ident) 
         throw NindLexiconIndexException("NindLexiconIndex::getIdentifiant B : " + m_fileName);
-    const unsigned int longueurDonnejes = m_file.getInt3();
+    const unsigned int longueurDonnejes = in.getInt3();
     //positionne la fin de buffer en fonction de la longueur effective des donnees
-    m_file.setEndInBuffer(longueurDonnejes);
-    while (!m_file.endOfInBuffer()) {
+    in.setEndInBuffer(longueurDonnejes);
+    while (!in.endOfInBuffer()) {
         //<motSimple> <identifiantS> <nbreComposejs> <composejs>
-        const string fmotSimple = m_file.getString();
+        const string fmotSimple = in.getString();
         if (fmotSimple == motSimple) {
             //c'est le bon mot
-            const unsigned int identifiantS = m_file.getInt4();
+            const unsigned int identifiantS = in.getInt4();
             if (sousMotId == 0) return identifiantS;        //retourne l'id du mot simple
-            const unsigned int nbreComposejs = m_file.getUIntLat();
+            const unsigned int nbreComposejs = in.getUIntLat();
             unsigned int identifiantC = identifiantS;
             for (unsigned int i = 0; i != nbreComposejs; i++) {
                 //<identifiantA> <identifiantRelC>
-                const unsigned int identifiantA = m_file.getInt4();
-                identifiantC += m_file.getSIntLat();
+                const unsigned int identifiantA = in.getInt4();
+                identifiantC += in.getSIntLat();
                 if (sousMotId == identifiantA) return identifiantC;     //retourne l'id du mot composej
             }
             return 0;           //mot composej inconnu           
         }
         //ce n'est pas le bon mot, on le saute
         //<identifiantS>
-        m_file.getInt4();
-        const unsigned int nbreComposejs = m_file.getUIntLat();
+        in.getInt4();
+        const unsigned int nbreComposejs = in.getUIntLat();
         for (unsigned int i = 0; i != nbreComposejs; i++) {
             //<identifiantA> <identifiantRelC>
-            m_file.getInt4();
-            m_file.getSIntLat();
+            in.getInt4();
+            in.getSIntLat();
         }        
     }
     return 0;           //pas trouve le mot simple => mot inconnu  

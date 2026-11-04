@@ -33,16 +33,17 @@ public:
     static const size_t MAX_KEPT_CAPACITY = 1u << 20;
 
     /**\brief Creates an empty read buffer
-    *\param fileName file the bytes come from (for exception messages) */
-    explicit NindReadBuffer(const std::string &fileName = std::string());
+    *\param fileName file the bytes come from (for exception messages); referenced, not
+    * copied: it must outlive the reads (each read sets it, see NindFile::readAt) */
+    explicit NindReadBuffer(const std::string *fileName = 0);
 
     ~NindReadBuffer();
 
-    /**\brief set the file the bytes come from (for exception messages) */
-    void setFileName(const std::string &fileName) { m_fileName = fileName; }
+    /**\brief set the file the bytes come from (for exception messages; referenced, not copied) */
+    void setFileName(const std::string *fileName) { m_fileName = fileName; }
 
     /**\brief get the file the bytes come from */
-    const std::string &getFileName() const { return m_fileName; }
+    const std::string &getFileName() const { return m_fileName != 0 ? *m_fileName : noFileName(); }
 
     /**\brief Forget the content (the buffer is then empty) */
     void clear();
@@ -70,14 +71,14 @@ public:
     /**\brief Set pointer in buffer, from buffer head */
     inline void setInBufferPtr(const unsigned int offset) {
         if (offset > (unsigned long)(m_absEnd - m_buffer))
-            throw OutReadBufferException("in read buffer (V) " + m_fileName);
+            throw OutReadBufferException("in read buffer (V) " + getFileName());
         m_ptr = m_buffer + offset;
     }
 
     /**\brief Set pointer in buffer, from the current read pointer */
     inline void setRelInBufferPtr(const unsigned int offset) {
         if (offset > (unsigned long)(m_absEnd - m_ptr))
-            throw OutReadBufferException("in read buffer (W) " + m_fileName);
+            throw OutReadBufferException("in read buffer (W) " + getFileName());
         m_ptr += offset;
     }
 
@@ -97,7 +98,9 @@ private:
     NindReadBuffer(const NindReadBuffer &);
     NindReadBuffer &operator=(const NindReadBuffer &);
 
-    std::string m_fileName;
+    static const std::string &noFileName();
+
+    const std::string *m_fileName;
     unsigned char *m_storage;       //allouej
     size_t m_capacity;              //taille allouej
     unsigned char *m_buffer;        //dejbut des donnejes (m_storage, ou 0 si vide)

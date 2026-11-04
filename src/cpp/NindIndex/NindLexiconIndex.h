@@ -74,6 +74,11 @@ public:
      * \return ident of word if word exists, 0 otherwise */
     unsigned int getWordId(const std::list<std::string> &components);
 
+    /**\brief Thread-safe (const) getWordId: reads into the caller's buffer (see NindFile::readAt);
+    * several threads can look words up in one lexicon at once, each with its own buffer */
+    unsigned int getWordId(const std::list<std::string> &components,
+                           NindReadBuffer &buffer) const;
+
     /**\brief get identification of lexicon
      * \return unique identification of lexicon */
     Identification getIdentification();
@@ -140,6 +145,13 @@ private:
     //retourne l'identifiant du mot s'il existe, 0 s'il n'existe pas
     unsigned int getIdentifiant(const std::string &mot,
                                 const unsigned int sousMotId);
+    unsigned int getIdentifiant(const std::string &mot,
+                                const unsigned int sousMotId,
+                                NindReadBuffer &buffer) const;
+    unsigned int decodeIdentifiant(const unsigned int ident,
+                                   NindReadBuffer &in,
+                                   const std::string &motSimple,
+                                   const unsigned int sousMotId) const;
 
     //recupere les donnees de tous les mots qui ont la meme clef modulo 
     //les donnejes ont dejjah ejtej lue par getIdentifiant

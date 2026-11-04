@@ -81,6 +81,10 @@ NindPadFile::NindPadFile(const string &fileName,
     m_bulkEnd(0),
     m_bulkPos(UINT64_MAX),
     m_entriesBlocksMap(),
+    m_sharedMap(0),
+    m_sharedMapFileSize(0),
+    m_sharedMapMutex(),
+    m_sharedMaps(),
     m_specificsSize(specificsSize),
     m_dataEntrySize(dataEntrySize),
     m_dataEntriesBlocSize(dataEntriesBlocSize)
@@ -159,6 +163,125 @@ NindPadFile::~NindPadFile()
 {
 }
 ////////////////////////////////////////////////////////////
+//brief Thread-safe (const) position of an entry, with reader synchronization (see NindPadFile.h)
+uint64_t NindPadFile::getEntryPosAt(const unsigned int ident,
+                                    NindReadBuffer &buffer) const
+{
+    const EntriesMap *map = m_sharedMap.load(std::memory_order_acquire);
+    uint64_t position = (map != 0) ? entryPosIn(*map, ident, m_dataEntrySize) : 0;
+    if (position != 0 || m_isWriter) return position;
+    //synchronisation des lecteurs : l'ejcrivain a pu ajouter des blocs d'entrejes, en fin de
+    //fichier, seulement si le fichier a grandi depuis la dernierre vejrification de la carte
+    const uint64_t fileSize = m_file.getReadFileSize();
+    if (map != 0 && fileSize <= m_sharedMapFileSize.load(std::memory_order_acquire)) return 0;
+    std::lock_guard<std::mutex> lock(m_sharedMapMutex);
+    map = m_sharedMap.load(std::memory_order_acquire);
+    position = (map != 0) ? entryPosIn(*map, ident, m_dataEntrySize) : 0;
+    if (position != 0) return position;
+    if (map != 0 && fileSize <= m_sharedMapFileSize.load(std::memory_order_acquire)) return 0;
+    EntriesMap *fresh = mapEntriesBlocksAt(buffer, fileSize);
+    if (map != 0 && *fresh == *map) delete fresh;           //pas de nouveau bloc : la mesme carte
+    else publishEntriesMap(fresh);
+    m_sharedMapFileSize.store(fileSize, std::memory_order_release);
+    map = m_sharedMap.load(std::memory_order_acquire);
+    return entryPosIn(*map, ident, m_dataEntrySize);
+}
+////////////////////////////////////////////////////////////
+void NindPadFile::getSpecificsAt(NindReadBuffer &buffer) const
+{
+    if (m_isBulk) throw NindPadFileException("NindPadFile::getSpecificsAt in bulk mode : " + m_fileName);
+    const uint64_t offset = TAILLE_ENTETE_SPEJCIFIQUE + TAILLE_IDENTIFICATION + m_specificsSize;
+    const uint64_t fileSize = m_file.getReadFileSize();
+    if (fileSize < offset) throw NindPadFileException("NindPadFile::getSpecificsAt : " + m_fileName);
+    m_file.readAt(fileSize - offset, m_specificsSize + TAILLE_ENTETE_SPEJCIFIQUE, buffer);
+    if (buffer.getInt1() != FLAG_SPEJCIFIQUE)
+        throw NindPadFileException("NindPadFile::getSpecificsAt : " + m_fileName);
+}
+////////////////////////////////////////////////////////////
+unsigned int NindPadFile::getMaxIdentAt() const
+{
+    const EntriesMap *map = m_sharedMap.load(std::memory_order_acquire);
+    unsigned int maxIdent = 0;
+    if (map != 0) for (size_t i = 0; i < map->size(); i++) maxIdent += (*map)[i].second;
+    return maxIdent;
+}
+////////////////////////////////////////////////////////////
+uint64_t NindPadFile::entryPosIn(const EntriesMap &map,
+                                 const unsigned int ident,
+                                 const unsigned int dataEntrySize)
+{
+    //mesme calcul que getJustEntryPos
+    uint64_t firstIdent = 0;
+    for (size_t i = 0; i < map.size(); i++) {
+        if (ident < firstIdent + map[i].second) return (ident - firstIdent) * dataEntrySize + map[i].first;
+        firstIdent += map[i].second;
+    }
+    return 0;
+}
+////////////////////////////////////////////////////////////
+//publie la carte de l'API sejquentielle (aprehs mapEntriesBlocks ou addEntriesBlock)
+void NindPadFile::publishEntriesMap()
+{
+    EntriesMap *map = new EntriesMap(m_entriesBlocksMap.begin(), m_entriesBlocksMap.end());
+    std::lock_guard<std::mutex> lock(m_sharedMapMutex);
+    publishEntriesMap(map);
+}
+////////////////////////////////////////////////////////////
+//publie une carte (sous m_sharedMapMutex) : elle reste valide jusqu'ah la destruction
+void NindPadFile::publishEntriesMap(EntriesMap *map) const
+{
+    std::unique_ptr<EntriesMap> owned(map);
+    m_sharedMaps.push_back(std::move(owned));
+    m_sharedMap.store(map, std::memory_order_release);
+}
+////////////////////////////////////////////////////////////
+//ejtablit la carte des blocs d'entrejes par des lectures positionnejes (mesmes contrôles que mapEntriesBlocks)
+NindPadFile::EntriesMap *NindPadFile::mapEntriesBlocksAt(NindReadBuffer &buffer,
+                                                         uint64_t fileSize) const
+{
+    EntriesMap *map = new EntriesMap();
+    try {
+        uint64_t blockAddr = TAILLE_ENTETE_FIXE;
+        while (true) {
+            //<flagIndexej=47> <addrBlocSuivant> <nombreIndex>
+            m_file.readAt(blockAddr, TAILLE_TETE_INDEX, buffer);
+            if (buffer.getInt1() != FLAG_INDEXEJ)
+                throw NindPadFileException("NindPadFile::mapEntriesBlocksAt : " + m_fileName);
+            const uint64_t addrBlocSuivant = buffer.getInt5();
+            const unsigned int nombreIndex = buffer.getInt3();
+            //le bloc suivant est toujours aprehs celui-ci : la chaisne est finie.
+            //Un ejcrivain a pu ajouter un bloc depuis que fileSize a ejtej lu (il ejcrit le bloc et la
+            //queue en fin de fichier, puis le chaisne) : sur ejchec, revejrifie avec la taille actuelle
+            if (!entriesBlockOk(blockAddr, nombreIndex, addrBlocSuivant, fileSize)) {
+                fileSize = m_file.getReadFileSize();
+                if (!entriesBlockOk(blockAddr, nombreIndex, addrBlocSuivant, fileSize))
+                    throw NindPadFileException("NindPadFile::mapEntriesBlocksAt bad entries block " + m_fileName);
+            }
+            map->push_back(std::pair<uint64_t, unsigned int>(blockAddr + TAILLE_TETE_INDEX, nombreIndex));
+            if (addrBlocSuivant == 0) break;
+            blockAddr = addrBlocSuivant;
+        }
+    }
+    catch (...) {
+        delete map;
+        throw;
+    }
+    return map;
+}
+////////////////////////////////////////////////////////////
+bool NindPadFile::entriesBlockOk(const uint64_t blockAddr,
+                                 const unsigned int entriesNb,
+                                 const uint64_t nextBlockAddr,
+                                 const uint64_t fileSize) const
+{
+    //mesmes contrôles que checkEntriesBlock, avec la taille donneje
+    const uint64_t queue = getSpecificsAndIdentificationSize();
+    const uint64_t blockEnd = blockAddr + TAILLE_TETE_INDEX + (uint64_t)entriesNb * m_dataEntrySize;
+    if (blockEnd + queue > fileSize) return false;
+    if (nextBlockAddr == 0) return true;
+    return !(nextBlockAddr < blockEnd || nextBlockAddr + TAILLE_TETE_INDEX + queue > fileSize);
+}
+////////////////////////////////////////////////////////////
 //brief get position of specified entry
 //param ident ident of specified entry
 //return offset into file of specified entry (0 if out of bounds)*/
@@ -199,6 +322,7 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
             bulkWrite(m_entriesBlocksMap.back().first - 8, 0, 5);
         }
         m_entriesBlocksMap.push_back(pair<uint64_t, unsigned int>(entriesBlock + TAILLE_TETE_INDEX, m_dataEntriesBlocSize));
+        publishEntriesMap();
         return;
     }
     //se positionne sur les spejcifiques
@@ -232,6 +356,7 @@ void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
     //met ah jour la carte des entrejes
     const pair<uint64_t, unsigned int> entrejes(entriesBlock + TAILLE_TETE_INDEX, m_dataEntriesBlocSize);
     m_entriesBlocksMap.push_back(entrejes);
+    publishEntriesMap();
 }
 ////////////////////////////////////////////////////////////
 //brief get size of 1rst entries block
@@ -403,6 +528,7 @@ void NindPadFile::mapEntriesBlocks()
         //saute au bloc d'indirection suivant
         m_file.setPos(addrBlocSuivant, SEEK_SET);    //pour aller au suivant
     }
+    publishEntriesMap();
 }
 ////////////////////////////////////////////////////////////
 //vejrifie la cohejrence de l'en-teste fixe avec la taille du fichier

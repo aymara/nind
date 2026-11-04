@@ -84,6 +84,18 @@ public:
                          std::vector<Document> &postings,
                          std::vector<size_t> &categoryEnds);
 
+    /**\brief Thread-safe (const) getTermDef: reads into the caller's buffer (see NindFile::readAt);
+    * several threads can read one term index at once, each with its own buffer */
+    bool getTermDef(const unsigned int ident,
+                    std::list<struct TermCG> &termDef,
+                    NindReadBuffer &buffer) const;
+
+    /**\brief Thread-safe (const) getTermPostings: reads into the caller's buffer */
+    bool getTermPostings(const unsigned int ident,
+                         std::vector<Document> &postings,
+                         std::vector<size_t> &categoryEnds,
+                         NindReadBuffer &buffer) const;
+
     /**\brief Read specifics as a list of words
     *\param specifics list to receive all specifics */
     void getSpecificWords(std::list<unsigned int> &specifics);
@@ -105,6 +117,14 @@ public:
                           const Identification &fileIdentification);
 
 private:
+    void decodeTermDef(const unsigned int ident,
+                       NindReadBuffer &in,
+                       std::list<struct TermCG> &termDef) const;
+    void decodeTermPostings(const unsigned int ident,
+                            NindReadBuffer &in,
+                            std::vector<Document> &postings,
+                            std::vector<size_t> &categoryEnds) const;
+
     unsigned int m_specificsNumber;
 
     //brief write specifics footer and identification into write buffer

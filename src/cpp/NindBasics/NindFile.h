@@ -108,6 +108,23 @@ public:
     *\return read string */
     std::string readString();
         
+    /**\brief Read bytesNb bytes at offset into buffer, without moving the file position nor
+    * touching the internal buffer: thread-safe (const), several threads can read one file at
+    * once, each into its own buffer. Positioned reads (pread, ReadFile with an offset) on a
+    * read-only handle of its own, opened with the file. Checks the bytes are in the file.
+    *\param offset where to read in the file
+    *\param bytesNb number of bytes to read
+    *\param buffer receives the bytes (its previous content is forgotten, also on failure) */
+    void readAt(const uint64_t offset,
+                const unsigned int bytesNb,
+                NindReadBuffer &buffer) const;
+
+    /**\brief Size of the file now, from the read handle (thread-safe) */
+    uint64_t getReadFileSize() const;
+
+    /**\brief The internal read buffer, filled by readBuffer (for decoders shared with readAt) */
+    inline NindReadBuffer &inBuffer() { return m_in; }
+
     /**\brief Read bytes from the file into an internal buffer
     *\param bytesNb size of internal buffer to receive read datas */
     void readBuffer(const unsigned int bytesNb);
@@ -293,6 +310,7 @@ private:
     unsigned char *m_wbufferEnd;     //fin buffer d'ecriture
     unsigned char *m_wPtr;           //pointeur buffer d'ecriture
     NindReadBuffer m_in;             //buffer de lecture (et ses dejcodeurs)
+    intptr_t m_readHandle;           //descripteur (POSIX) ou HANDLE (Windows) en lecture seule, pour readAt
     long int m_fileSize;             //taille du fichier
     bool m_isLittleEndian;
     bool m_isBulk;                   //vrai en mode massif (ejcritures non vidanges une ah une)
