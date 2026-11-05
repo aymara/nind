@@ -51,7 +51,8 @@ intersphinx_mapping = {
 }
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store",
+                    "TODO.md"]   # the project's working to-do list, not a page of the site
 
 html_theme = "pydata_sphinx_theme"
 html_title = f"nind {version}"

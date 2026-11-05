@@ -104,6 +104,29 @@ for doc_id, score in engine.search("ejcrit nombre", top_k=5):
 `NindEngine` auto-discovers the index by scanning `index_dir` for a
 `*.nindlexiconindex` file, so it only needs the directory - not the prefix.
 
+## Search speed and threads
+
+A search reads only the postings it needs: for a top k small for the corpus, the blocks of
+postings that can't reach the top k are skipped (block-max MaxScore). On MS MARCO (8.8 million
+passages) one query's top 10 takes about 1.5 ms on one thread (median).
+
+**Many queries at once** (a server): call `search` from several threads on one `NindEngine`. It
+is thread-safe and releases Python's GIL, so the queries run in parallel on the cores.
+
+**One query faster** (idle cores, latency matters): split each query across threads, for the
+whole engine or per call:
+
+```python
+engine = NindEngine("indices", search_threads=4)   # every search uses 4 threads
+engine.search("binary search tree", top_k=10)      # MS MARCO: about 0.9 ms instead of 1.5
+engine.search("binary search tree", threads=1)     # this one on a single thread
+```
+
+The results are the same. The default is 1: splitting a query costs more work in total (4
+threads make it about 1.5–2× faster, not 4×), which a busy server would rather spend on other
+queries. Splitting applies to block-max searches (a `top_k` small for the corpus, the usual
+case); see the {doc}`benchmarks`.
+
 ## Document names
 
 When the index stores document names (`index_jsonl`, `index_files(...,

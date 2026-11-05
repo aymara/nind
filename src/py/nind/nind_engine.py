@@ -372,7 +372,7 @@ class NindEngine:
     methods (``dumpeFichier``, ``afficheTerme``...).
     """
 
-    def __init__(self, index_dir, prefix=None):
+    def __init__(self, index_dir, prefix=None, search_threads=1):
         """Open the index in ``index_dir``.
 
         :param index_dir: directory the index was written into by
@@ -381,9 +381,20 @@ class NindEngine:
             files of an index written by an older version).
         :param prefix: the index's filename prefix; only needed when
             ``index_dir`` holds several indexes.
+        :param search_threads: threads each :meth:`search` uses by default
+            (its ``threads`` argument overrides it). ``1`` (the default)
+            suits a server answering many queries at once: run them in
+            parallel instead, every call releases the GIL. More lowers the
+            latency of a single query on idle cores (MS MARCO, 8.8M
+            documents, top 10, median: 1.5 ms with 1 thread, 0.9 ms with
+            4), for block-max searches only (a ``top_k`` small for the
+            corpus).
         :raises FileNotFoundError: if there is no index in ``index_dir``.
         :raises ValueError: if there are several and no ``prefix`` is given.
         """
+        if not isinstance(search_threads, int) or search_threads < 1:
+            raise ValueError("search_threads must be a positive integer")
+        self.search_threads = search_threads
         self.index_dir = index_dir
         self._store = IndexStore(index_dir, prefix or IndexStore.find_prefix(index_dir))
         # (snapshot, version), replaced as a whole when a new build is published
@@ -549,7 +560,7 @@ class NindEngine:
 
         return score
 
-    def search(self, query, top_k=10, doc_names=False, k1=1.5, b=0.75, threads=1):
+    def search(self, query, top_k=10, doc_names=False, k1=1.5, b=0.75, threads=None):
         """Search the corpus with BM25 and return the top-scoring documents.
 
         :param query: the query text.
@@ -559,11 +570,12 @@ class NindEngine:
             identifiers in the index - like pyserini's hits' ``docid``.
         :param k1: BM25 term-frequency saturation parameter.
         :param b: BM25 document-length normalization parameter.
-        :param threads: threads searching this one query at once (block-max
-            pruning only, i.e. a ``top_k`` small for the corpus): the
-            documents cut into as many ranges, the same results. For many
-            queries at once, calling ``search`` from several threads scales
-            better (each call releases the GIL).
+        :param threads: threads searching this one query at once (default:
+            the engine's ``search_threads``). Block-max pruning only, i.e. a
+            ``top_k`` small for the corpus: the documents are cut into as
+            many ranges, with the same results. For many queries at once,
+            calling ``search`` from several threads scales better (each
+            call releases the GIL).
         :return: a list of ``(doc_id, score)`` tuples (``(name, score)``
             with ``doc_names``), sorted by descending score, of length at
             most ``top_k`` (only documents with a positive score are included).
@@ -576,6 +588,10 @@ class NindEngine:
         the order of the documents in the index.
         """
         limit = top_k if isinstance(top_k, int) and top_k >= 0 else -1
+        if threads is None:
+            threads = self.search_threads
+        elif not isinstance(threads, int) or threads < 1:
+            raise ValueError("threads must be a positive integer")
         with self._session() as snapshot:
             results = snapshot.search(self.tokenize(query), k1, b, limit, threads)
             if limit < 0:

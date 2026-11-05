@@ -15,8 +15,8 @@ stack - its low-level classes are thin wrappers over `nind._native`
 (pybind11 bindings compiled from that same C++ code), so reading or
 writing a file in Python exercises the real C++ implementation underneath.
 The only genuinely hand-rolled Python parsing left is for a handful of
-diagnostic/introspection methods (`dumpeFichier`, `afficheTerme`, and
-similar) that `nind._native` doesn't expose yet.
+diagnostic methods (the per-format statistics and the lexicon's own
+tools) that `nind._native` doesn't expose yet.
 ```
 
 ## Where to start
@@ -27,6 +27,8 @@ similar) that `nind._native` doesn't expose yet.
   explains how the module layers fit together, and the {doc}`api/index`
   documents every public class and function.
 - **Just want the CLI?** See {doc}`cli`.
+- **How fast is it?** See the {doc}`benchmarks` against Lucene, tantivy and
+  bm25s.
 
 ## Installation
 
@@ -47,4 +49,5 @@ quickstart
 architecture
 api/index
 cli
+benchmarks
 ```

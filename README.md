@@ -101,6 +101,13 @@ with indexer.update() as update:
     update.remove(1)
 ```
 
+Searching is thread-safe: a server can call `engine.search` from many threads at once (the
+GIL is released). To make one query faster on idle cores, split it across threads with
+`NindEngine("indices", search_threads=4)` (or `search(..., threads=4)`): the same results, about
+1.5–2× faster with 4 threads. The default (1) suits a server answering many queries at once.
+See the [benchmarks](https://aymara.github.io/nind/benchmarks.html) against Lucene, tantivy and
+bm25s.
+
 `NindEngine` also exposes the building blocks it uses internally
 (`get_term_id`, `get_df`, `get_tf`, `get_doc_len`) for inspecting relevance
 or a specific document directly.

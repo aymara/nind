@@ -1128,6 +1128,15 @@ def test_engine_search_prunes_when_k_is_small_for_the_corpus(tmp_path, monkeypat
         for k in (1, 10, 100):
             assert engine.search(query, top_k=k) == everything[:k], (query, k)
             assert engine.search(query, top_k=k, threads=4) == everything[:k], (query, k)
+    # the engine's default number of threads per search, and its checks
+    four = NindEngine(engine.index_dir, search_threads=4)
+    for query, everything in zip(queries, exhaustive):
+        assert four.search(query, top_k=10) == everything[:10], query
+        assert four.search(query, top_k=10, threads=1) == everything[:10], query
+    with pytest.raises(ValueError):
+        NindEngine(engine.index_dir, search_threads=0)
+    with pytest.raises(ValueError):
+        engine.search("w0", threads=0)
 
 
 # the texts of the format v1 indexes in tst/py/data/v1 (written by NindIndexer before format v2,

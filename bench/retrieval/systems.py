@@ -94,6 +94,22 @@ class NindLocal(Nind):
     local_index = True
 
 
+class NindThreads(Nind):
+    """nind searching each query with 4 threads (NindEngine(search_threads=4)): the same index and
+    results as nind, a lower latency per query on idle cores. Not comparable with the others'
+    single-thread latencies: Lucene can also split a query across threads, Anserini doesn't here."""
+    search_threads = 4
+
+    def open(self, index_dir):
+        # nind's own index (WORK/dataset/nind/index), not a copy built for this system: the same
+        # files, so that both are searched with the same page cache
+        from nind.nind_engine import NindEngine
+        shared = os.path.join(os.path.dirname(os.path.dirname(index_dir)), "nind", os.path.basename(index_dir))
+        if os.path.exists(os.path.join(shared, self.prefix + ".CURRENT")):
+            index_dir = shared
+        return _NindSearcher(NindEngine(index_dir, self.prefix, search_threads=self.search_threads), self.k1, self.b)
+
+
 class _NindSearcher:
     def __init__(self, engine, k1, b):
         self.engine, self.k1, self.b = engine, k1, b
@@ -333,5 +349,5 @@ class _TantivySearcher:
         return {"documents": self.searcher.num_docs, "avgdl": None}
 
 
-SYSTEMS = {"nind": Nind, "nind+local": NindLocal, "lucene": Lucene, "lucene+pos": LucenePositions,
+SYSTEMS = {"nind": Nind, "nind+local": NindLocal, "nind-4t": NindThreads, "lucene": Lucene, "lucene+pos": LucenePositions,
            "bm25s": Bm25s, "tantivy": Tantivy}
