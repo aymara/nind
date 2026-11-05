@@ -50,13 +50,12 @@ unsigned int NindAmoseMerge::getTermSpecificsNumber() const
 ////////////////////////////////////////////////////////////
 //compte le terme selon son type, dejduit de ses composants comme NindLexiconAmose::getWord
 void NindAmoseMerge::countTerm(const list<string> &components,
-                               const list<NindTermIndex::TermCG> &termDef)
+                               const vector<NindTermIndex::CategoryPostings> &categories)
 {
     AmoseTypes type = (components.size() == 1) ? SIMPLE_TERM : MULTI_TERM;
     if (!components.empty() && components.front() == "§") type = NAMED_ENTITY;
     unsigned int occurrences = 0;
-    for (list<NindTermIndex::TermCG>::const_iterator it = termDef.begin(); it != termDef.end(); it++)
-        occurrences += (*it).frequency;
+    for (size_t c = 0; c < categories.size(); c++) occurrences += categories[c].frequency;
     m_uniqueTermCount[type] += 1;
     m_uniqueTermCount[ALL] += 1;
     m_termOccurrences[type] += occurrences;

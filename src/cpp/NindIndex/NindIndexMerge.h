@@ -84,9 +84,9 @@ protected:
 
     /**\brief called for every term written into the merged term index
     *\param components components of the term (1 component = simple word, more components = compound word)
-    *\param termDef merged definition of the term */
+    *\param categories merged definition of the term (its categories' postings, flat) */
     virtual void countTerm(const std::list<std::string> &components,
-                           const std::list<NindTermIndex::TermCG> &termDef);
+                           const std::vector<NindTermIndex::CategoryPostings> &categories);
 
     /**\brief specifics of the merged term index, once every term was counted
     *\return getTermSpecificsNumber() specific unsigned int */

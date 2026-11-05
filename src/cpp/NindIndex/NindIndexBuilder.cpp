@@ -120,12 +120,21 @@ void NindIndexBuilder::writeTermIndex(NindTermIndex &termIndex,
         touched.clear();
         begin = m_docEnds[d];
     }
-    //3) the term definitions
+    //3) the term definitions, flat (documents already in increasing order: added so)
+    std::vector<NindTermIndex::Document> documents;
+    std::vector<NindTermIndex::CategoryPostings> categories;
     for (uint32_t t = 1; t <= m_maxTermId; t++) {
         if (postingsNb[t] == postingsNb[t + 1]) continue;
-        const std::list<NindTermIndex::TermCG> definition =
-            NindIndexBuilder::termDef(postingDocs.data(), postingFreqs.data(), postingsNb[t], postingsNb[t + 1], cg);
-        termIndex.setTermDef(t, definition, identification, noSpecifics);
+        documents.clear();
+        uint64_t total = 0;
+        for (size_t i = postingsNb[t]; i < postingsNb[t + 1]; i++) {
+            documents.push_back(NindTermIndex::Document(postingDocs[i], postingFreqs[i]));
+            total += postingFreqs[i];
+        }
+        if (total > std::numeric_limits<unsigned int>::max())
+            throw std::invalid_argument("frequencies: total term frequency overflows 32 bits");
+        categories.assign(1, NindTermIndex::CategoryPostings(cg, (unsigned int)total, documents.data(), documents.size()));
+        termIndex.setTermPostings(t, categories, identification, noSpecifics);
     }
 }
 

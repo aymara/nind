@@ -267,7 +267,21 @@ bool NindTermIndex::getTermPostings(const unsigned int ident,
     postings.clear();
     categoryEnds.clear();
     if (!getDefinition(ident)) return false;
-    decodeTermPostings(ident, m_file.inBuffer(), postings, categoryEnds);
+    decodeTermPostings(ident, m_file.inBuffer(), postings, categoryEnds, 0);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//brief Sequential read of the postings of a term, with each category's (cg, term frequency)
+bool NindTermIndex::getTermPostings(const unsigned int ident,
+                                    vector<Document> &postings,
+                                    vector<size_t> &categoryEnds,
+                                    vector<pair<unsigned char, unsigned int> > &categories)
+{
+    postings.clear();
+    categoryEnds.clear();
+    categories.clear();
+    if (!getDefinition(ident)) return false;
+    decodeTermPostings(ident, m_file.inBuffer(), postings, categoryEnds, &categories);
     return true;
 }
 ////////////////////////////////////////////////////////////
@@ -280,7 +294,7 @@ bool NindTermIndex::getTermPostings(const unsigned int ident,
     postings.clear();
     categoryEnds.clear();
     if (!getDefinitionAt(ident, buffer)) return false;
-    decodeTermPostings(ident, buffer, postings, categoryEnds);
+    decodeTermPostings(ident, buffer, postings, categoryEnds, 0);
     return true;
 }
 ////////////////////////////////////////////////////////////
@@ -288,10 +302,11 @@ bool NindTermIndex::getTermPostings(const unsigned int ident,
 void NindTermIndex::decodeTermPostings(const unsigned int ident,
                                        NindReadBuffer &in,
                                        vector<Document> &postings,
-                                       vector<size_t> &categoryEnds) const
+                                       vector<size_t> &categoryEnds,
+                                       vector<pair<unsigned char, unsigned int> > *categories) const
 {
     if (isFormatV2()) {
-        decodeTermDefV2(ident, in, postings, categoryEnds, 0);
+        decodeTermDefV2(ident, in, postings, categoryEnds, categories);
         return;
     }
     //same format and checks as getTermDef
@@ -307,8 +322,9 @@ void NindTermIndex::decodeTermPostings(const unsigned int ident,
     while (!in.endOfInBuffer()) {
         if (in.getInt1() != FLAG_CG)
             throw NindTermIndexException("NindTermIndex::getTermPostings C : " + m_fileName);
-        in.getInt1();                       //catejgorie
-        getCountField(in);                  //frejquenceTerme
+        const unsigned char catejgorie = in.getInt1();
+        const unsigned int frejquenceTerme = getCountField(in);
+        if (categories != 0) categories->push_back(make_pair(catejgorie, frejquenceTerme));
         const uint64_t nbreDocs = getCountField(in);
         if (isFormatV2() && in.getUIntLat() != 0)
             throw NindTermIndexException("NindTermIndex::getTermPostings blocks not supported yet : " + m_fileName);
@@ -670,21 +686,44 @@ void NindTermIndex::decodeTermBlock(const unsigned int ident,
 ////////////////////////////////////////////////////////////
 //format v2: forme la dejfinition (rejpertoire, puis blocs) dans le buffer d'ejcriture
 void NindTermIndex::writeTermDefV2(const unsigned int ident,
-                                   const list<struct TermCG> &termDef,
+                                   const vector<CategoryPostings> &categories,
                                    const bool withRoom)
 {
     //the room for additions in place (one category with blocks only): extraBlocks more
     //descriptors after the directory, as many blocks (and the last one's growth) after the blocks
-    const size_t singleDocsNb = termDef.size() == 1 ? termDef.front().documents.size() : 0;
+    const size_t singleDocsNb = categories.size() == 1 ? categories.front().docsNb : 0;
     const size_t extraBlocks = (withRoom && singleDocsNb > BLOCK_SIZE) ?
         max((size_t)2, (singleDocsNb + BLOCK_SIZE - 1) / BLOCK_SIZE / 16) : 0;
-    //2) la taille maximum du buffer d'ecriture
+    //2) la taille maximum du buffer d'ecriture : exacte pour les blocs (leurs bits par ejcart et par
+    //frejquence), au pire pour le reste ; une liste de centaines de millions de documents ne
+    //rejserve donc que sa taille (~1-2 octets par document), pas 14 octets par document
     uint64_t tailleMaximum = TAILLE_TESTE_DEJFINITION + getSpecificsAndIdentificationSize() + TAILLE_BUFFER_MINIMUM;
-    for (list<struct TermCG>::const_iterator it1 = termDef.begin(); it1 != termDef.end(); it1++) {
-        const uint64_t docsNb = (*it1).documents.size();
-        const uint64_t blocksNb = (docsNb <= BLOCK_SIZE) ? 0 : (docsNb + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        tailleMaximum += TAILLE_TESTE_DEJFINITION_MAXIMUM + docsNb * TAILLE_DOC_MAXIMUM
-                         + blocksNb * (TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_BLOC_MAXIMUM);
+    for (size_t c = 0; c < categories.size(); c++) {
+        const Document *documents = categories[c].documents;
+        const uint64_t docsNb = categories[c].docsNb;
+        for (uint64_t d = 1; d < docsNb; d++) {
+            if (documents[d].ident <= documents[d - 1].ident)
+                throw NindTermIndexException("NindTermIndex::setTermDef documents not in increasing order : " + m_fileName);
+        }
+        tailleMaximum += TAILLE_TESTE_DEJFINITION_MAXIMUM;
+        if (docsNb <= BLOCK_SIZE) {
+            tailleMaximum += docsNb * TAILLE_DOC_MAXIMUM;
+            continue;
+        }
+        for (uint64_t begin = 0; begin < docsNb; begin += BLOCK_SIZE) {
+            const uint64_t end = min(begin + BLOCK_SIZE, docsNb);
+            uint64_t maxGap = 0;
+            unsigned int minFrequency = documents[begin].frequency, maxFrequency = minFrequency;
+            for (uint64_t d = begin; d < end; d++) {
+                if (d > begin) maxGap = max(maxGap, (uint64_t)(documents[d].ident - documents[d - 1].ident - 1));
+                minFrequency = min(minFrequency, documents[d].frequency);
+                maxFrequency = max(maxFrequency, documents[d].frequency);
+            }
+            const uint64_t n = end - begin;
+            //(packBits: each array rounded up to a byte)
+            tailleMaximum += TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_BLOC_MAXIMUM
+                             + ((n - 1) * bitsOf(maxGap) + 7) / 8 + (n * bitsOf(maxFrequency - minFrequency) + 7) / 8;
+        }
     }
     if (extraBlocks != 0)
         tailleMaximum += (uint64_t)extraBlocks * TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_DEJFINITION_MAXIMUM
@@ -698,33 +737,27 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
     m_file.putInt4(ident);
     putDefinitionField(0);     //la taille du rejpertoire sera ejcrite plus tard, quand elle sera connue
     //the descriptors' <offsetBloc> and <longueurBloc>, patched once the blocks are written
-    //(each category's documents copied once into a vector, the blocks referring to it)
-    struct Pending { size_t category; unsigned char cg; size_t begin, end; unsigned int patch; };
+    struct Pending { const Document *documents; unsigned char cg; size_t docsNb; unsigned int patch; };
     vector<Pending> pending;
-    vector<vector<Document> > categoryDocuments;
-    for (list<struct TermCG>::const_iterator it1 = termDef.begin(); it1 != termDef.end(); it1++) {
-        categoryDocuments.push_back(vector<Document>((*it1).documents.begin(), (*it1).documents.end()));
-        const vector<Document> &documents = categoryDocuments.back();
-        for (size_t d = 1; d < documents.size(); d++) {
-            if (documents[d].ident <= documents[d - 1].ident)
-                throw NindTermIndexException("NindTermIndex::setTermDef documents not in increasing order : " + m_fileName);
-        }
-        const size_t docsNb = documents.size();
+    vector<Block> blocks;
+    for (size_t c = 0; c < categories.size(); c++) {
+        const Document *documents = categories[c].documents;
+        const size_t docsNb = categories[c].docsNb;
         const size_t blocksNb = (docsNb <= BLOCK_SIZE) ? 0 : (docsNb + BLOCK_SIZE - 1) / BLOCK_SIZE;
         //the blocks' descriptors (impacts: the category's flag says whether every block has them)
-        vector<Block> blocks;
+        blocks.clear();
         bool impacts = blocksNb != 0;
         for (size_t b = 0; b < blocksNb; b++) {
             const size_t begin = b * BLOCK_SIZE;
             const size_t end = (begin + BLOCK_SIZE < docsNb) ? begin + BLOCK_SIZE : docsNb;
-            blocks.push_back(describeBlock(&documents[begin], end - begin));
+            blocks.push_back(describeBlock(documents + begin, end - begin));
             impacts = impacts && blocks.back().impactsNb != 0;
         }
         if (!impacts) for (size_t b = 0; b < blocks.size(); b++) blocks[b].impactsNb = 0;
         //<flagCg=67|69> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
         m_file.putInt1(impacts ? FLAG_CG_IMPACTS : FLAG_CG);
-        m_file.putInt1((*it1).cg);
-        m_file.putUIntLat64((*it1).frequency);
+        m_file.putInt1(categories[c].cg);
+        m_file.putUIntLat64(categories[c].frequency);
         m_file.putUIntLat64(docsNb);
         m_file.putUIntLat(blocksNb);
         if (blocksNb == 0) {
@@ -744,7 +777,7 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
             const size_t end = (begin + BLOCK_SIZE < docsNb) ? begin + BLOCK_SIZE : docsNb;
             const Block &block = blocks[b];
             const unsigned int patch = putBlockDescriptor(block, previousLast);
-            pending.push_back(Pending{categoryDocuments.size() - 1, (*it1).cg, begin, end, patch});
+            pending.push_back(Pending{documents + begin, categories[c].cg, end - begin, patch});
             previousLast = block.last;
         }
     }
@@ -758,9 +791,8 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
     //4) the blocks, after the directory, and their offsets and lengths in the descriptors
     const unsigned int blocksBegin = m_file.getOutBufferSize();
     for (size_t p = 0; p < pending.size(); p++) {
-        const vector<Document> &documents = categoryDocuments[pending[p].category];
         const unsigned int offset = m_file.getOutBufferSize();
-        putBlock(ident, pending[p].cg, &documents[pending[p].begin], pending[p].end - pending[p].begin);
+        putBlock(ident, pending[p].cg, pending[p].documents, pending[p].docsNb);
         m_file.putInt4(offset, pending[p].patch);
         m_file.putInt4(m_file.getOutBufferSize() - offset, pending[p].patch + 4);
     }
@@ -950,6 +982,28 @@ void NindTermIndex::setTermDef(const unsigned int ident,
     setDefinition(ident);
 }
 ////////////////////////////////////////////////////////////
+//brief setTermDef over flat postings (see the header)
+void NindTermIndex::setTermPostings(const unsigned int ident,
+                                    const vector<CategoryPostings> &categories,
+                                    const Identification &fileIdentification,
+                                    const list<unsigned int> &specifics)
+{
+    if (categories.empty() || !isFormatV2()) {
+        //an erasure, or a v1 file: the list path (which also refuses to extend a v1 file)
+        list<TermCG> termDef;
+        for (size_t c = 0; c < categories.size(); c++) {
+            termDef.push_back(TermCG(categories[c].cg, categories[c].frequency));
+            termDef.back().documents.assign(categories[c].documents, categories[c].documents + categories[c].docsNb);
+        }
+        setTermDef(ident, termDef, fileIdentification, specifics);
+        return;
+    }
+    //section critique ah protejger des control-C (refermeje sur tout chemin de sortie, exceptions comprises)
+    NindCriticalSection criticalSection(m_file);
+    checkExtendIndirection(ident, fileIdentification);
+    writeTermDef(ident, categories, fileIdentification, specifics, false);
+}
+////////////////////////////////////////////////////////////
 //brief Rewrite only the specifics (and identification), leaving every term definition unchanged
 //param specifics list of specific unsigned int
 //param fileIdentification unique identification of lexicon */
@@ -1025,7 +1079,25 @@ void NindTermIndex::writeTermDef(const unsigned int ident,
                                  const list<unsigned int> &specifics,
                                  const bool withRoom)
 {
-    writeTermDefV2(ident, termDef, withRoom);
+    //each category's documents copied once into a flat array
+    vector<vector<Document> > documents;
+    documents.reserve(termDef.size());
+    vector<CategoryPostings> categories;
+    for (list<struct TermCG>::const_iterator it = termDef.begin(); it != termDef.end(); it++) {
+        documents.push_back(vector<Document>((*it).documents.begin(), (*it).documents.end()));
+        categories.push_back(CategoryPostings((*it).cg, (*it).frequency, documents.back().data(), documents.back().size()));
+    }
+    writeTermDef(ident, categories, fileIdentification, specifics, withRoom);
+}
+////////////////////////////////////////////////////////////
+//a definition (format v2) over flat postings, then the specifics and identification, written
+void NindTermIndex::writeTermDef(const unsigned int ident,
+                                 const vector<CategoryPostings> &categories,
+                                 const Identification &fileIdentification,
+                                 const list<unsigned int> &specifics,
+                                 const bool withRoom)
+{
+    writeTermDefV2(ident, categories, withRoom);
     //calcule le nombre d'extra octets ah mettre dans le buffer pour atteindre la taille minimum
     int extra = m_file.getOutBufferSize() - TAILLE_DEJFINITION_MINIMUM;
     while (extra++ < 0) m_file.putInt1(0);

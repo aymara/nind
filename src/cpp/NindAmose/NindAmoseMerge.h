@@ -44,7 +44,7 @@ public:
 protected:
     virtual unsigned int getTermSpecificsNumber() const;
     virtual void countTerm(const std::list<std::string> &components,
-                           const std::list<NindTermIndex::TermCG> &termDef);
+                           const std::vector<NindTermIndex::CategoryPostings> &categories);
     virtual std::list<unsigned int> getTermSpecifics() const;
 
 private:

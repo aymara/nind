@@ -159,6 +159,13 @@ public:
                          std::vector<Document> &postings,
                          std::vector<size_t> &categoryEnds);
 
+    /**\brief getTermPostings, with each category's (cg, term frequency) in categories (cleared
+    * first), in file order: categories[c] goes with categoryEnds[c] */
+    bool getTermPostings(const unsigned int ident,
+                         std::vector<Document> &postings,
+                         std::vector<size_t> &categoryEnds,
+                         std::vector<std::pair<unsigned char, unsigned int> > &categories);
+
     /**\brief Thread-safe (const) getTermDef: reads into the caller's buffer (see NindFile::readAt);
     * several threads can read one term index at once, each with its own buffer */
     bool getTermDef(const unsigned int ident,
@@ -184,6 +191,27 @@ public:
                     const std::list<struct TermCG> &termDef,
                     const Identification &fileIdentification,
                     const std::list<unsigned int> &specifics);
+
+    /**\brief A category's postings, flat: documents[0, docsNb) by increasing document (not owned) */
+    struct CategoryPostings {
+        unsigned char cg;
+        unsigned int frequency;
+        const Document *documents;
+        size_t docsNb;
+        CategoryPostings(const unsigned char cat, const unsigned int freq, const Document *docs, const size_t nb):
+            cg(cat), frequency(freq), documents(docs), docsNb(nb) {}
+    };
+
+    /**\brief setTermDef over flat postings (no list node per posting: a term of hundreds of
+    * millions of documents takes their 16 bytes each, plus its encoded definition); the same file
+    *\param ident ident of term
+    *\param categories its categories, in file order (none: the term is erased)
+    *\param fileIdentification unique identification of lexicon
+    *\param specifics list of specific unsigned int */
+    void setTermPostings(const unsigned int ident,
+                         const std::vector<CategoryPostings> &categories,
+                         const Identification &fileIdentification,
+                         const std::list<unsigned int> &specifics);
 
     /**\brief Rewrite only the specifics (and identification), leaving every term definition unchanged
     *\param specifics list of specific unsigned int
@@ -227,7 +255,8 @@ private:
     void decodeTermPostings(const unsigned int ident,
                             NindReadBuffer &in,
                             std::vector<Document> &postings,
-                            std::vector<size_t> &categoryEnds) const;
+                            std::vector<size_t> &categoryEnds,
+                            std::vector<std::pair<unsigned char, unsigned int> > *categories) const;
     //format v2: the definition's header and directory (in at the definition's first byte)
     void parseDirectoryV2(const unsigned int ident,
                           NindReadBuffer &in,
@@ -248,9 +277,15 @@ private:
     //single category with blocks gets room after its directory and after its blocks, for
     //additions written in place (updateTermDef)
     void writeTermDefV2(const unsigned int ident,
-                        const std::list<struct TermCG> &termDef,
+                        const std::vector<CategoryPostings> &categories,
                         const bool withRoom = false);
-    //a definition, from the write buffer's start, then the specifics and identification
+    //a definition (format v2), from the write buffer's start, then the specifics and identification
+    void writeTermDef(const unsigned int ident,
+                      const std::vector<CategoryPostings> &categories,
+                      const Identification &fileIdentification,
+                      const std::list<unsigned int> &specifics,
+                      const bool withRoom);
+    //the same from lists (copied once into flat arrays)
     void writeTermDef(const unsigned int ident,
                       const std::list<struct TermCG> &termDef,
                       const Identification &fileIdentification,
