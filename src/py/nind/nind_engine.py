@@ -386,8 +386,9 @@ class NindEngine:
             suits a server answering many queries at once: run them in
             parallel instead, every call releases the GIL. More lowers the
             latency of a single query on idle cores (MS MARCO, 8.8M
-            documents, top 10: about 2.4 ms with 1 thread, 1.2 ms with 4),
-            for block-max searches only (a ``top_k`` small for the corpus).
+            documents, top 10, median: 1.5 ms with 1 thread, 0.9 ms with
+            4), for block-max searches only (a ``top_k`` small for the
+            corpus).
         :raises FileNotFoundError: if there is no index in ``index_dir``.
         :raises ValueError: if there are several and no ``prefix`` is given.
         """
