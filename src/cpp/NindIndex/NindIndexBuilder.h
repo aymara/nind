@@ -60,6 +60,12 @@ public:
                          const NindPadFile::Identification &identification,
                          const unsigned char cg = 0) const;
 
+    /**\brief One document of the given terms (ids of the lexicon), in order; ids increasing: for
+    * documents added one by one (addDocuments checks its whole map at each call) */
+    void addDocument(const NindDocId docId,
+                     const uint32_t *termIds,
+                     const size_t tokensNb);
+
     /**\brief The documents and their lengths (in tokens) */
     void docLengths(std::vector<NindDocId> &docIds,
                     std::vector<uint32_t> &lengths) const;

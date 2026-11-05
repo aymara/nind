@@ -45,8 +45,8 @@ nind writes **format v2**: 64-bit document ids, no 16 MiB ceiling on a
 term's postings, and long postings lists cut into blocks of 128 whose
 statistics let a top-k search skip what can't reach the top. Its grammar is
 in `docs/proposals/format-v2-blocks.md`; the source comments still describe
-v1. Indexes written in format v1 by older versions are still read. Updating
-one with `NindIndexer.update()` first rebuilds it in format v2. Amose, and
+v1. Indexes written in format v1 by older versions are still read; merges
+rewrite them in format v2. Amose, and
 other programs that write the files themselves, need a nind that writes v1
 until they move to v2.
 
@@ -101,10 +101,17 @@ with indexer.update() as update:
     update.remove(1)
 ```
 
+An update costs what it changes, whatever the size of the index (88k documents added to 8.8M in
+2.7 s): its documents go to a new segment, the replaced and removed ones are masked, segments are
+merged now and then. For a corpus too large to build at once, `index_jsonl(path, shards=64)` builds
+in worker processes, with memory bounded by `workers` shards, and keeps the shards as segments (no
+merge: 24 s vs 46 s for MS MARCO). Results are always those of one index of the live documents;
+`indexer.force_merge()` makes it one index. See `docs/proposals/segments.md`.
+
 Searching is thread-safe: a server can call `engine.search` from many threads at once (the
-GIL is released). To make one query faster on idle cores, split it across threads with
+GIL is released). To make one query faster on idle cores, search segments in parallel with
 `NindEngine("indices", search_threads=4)` (or `search(..., threads=4)`): the same results, about
-1.5–2× faster with 4 threads. The default (1) suits a server answering many queries at once.
+2× faster with 4 threads. The default (1) suits a server answering many queries at once.
 See the [benchmarks](https://aymara.github.io/nind/benchmarks.html) against Lucene, tantivy and
 bm25s.
 

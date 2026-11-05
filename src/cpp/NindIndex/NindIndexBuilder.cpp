@@ -30,6 +30,20 @@ NindIndexBuilder::NindIndexBuilder():
 {
 }
 ////////////////////////////////////////////////////////////
+void NindIndexBuilder::addDocument(const NindDocId docId,
+                                   const uint32_t *termIds, const size_t tokensNb)
+{
+    if (!m_docIds.empty() && docId <= m_docIds.back())
+        throw std::invalid_argument("documents must be added in increasing id order");
+    for (size_t i = 0; i < tokensNb; i++) {
+        if (termIds[i] == 0) throw std::invalid_argument("0 is not a valid term id");
+        if (termIds[i] > m_maxTermId) m_maxTermId = termIds[i];
+    }
+    m_tokens.insert(m_tokens.end(), termIds, termIds + tokensNb);
+    m_docIds.push_back(docId);
+    m_docEnds.push_back(m_tokens.size());
+}
+////////////////////////////////////////////////////////////
 
     // documents firstDocId, firstDocId + 1... : document i is localIds[ends[i-1]:ends[i]],
     // local id x being the term idMap[x]

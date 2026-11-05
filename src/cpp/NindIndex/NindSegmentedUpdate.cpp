@@ -167,8 +167,6 @@ void writeSegment(const string &segmentBase, const map<NindDocId, vector<string>
             distinct.insert(d->second->begin(), d->second->end());
         vocabulary.assign(distinct.begin(), distinct.end());
     }
-    unordered_map<string, uint32_t> localIds;
-    for (size_t w = 0; w < vocabulary.size(); w++) localIds[vocabulary[w]] = (uint32_t)w;
     NindLexiconIndex lexicon(segmentBase, true, false, max((unsigned int)vocabulary.size(), 1u));
     vector<list<string> > words;
     words.reserve(vocabulary.size());
@@ -178,17 +176,18 @@ void writeSegment(const string &segmentBase, const map<NindDocId, vector<string>
     lexicon.addWords(words, idents);
     lexicon.endBulk();
     const NindPadFile::Identification identification = lexicon.getIdentification();
-    const vector<uint32_t> idMap(idents.begin(), idents.end());
+    unordered_map<string, uint32_t> termIds;
+    termIds.reserve(vocabulary.size());
+    for (size_t w = 0; w < vocabulary.size(); w++) termIds[vocabulary[w]] = idents[w];
     NindIndexBuilder builder;
     vector<NindDocId> docIds;
     vector<uint32_t> lengths, tokens;
     for (map<NindDocId, vector<string> const *>::const_iterator d = documents.begin(); d != documents.end(); d++) {
         tokens.clear();
-        for (size_t i = 0; i < d->second->size(); i++) tokens.push_back(localIds[(*d->second)[i]]);
-        const uint32_t end = (uint32_t)tokens.size();
-        builder.addDocuments(d->first, &end, 1, tokens.data(), tokens.size(), idMap.data(), idMap.size());
+        for (size_t i = 0; i < d->second->size(); i++) tokens.push_back(termIds[(*d->second)[i]]);
+        builder.addDocument(d->first, tokens.data(), tokens.size());
         docIds.push_back(d->first);
-        lengths.push_back(end);
+        lengths.push_back((uint32_t)tokens.size());
     }
     {
         NindTermIndex terms(segmentBase, true, identification, 0, (unsigned int)vocabulary.size() + 1);

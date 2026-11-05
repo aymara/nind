@@ -222,11 +222,6 @@ _DOC_LENGTHS_MAGIC = b"NINDDL02"
 _DOC_LENGTHS_MAGIC_V1 = b"NINDDL01"
 
 
-def _lengths_arrays(lengths):
-    """(doc ids, lengths) arrays of a doc id -> length dict, for the native writers."""
-    return array('Q', lengths.keys()), array('I', lengths.values())
-
-
 def _write_doc_length_arrays(base, doc_ids, values):
     """Write the lengths of documents: arrays by increasing id, no length 0 (no dict: ~100 bytes a document)."""
     if sys.byteorder == "big":
@@ -237,18 +232,6 @@ def _write_doc_length_arrays(base, doc_ids, values):
         f.write(_DOC_LENGTHS_MAGIC + struct.pack("<I", len(doc_ids)))
         f.write(doc_ids.tobytes())
         f.write(values.tobytes())
-
-
-def _write_doc_lengths(base, lengths):
-    """Write ``{document id: length in tokens}`` (documents of length 0 are left out)."""
-    doc_ids = array('Q', sorted(doc_id for doc_id, length in lengths.items() if length))
-    _write_doc_length_arrays(base, doc_ids, array('I', (lengths[doc_id] for doc_id in doc_ids)))
-
-
-def _read_doc_lengths(base):
-    """``{document id: length in tokens}`` (``None`` if the index has no such file)."""
-    arrays = _read_doc_length_arrays(base)
-    return None if arrays is None else dict(zip(*arrays))
 
 
 def _read_doc_length_arrays(base):
@@ -318,23 +301,6 @@ class _RecordNames(Sequence):
         if self._names is None:
             self._names = native.SegmentedIndex(self._base)
         return self._names.name(index)
-
-
-def _read_doc_names(base):
-    """The document names of the index at ``base`` (``None`` if it has none)."""
-    if not os.path.exists(base + DOC_NAMES_EXTENSION):
-        return None
-    return native.NindDocNames(base + DOC_NAMES_EXTENSION)
-
-
-def _local_index_lengths(base):
-    # the document lengths of an index written before they were stored apart
-    lexicon = native.NindLexiconIndex(base, is_writer=False)
-    local_index = native.NindLocalIndex(base, is_writer=False, lexicon_identification=lexicon.get_identification())
-    lengths = {}
-    for doc_id in local_index.get_doc_idents():
-        lengths[doc_id] = sum(len(term.localisation) for term in local_index.get_local_def(doc_id) or ())
-    return lengths
 
 
 class _Snapshot:
