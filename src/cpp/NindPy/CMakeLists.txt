@@ -48,6 +48,8 @@ pybind11_add_module(_native
   ${NIND_CPP_ROOT}/NindIndex/NindIndexVerify.cpp
   ${NIND_CPP_ROOT}/NindIndex/NindIndexUpdate.cpp
   ${NIND_CPP_ROOT}/NindIndex/NindBm25Scorer.cpp
+  ${NIND_CPP_ROOT}/NindIndex/NindSegmentedIndex.cpp
+  ${NIND_CPP_ROOT}/NindIndex/NindSegmentedUpdate.cpp
   ${NIND_CPP_ROOT}/NindIndex/NindIndexBuilder.cpp
 )
 

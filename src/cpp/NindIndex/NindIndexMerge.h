@@ -48,8 +48,10 @@ public:
         //the documents' lengths, for the merged blocks' <longueurMin> (see
         //NindTermIndex::setDocumentLengths; none: 0, unknown)
         std::vector<std::pair<NindDocId, unsigned int> > documentLengths;
+        //per shard, its documents to leave out, in increasing order (empty: none)
+        std::vector<std::vector<NindDocId> > deletedDocuments;
         Options(): withRetrolexicon(false), lexiconIndirectionBlocSize(0), retroIndirectionBlocSize(0),
-            termIndirectionBlocSize(0), localIndirectionBlocSize(0), documentLengths() {}
+            termIndirectionBlocSize(0), localIndirectionBlocSize(0), documentLengths(), deletedDocuments() {}
     };
 
     /**\brief What was merged */

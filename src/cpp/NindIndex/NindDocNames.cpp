@@ -120,27 +120,52 @@ void NindDocNames::write(const string &fileName,
 void NindDocNames::merge(const vector<string> &shardFiles,
                          const string &fileName)
 {
-    //the shards with documents, by increasing documents, their ranges disjoint
+    merge(shardFiles, vector<vector<NindDocId> >(), fileName);
+}
+////////////////////////////////////////////////////////////
+//brief Merge the names files of shards into a new file, without some of their documents
+void NindDocNames::merge(const vector<string> &shardFiles,
+                         const vector<vector<NindDocId> > &deleted,
+                         const string &fileName)
+{
+    if (!deleted.empty() && deleted.size() != shardFiles.size())
+        throw invalid_argument("NindDocNames::merge: as many lists of deleted documents as shards expected");
     vector<unique_ptr<NindDocNames> > shards;
-    for (size_t s = 0; s < shardFiles.size(); s++) {
-        unique_ptr<NindDocNames> shard(new NindDocNames(shardFiles[s]));
-        if (shard->size() != 0) shards.push_back(std::move(shard));
-    }
-    sort(shards.begin(), shards.end(), [](const unique_ptr<NindDocNames> &a, const unique_ptr<NindDocNames> &b) {
-        return a->docIdentAt(0) < b->docIdentAt(0); });
-    uint64_t count = 0, namesBytes = 0;
-    vector<uint32_t> firstRanks(shards.size());
+    for (size_t s = 0; s < shardFiles.size(); s++) shards.push_back(unique_ptr<NindDocNames>(new NindDocNames(shardFiles[s])));
+    //the live documents' (ident, shard, rank in the shard), by increasing ident
+    struct Item { NindDocId ident; uint32_t shard, rank; };
+    vector<Item> items;
+    size_t total = 0;
+    for (size_t s = 0; s < shards.size(); s++) total += shards[s]->size();
+    items.reserve(total);
     for (size_t s = 0; s < shards.size(); s++) {
-        if (s > 0 && shards[s]->docIdentAt(0) <= shards[s - 1]->docIdentAt(shards[s - 1]->size() - 1))
-            throw invalid_argument("NindDocNames::merge: shards with interleaved documents");
-        if (count + shards[s]->size() > 0xFFFFFFFFu) throw invalid_argument("NindDocNames::merge: too many documents");
-        firstRanks[s] = (uint32_t)count;
-        count += shards[s]->size();
-        namesBytes += shards[s]->m_bytes.size() - shards[s]->m_namesPos;
+        for (size_t r = 0; r < shards[s]->size(); r++) {
+            const NindDocId ident = shards[s]->docIdentAt(r);
+            if (!deleted.empty() && binary_search(deleted[s].begin(), deleted[s].end(), ident)) continue;
+            Item item;
+            item.ident = ident;
+            item.shard = (uint32_t)s;
+            item.rank = (uint32_t)r;
+            items.push_back(item);
+        }
     }
-    const NindDocId firstIdent = shards.empty() ? 0 : shards.front()->docIdentAt(0);
-    const bool dense = shards.empty() ||
-        shards.back()->docIdentAt(shards.back()->size() - 1) - firstIdent == count - 1;
+    const auto byIdent = [](const Item &a, const Item &b) { return a.ident < b.ident; };
+    if (!is_sorted(items.begin(), items.end(), byIdent)) sort(items.begin(), items.end(), byIdent);
+    if (items.size() > 0xFFFFFFFFu) throw invalid_argument("NindDocNames::merge: too many documents");
+    uint64_t namesBytes = 0;
+    //rank in a shard -> rank in the merged file (a deleted document: NO_RANK)
+    const uint32_t NO_RANK = 0xFFFFFFFFu;
+    vector<vector<uint32_t> > mergedRanks(shards.size());
+    for (size_t s = 0; s < shards.size(); s++) mergedRanks[s].assign(shards[s]->size(), NO_RANK);
+    for (size_t i = 0; i < items.size(); i++) {
+        if (i > 0 && items[i].ident == items[i - 1].ident)
+            throw invalid_argument("NindDocNames::merge: document " + to_string(items[i].ident) + " in several shards");
+        mergedRanks[items[i].shard][items[i].rank] = (uint32_t)i;
+        namesBytes += shards[items[i].shard]->nameAt(items[i].rank).second;
+    }
+    const uint64_t count = items.size();
+    const NindDocId firstIdent = items.empty() ? 0 : items.front().ident;
+    const bool dense = items.empty() || items.back().ident - firstIdent == count - 1;
     const bool wide = namesBytes > 0xFFFFFFFFu;
 
     FILE *file = fopen(fileName.c_str(), "wbx");
@@ -158,25 +183,26 @@ void NindDocNames::merge(const vector<string> &shardFiles,
         put4(bytes, (uint32_t)count);
         put8(bytes, firstIdent);
         //<idents>
-        for (size_t s = 0; s < shards.size() && !dense; s++) {
-            for (size_t i = 0; i < shards[s]->size(); i++) {
-                put8(bytes, shards[s]->docIdentAt(i));
-                if (bytes.size() >= FLUSH_BYTES) write();
-            }
+        for (size_t i = 0; i < items.size() && !dense; i++) {
+            put8(bytes, items[i].ident);
+            if (bytes.size() >= FLUSH_BYTES) write();
         }
-        //<offsets>: each shard's, after the names of the shards before it
+        //<offsets>
         putOffset(bytes, 0, wide);
-        uint64_t namesBefore = 0;
-        for (size_t s = 0; s < shards.size(); s++) {
-            const NindDocNames &shard = *shards[s];
-            for (size_t i = 1; i <= shard.size(); i++) {
-                putOffset(bytes, namesBefore + shard.readOffset(shard.m_offsetsPos + shard.m_offsetWidth * i), wide);
-                if (bytes.size() >= FLUSH_BYTES) write();
-            }
-            namesBefore += shard.m_bytes.size() - shard.m_namesPos;
+        uint64_t offset = 0;
+        for (size_t i = 0; i < items.size(); i++) {
+            offset += shards[items[i].shard]->nameAt(items[i].rank).second;
+            putOffset(bytes, offset, wide);
+            if (bytes.size() >= FLUSH_BYTES) write();
         }
-        //<parNom>: the shards' name orders merged, a heap of (shard, place in its name order)
-        vector<pair<uint32_t, uint32_t> > heap;
+        //<parNom>: the shards' name orders merged, a heap of (shard, place in its name order), each
+        //at a live document
+        const auto advance = [&](pair<uint32_t, uint32_t> &cursor) {
+            const NindDocNames &shard = *shards[cursor.first];
+            while (cursor.second < shard.size()
+                   && mergedRanks[cursor.first][shard.read4(shard.m_byNamePos + 4 * (size_t)cursor.second)] == NO_RANK) cursor.second++;
+            return cursor.second < shard.size();
+        };
         const auto nameOf = [&shards](const pair<uint32_t, uint32_t> &cursor) {
             const NindDocNames &shard = *shards[cursor.first];
             return shard.nameAt(shard.read4(shard.m_byNamePos + 4 * (size_t)cursor.second));
@@ -188,13 +214,17 @@ void NindDocNames::merge(const vector<string> &shardFiles,
                                    min(nameA.second, nameB.second));
             return cmp != 0 ? cmp > 0 : nameA.second > nameB.second;
         };
-        for (uint32_t s = 0; s < shards.size(); s++) heap.push_back(make_pair(s, (uint32_t)0));
+        vector<pair<uint32_t, uint32_t> > heap;
+        for (uint32_t s = 0; s < shards.size(); s++) {
+            pair<uint32_t, uint32_t> cursor(s, 0);
+            if (advance(cursor)) heap.push_back(cursor);
+        }
         make_heap(heap.begin(), heap.end(), greaterName);
         bool hasPrevious = false;
         pair<uint32_t, uint32_t> previous(0, 0);
         while (!heap.empty()) {
             pop_heap(heap.begin(), heap.end(), greaterName);
-            const pair<uint32_t, uint32_t> cursor = heap.back();
+            pair<uint32_t, uint32_t> cursor = heap.back();
             //(within a shard, names are unique)
             if (hasPrevious && previous.first != cursor.first && !greaterName(cursor, previous)) {
                 const pair<size_t, size_t> name = nameOf(cursor);
@@ -202,23 +232,29 @@ void NindDocNames::merge(const vector<string> &shardFiles,
                                        + string((const char *)shards[cursor.first]->m_bytes.data() + name.first, name.second));
             }
             const NindDocNames &shard = *shards[cursor.first];
-            put4(bytes, firstRanks[cursor.first] + shard.read4(shard.m_byNamePos + 4 * (size_t)cursor.second));
+            put4(bytes, mergedRanks[cursor.first][shard.read4(shard.m_byNamePos + 4 * (size_t)cursor.second)]);
             if (bytes.size() >= FLUSH_BYTES) write();
             previous = cursor;
             hasPrevious = true;
-            if ((size_t)cursor.second + 1 < shard.size()) {
-                heap.back().second++;
+            cursor.second++;
+            if (advance(cursor)) {
+                heap.back() = cursor;
                 push_heap(heap.begin(), heap.end(), greaterName);
             }
             else heap.pop_back();
         }
+        //<noms>: runs of consecutive names of a shard written at once
         write();
-        //<noms>
-        for (size_t s = 0; s < shards.size(); s++) {
-            const NindDocNames &shard = *shards[s];
-            const size_t length = shard.m_bytes.size() - shard.m_namesPos;
-            if (length != 0 && fwrite(shard.m_bytes.data() + shard.m_namesPos, 1, length, file) != length)
+        for (size_t i = 0; i < items.size(); ) {
+            const NindDocNames &shard = *shards[items[i].shard];
+            const size_t begin = shard.nameAt(items[i].rank).first;
+            size_t j = i + 1;
+            while (j < items.size() && items[j].shard == items[i].shard && items[j].rank == items[j - 1].rank + 1) j++;
+            const pair<size_t, size_t> lastName = shard.nameAt(items[j - 1].rank);
+            const size_t length = lastName.first + lastName.second - begin;
+            if (length != 0 && fwrite(shard.m_bytes.data() + begin, 1, length, file) != length)
                 throw WriteFileException(fileName);
+            i = j;
         }
     }
     catch (...) {

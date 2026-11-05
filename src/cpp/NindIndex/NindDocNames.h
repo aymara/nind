@@ -55,10 +55,15 @@ public:
     * documents, without building the names in memory (shards' files are loaded, the result streamed)
     *\param shardFiles the shards' files, in any order
     *\param fileName the new file (must not exist; removed on failure)
-    *\throws std::invalid_argument if the shards' document ranges overlap (each shard must hold a
-    * range of its own) or a name is in several shards
+    *\throws std::invalid_argument if a document or a name is in several shards
     *\throws OpenFileException, ReadFileException, FormatFileException, WriteFileException on I/O errors */
     static void merge(const std::vector<std::string> &shardFiles,
+                      const std::string &fileName);
+
+    /**\brief merge() without some of the shards' documents
+    *\param deleted per shard, its documents to leave out, in increasing order (empty: none) */
+    static void merge(const std::vector<std::string> &shardFiles,
+                      const std::vector<std::vector<NindDocId> > &deleted,
                       const std::string &fileName);
 
     /**\brief Read the names of an index

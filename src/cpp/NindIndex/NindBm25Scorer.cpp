@@ -15,6 +15,7 @@
 // GNU Less General Public License for more details.
 ////////////////////////////////////////////////////////////
 #include "NindBm25Scorer.h"
+#include "NindThreadPool.h"
 #include "NindBasics/NindReadBuffer.h"
 #include <algorithm>
 #include <atomic>
@@ -50,18 +51,26 @@ public:
     // the documents of the corpus, in the order that breaks score ties
     // document ids: 64 bits (NindDocId); positions: 32 bits (at most 4.29G documents per index)
     Impl(const std::vector<NindDocId> &docIds, const std::vector<uint32_t> &lengths, const double avgDocLength):
-        m_docIds(), m_lengths(), m_shortLengths(), m_minLength(0), m_identity(false), m_dense(), m_sparse(), m_docsNb(docIds.size()),
+        m_docIds(), m_first(0), m_lengths(), m_shortLengths(), m_minLength(0), m_identity(false), m_dense(), m_sparse(), m_docsNb(docIds.size()),
         m_avgDocLength(avgDocLength),
         m_poolMutex(), m_pool()
     {
         if (docIds.size() != lengths.size()) throw std::invalid_argument("doc_ids and lengths must have the same length");
         if (docIds.size() >= NO_POSITION) throw std::invalid_argument("too many documents");
-        uint64_t maxId = 0;
-        for (size_t i = 0; i < docIds.size(); i++) maxId = std::max(maxId, (uint64_t)docIds[i]);
+        uint64_t maxId = 0, minId = docIds.empty() ? 0 : docIds[0];
+        for (size_t i = 0; i < docIds.size(); i++) {
+            maxId = std::max(maxId, (uint64_t)docIds[i]);
+            minId = std::min(minId, (uint64_t)docIds[i]);
+        }
+        m_first = minId;
+        //ids first, first + 1... in order (an index NindIndexer built, or a part of it): no table
+        m_identity = true;
+        for (size_t i = 0; i < docIds.size() && m_identity; i++) m_identity = (docIds[i] == minId + i);
         // a document id given twice: its last position counts (and only it is scored)
-        if (docIds.size() != 0 && maxId < 2 * (uint64_t)docIds.size() + DENSE_SLACK) {
-            m_dense.assign((size_t)maxId + 1, NO_POSITION);
-            for (size_t i = 0; i < docIds.size(); i++) m_dense[docIds[i]] = (uint32_t)i;
+        if (m_identity) {}
+        else if (docIds.size() != 0 && maxId - minId < 2 * (uint64_t)docIds.size() + DENSE_SLACK) {
+            m_dense.assign((size_t)(maxId - minId) + 1, NO_POSITION);
+            for (size_t i = 0; i < docIds.size(); i++) m_dense[docIds[i] - minId] = (uint32_t)i;
         }
         else {
             m_sparse.reserve(docIds.size());
@@ -77,7 +86,7 @@ public:
             }
             m_sparse.swap(unique);
         }
-        m_docIds.assign(docIds.begin(), docIds.end());
+        if (!m_identity) m_docIds.assign(docIds.begin(), docIds.end());
         m_lengths.assign(lengths.begin(), lengths.end());
         //lengths under 2^16: 2 bytes each (more of them in the processor's caches)
         uint32_t maxLength = 0;
@@ -86,9 +95,6 @@ public:
             m_shortLengths.assign(lengths.begin(), lengths.end());
             std::vector<uint32_t>().swap(m_lengths);
         }
-        m_identity = true;
-        for (size_t i = 0; i < docIds.size() && m_identity; i++) m_identity = (docIds[i] == i);
-        if (m_identity) std::vector<uint32_t>().swap(m_dense);
         m_minLength = 0;
         for (size_t i = 0; i < lengths.size(); i++)
             if (i == 0 || lengths[i] < m_minLength) m_minLength = lengths[i];
@@ -100,8 +106,17 @@ public:
                                                      const std::vector<unsigned int> &termIds,
                                                      const double k1, const double b,
                                                      const long topK, const bool prune,
-                                                     const unsigned int threads) const
+                                                     const unsigned int threads,
+                                                     const NindBm25Scorer::SearchContext *context) const
     {
+        //this search's corpus: these documents, or the segmented index around them
+        Corpus corpus;
+        corpus.docsNb = context ? context->docsNb : m_docsNb;
+        corpus.avgDocLength = context ? context->avgDocLength : m_avgDocLength;
+        corpus.deleted = context ? context->deleted : 0;
+        corpus.threshold = context ? context->threshold : 0;
+        if (context && context->documentFrequencies && context->documentFrequencies->size() != termIds.size())
+            throw std::invalid_argument("as many document frequencies as terms expected");
         // scratch arrays and read buffer from the pool: concurrent searches each get their own
         ScratchLease lease(*this);
         NindReadBuffer &buffer = lease.scratch->buffer;
@@ -116,7 +131,10 @@ public:
         for (size_t t = 0; t < termIds.size(); t++) {
             if (termIds[t] == 0) continue;
             const auto found = distinct.insert(std::make_pair(termIds[t], distinctIds.size()));
-            if (found.second) distinctIds.push_back(termIds[t]);
+            if (found.second) {
+                distinctIds.push_back(termIds[t]);
+                if (context && context->documentFrequencies) corpus.dfs.push_back((*context->documentFrequencies)[t]);
+            }
             occurrences.push_back(found.first->second);
         }
         // per distinct term: its idf and the postings to score, (position, frequency): every posting
@@ -125,13 +143,13 @@ public:
         std::vector<std::vector<std::pair<uint32_t, uint32_t> > > postings;
         if (prune && topK > 0 && k1 >= 0 && b >= 0 && b <= 1 && !distinctIds.empty()) {
             std::vector<std::pair<uint64_t, double> > result;
-            if (searchMaxScore(termIndex, distinctIds, occurrences, k1, b, (size_t)topK, std::max(1u, threads), buffer, result)) {
+            if (searchMaxScore(termIndex, distinctIds, occurrences, k1, b, (size_t)topK, std::max(1u, threads), corpus, buffer, result)) {
                 lease.clean = true;         //(scores untouched)
                 return result;
             }
         }
-        collectAll(termIndex, distinctIds, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
-        const Params parameters = params(k1, b);
+        collectAll(termIndex, distinctIds, corpus, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
+        const Params parameters = params(k1, b, corpus);
         // the scores, term occurrence by term occurrence in query order (as NindEngine._bm25_score)
         for (size_t o = 0; o < occurrences.size(); o++) {
             const double idf = idfs[occurrences[o]];
@@ -157,22 +175,49 @@ public:
         const size_t kept = (topK >= 0 && (size_t)topK < ranked.size()) ? (size_t)topK : ranked.size();
         std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
         std::vector<std::pair<uint64_t, double> > result(kept);
-        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
+        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(docIdOf(ranked[i].second), -ranked[i].first);
         return result;
     }
 
     size_t docsNb() const { return m_docsNb; }
 
+    // a term's documents in termIndex, every category counted
+    uint64_t documentFrequency(const NindTermIndex &termIndex, const unsigned int termId, NindReadBuffer &buffer) const {
+        const std::shared_ptr<const NindTermIndex::TermDirectory> directory = directoryOf(termIndex, termId, buffer);
+        uint64_t df = 0;
+        if (directory)
+            for (size_t c = 0; c < directory->categories.size(); c++) df += directory->categories[c].docsNb;
+        return df;
+    }
+    size_t positionOfDocument(const NindDocId docId) const {
+        const uint32_t position = positionOf(docId);
+        return position == NO_POSITION ? m_docsNb : position;
+    }
+    NindDocId docIdAt(const size_t position) const { return docIdOf((uint32_t)position); }
+    uint32_t lengthAt(const size_t position) const { return (uint32_t)lengthOf((uint32_t)position); }
+
 private:
+    // what a search takes from its corpus (see SearchContext); dfs by distinct term, empty: this index's
+    struct Corpus {
+        uint64_t docsNb;
+        double avgDocLength;
+        std::vector<uint64_t> dfs;
+        const std::vector<uint64_t> *deleted;
+        std::atomic<double> *threshold;
+        Corpus(): docsNb(0), avgDocLength(0), dfs(), deleted(0), threshold(0) {}
+        bool isDeleted(const uint32_t position) const {
+            return deleted != 0 && ((*deleted)[position / 64] >> (position % 64) & 1) != 0;
+        }
+    };
     // a query's BM25 constants: tf * (k1 + 1) / (tf + k1 * (1 - b) + k1 * b / avgDocLength * length)
     struct Params {
         double k1Plus1, base, perLength;
     };
-    Params params(const double k1, const double b) const {
+    Params params(const double k1, const double b, const Corpus &corpus) const {
         Params p;
         p.k1Plus1 = k1 + 1;
         p.base = k1 * (1 - b);
-        p.perLength = (m_avgDocLength > 0) ? k1 * b / m_avgDocLength : 0.0;
+        p.perLength = (corpus.avgDocLength > 0) ? k1 * b / corpus.avgDocLength : 0.0;
         return p;
     }
     // one term's BM25 contribution: the same function everywhere (scores and bounds): monotonic in
@@ -181,14 +226,14 @@ private:
     static double contribution(const double idf, const double tf, const double docLength, const Params &p) {
         return idf * (tf * p.k1Plus1 / (tf + p.base + p.perLength * docLength));
     }
-    double idfOf(const uint64_t df) const {
+    static double idfOf(const uint64_t df, const uint64_t docsNb) {
         //same operations, in the same order, as NindEngine._bm25_score
-        return std::log(((double)((int64_t)m_docsNb - (int64_t)df) + 0.5) / ((double)df + 0.5) + 1.0);
+        return std::log(((double)((int64_t)docsNb - (int64_t)df) + 0.5) / ((double)df + 0.5) + 1.0);
     }
 
     // every posting of every term (several categories: a document's first one only)
     void collectAll(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
-                    NindReadBuffer &buffer, std::vector<uint32_t> &stamps, uint32_t &stamp,
+                    const Corpus &corpus, NindReadBuffer &buffer, std::vector<uint32_t> &stamps, uint32_t &stamp,
                     std::vector<double> &idfs,
                     std::vector<std::vector<std::pair<uint32_t, uint32_t> > > &postings) const
     {
@@ -199,7 +244,7 @@ private:
         for (size_t t = 0; t < distinctIds.size(); t++) {
             termIndex.getTermPostings(distinctIds[t], read, categoryEnds, buffer);
             // df counts the documents of every category
-            idfs.push_back(idfOf((uint64_t)read.size()));
+            idfs.push_back(idfOf(corpus.dfs.empty() ? (uint64_t)read.size() : corpus.dfs[t], corpus.docsNb));
             std::vector<std::pair<uint32_t, uint32_t> > &termPostings = postings[t];
             termPostings.reserve(read.size());
             const bool severalCategories = categoryEnds.size() > 1;
@@ -212,7 +257,7 @@ private:
             }
             for (size_t i = 0; i < read.size(); i++) {
                 const uint32_t position = positionOf(read[i].ident);
-                if (position == NO_POSITION) continue;
+                if (position == NO_POSITION || corpus.isDeleted(position)) continue;
                 if (severalCategories) {
                     if (stamps[position] == stamp) continue;    // already in a previous category
                     stamps[position] = stamp;
@@ -289,7 +334,7 @@ private:
     }
     // Block-max MaxScore over windows, on the documents [lo, hi] (see searchMaxScore)
     void scanRange(const NindTermIndex &termIndex, const std::vector<TermInfo> &terms, const NindDocId lo,
-                   const NindDocId hi, const size_t topK, const Params &parameters,
+                   const NindDocId hi, const size_t topK, const Params &parameters, const Corpus &corpus,
                    std::atomic<double> &shared, Found &found) const
     {
         const size_t termsNb = terms.size();
@@ -387,7 +432,8 @@ private:
                     const NindDocId thisDoc = docId;
                     docId = nextDoc;
                     any = anyNext;
-                    if (position == NO_POSITION) continue;
+                    //(a deleted document never reaches theta, nor the candidates)
+                    if (position == NO_POSITION || corpus.isDeleted(position)) continue;
                     // the non-essential terms, by decreasing bound, while the document may reach theta
                     bool rejected = false;
                     for (size_t i = essential; i-- > 0; ) {
@@ -443,11 +489,12 @@ private:
     // long list without blocks (format v1).
     bool searchMaxScore(const NindTermIndex &termIndex, const std::vector<unsigned int> &distinctIds,
                         const std::vector<size_t> &occurrences, const double k1, const double b,
-                        const size_t topK, const unsigned int threads, NindReadBuffer &buffer,
+                        const size_t topK, const unsigned int threads, const Corpus &corpus, NindReadBuffer &buffer,
                         std::vector<std::pair<uint64_t, double> > &result) const
     {
+        //(a segment's deleted documents count in its shortest length: never above the live ones')
         const double shortest = m_minLength;
-        const Params parameters = params(k1, b);
+        const Params parameters = params(k1, b, corpus);
         // the query's terms present in the index (index in distinctIds -> in terms)
         std::vector<TermInfo> terms;
         std::vector<size_t> termOf(distinctIds.size(), (size_t)-1);
@@ -460,7 +507,7 @@ private:
             if (term.directory->categories.size() != 1) return false;
             const NindTermIndex::TermDirectory::Category &category = term.directory->categories[0];
             term.ident = distinctIds[d];
-            term.idf = idfOf(category.docsNb);
+            term.idf = idfOf(corpus.dfs.empty() ? category.docsNb : corpus.dfs[d], corpus.docsNb);
             if (!(term.idf > 0)) return false;
             //a format v1 file: every list inline, a long one would be read whole as one block
             if (category.blocks.empty() && category.inlinePostings.size() > NindTermIndex::BLOCK_SIZE) return false;
@@ -510,9 +557,10 @@ private:
         }
         const uint64_t span = last - first;
         const unsigned int slices = (unsigned int)std::max<uint64_t>(1, std::min<uint64_t>(threads, span / 4096 + 1));
-        std::atomic<double> shared(0.0);
+        std::atomic<double> ownThreshold(0.0);
+        std::atomic<double> &shared = corpus.threshold ? *corpus.threshold : ownThreshold;
         std::vector<Found> found(slices);
-        if (slices == 1) scanRange(termIndex, terms, first, last, topK, parameters, shared, found[0]);
+        if (slices == 1) scanRange(termIndex, terms, first, last, topK, parameters, corpus, shared, found[0]);
         else {
             //the other ranges to the scorer's pool of threads, the last one here
             std::vector<std::future<void> > done;
@@ -520,7 +568,7 @@ private:
             for (unsigned int s = 0; s < slices; s++) {
                 const NindDocId lo = first + span / slices * s + std::min<uint64_t>(s, span % slices);
                 const NindDocId hi = (s + 1 == slices) ? last : first + span / slices * (s + 1) + std::min<uint64_t>(s + 1, span % slices) - 1;
-                auto work = [&, s, lo, hi]() { scanRange(termIndex, terms, lo, hi, topK, parameters, shared, found[s]); };
+                auto work = [&, s, lo, hi]() { scanRange(termIndex, terms, lo, hi, topK, parameters, corpus, shared, found[s]); };
                 if (s + 1 < slices) done.push_back(m_threadPool.run(work, slices - 1));
                 else {
                     try { work(); }
@@ -557,57 +605,11 @@ private:
         const size_t kept = std::min(topK, ranked.size());
         std::partial_sort(ranked.begin(), ranked.begin() + kept, ranked.end());
         result.resize(kept);
-        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
+        for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(docIdOf(ranked[i].second), -ranked[i].first);
         return true;
     }
 
-    // The threads that search ranges of documents for the searches with threads > 1: started when
-    // first needed, as many as the most a search asked for (its own thread aside), kept until the
-    // scorer goes. Tasks of concurrent searches queue; a task never waits for another.
-    class Pool {
-    public:
-        Pool(): m_mutex(), m_wake(), m_tasks(), m_threads(), m_stop(false) {}
-        ~Pool() {
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_stop = true;
-            }
-            m_wake.notify_all();
-            for (size_t t = 0; t < m_threads.size(); t++) m_threads[t].join();
-        }
-        // runs work on a pool thread (at least threads of them); its future gives its end (or exception)
-        std::future<void> run(const std::function<void()> &work, const size_t threads) {
-            std::shared_ptr<std::packaged_task<void()> > task(new std::packaged_task<void()>(work));
-            std::future<void> done = task->get_future();
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                while (m_threads.size() < threads) m_threads.push_back(std::thread([this]() { loop(); }));
-                m_tasks.push([task]() { (*task)(); });
-            }
-            m_wake.notify_one();
-            return done;
-        }
-    private:
-        void loop() {
-            while (true) {
-                std::function<void()> task;
-                {
-                    std::unique_lock<std::mutex> lock(m_mutex);
-                    m_wake.wait(lock, [this]() { return m_stop || !m_tasks.empty(); });
-                    if (m_tasks.empty()) return;            //(m_stop)
-                    task = std::move(m_tasks.front());
-                    m_tasks.pop();
-                }
-                task();                     //(a packaged_task: its exception goes to its future)
-            }
-        }
-        std::mutex m_mutex;
-        std::condition_variable m_wake;
-        std::queue<std::function<void()> > m_tasks;
-        std::vector<std::thread> m_threads;
-        bool m_stop;
-    };
-    mutable Pool m_threadPool;
+    mutable NindThreadPool m_threadPool;
 
     // A term's parsed directory, from the cache (read and parsed once per term: the scorer serves
     // one immutable index); null if the index hasn't the term. The cache is emptied when it holds
@@ -646,17 +648,22 @@ private:
     mutable size_t m_cacheBytes = 0;
 
     uint32_t positionOf(const uint64_t docId) const {
-        //ids 0..N-1 in order (an index NindIndexer built): the position is the id
-        if (m_identity) return docId < m_docsNb ? (uint32_t)docId : NO_POSITION;
+        //(an id below m_first wraps to a large offset)
+        const uint64_t offset = docId - m_first;
+        //ids in order, without gap: the position is the offset
+        if (m_identity) return offset < m_docsNb ? (uint32_t)offset : NO_POSITION;
         if (!m_dense.empty() || m_sparse.empty())
-            return docId < m_dense.size() ? m_dense[docId] : NO_POSITION;
+            return offset < m_dense.size() ? m_dense[offset] : NO_POSITION;
         const auto it = std::lower_bound(m_sparse.begin(), m_sparse.end(), docId,
                                          [](const std::pair<uint64_t, uint32_t> &a, const uint64_t id)
                                          { return a.first < id; });
         return (it != m_sparse.end() && it->first == docId) ? it->second : NO_POSITION;
     }
 
-    std::vector<uint64_t> m_docIds;     //position -> document id
+    uint64_t docIdOf(const uint32_t position) const { return m_identity ? m_first + position : m_docIds[position]; }
+
+    std::vector<uint64_t> m_docIds;     //position -> document id (m_identity: none)
+    uint64_t m_first;                   //the smallest document id
     std::vector<uint32_t> m_lengths;    //position -> length (or, all under 2^16:)
     std::vector<uint16_t> m_shortLengths;
     static const size_t PREFETCH_DISTANCE = 8;
@@ -731,7 +738,41 @@ std::vector<std::pair<NindDocId, double> > NindBm25Scorer::search(const NindTerm
                                                                   const bool prune,
                                                                   const unsigned int threads) const
 {
-    return m_impl->search(termIndex, termIds, k1, b, topK, prune, threads);
+    return m_impl->search(termIndex, termIds, k1, b, topK, prune, threads, 0);
+}
+////////////////////////////////////////////////////////////
+std::vector<std::pair<NindDocId, double> > NindBm25Scorer::search(const NindTermIndex &termIndex,
+                                                                  const std::vector<unsigned int> &termIds,
+                                                                  const double k1,
+                                                                  const double b,
+                                                                  const long topK,
+                                                                  const bool prune,
+                                                                  const unsigned int threads,
+                                                                  const SearchContext &context) const
+{
+    return m_impl->search(termIndex, termIds, k1, b, topK, prune, threads, &context);
+}
+////////////////////////////////////////////////////////////
+uint64_t NindBm25Scorer::documentFrequency(const NindTermIndex &termIndex,
+                                           const unsigned int termId,
+                                           NindReadBuffer &buffer) const
+{
+    return m_impl->documentFrequency(termIndex, termId, buffer);
+}
+////////////////////////////////////////////////////////////
+size_t NindBm25Scorer::position(const NindDocId docId) const
+{
+    return m_impl->positionOfDocument(docId);
+}
+////////////////////////////////////////////////////////////
+NindDocId NindBm25Scorer::docIdAt(const size_t position) const
+{
+    return m_impl->docIdAt(position);
+}
+////////////////////////////////////////////////////////////
+uint32_t NindBm25Scorer::lengthAt(const size_t position) const
+{
+    return m_impl->lengthAt(position);
 }
 ////////////////////////////////////////////////////////////
 size_t NindBm25Scorer::docsNb() const

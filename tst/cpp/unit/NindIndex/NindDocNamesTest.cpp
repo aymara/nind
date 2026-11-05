@@ -46,6 +46,21 @@ TEST_CASE("NindDocNamesTest.MergeWritesTheSameFileAsWrite") {
     CHECK_EQ(0u, NindDocNames(tmp.file("empty")).size());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.MergeInterleavedShardsWithoutDeletedDocuments") {
+    TestTempDir tmp;
+    // a replaced document: its old id, in a newer shard, the old one deleted; names moved between shards
+    NindDocNames::write(tmp.file("old"), {1, 2, 3, 7}, {"a", "same", "c", "g"});
+    NindDocNames::write(tmp.file("new"), {2, 5, 8}, {"same", "e", "h"});
+    NindDocNames::merge({tmp.file("old"), tmp.file("new")}, {{2}, {}}, tmp.file("merged"));
+    NindDocNames::write(tmp.file("expected"), {1, 3, 7, 2, 5, 8}, {"a", "c", "g", "same", "e", "h"});
+    CHECK(readFileBytes(tmp.file("merged")) == readFileBytes(tmp.file("expected")));
+    // every document deleted
+    NindDocNames::merge({tmp.file("new")}, {{2, 5, 8}}, tmp.file("none"));
+    CHECK_EQ(0u, NindDocNames(tmp.file("none")).size());
+    // a list per shard
+    CHECK_THROWS_AS(NindDocNames::merge({tmp.file("new")}, {{}, {}}, tmp.file("wrong")), std::invalid_argument);
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindDocNamesTest.MergeRefusesOverlapsAndDuplicatesAndRemovesItsFile") {
     TestTempDir tmp;
     NindDocNames::write(tmp.file("a"), {1, 2}, {"a", "b"});

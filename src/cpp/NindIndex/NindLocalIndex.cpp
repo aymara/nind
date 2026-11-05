@@ -126,6 +126,26 @@ bool NindLocalIndex::getLocalDef(const NindDocId ident,
     return true;
 }
 ////////////////////////////////////////////////////////////
+//brief Thread-safe (const) getLocalDef of a document expected at an internal id (see the header)
+bool NindLocalIndex::getLocalDefAt(const NindDocId ident,
+                                   const unsigned int expectedInternalIdent,
+                                   list<struct Term> &localDef,
+                                   NindReadBuffer &buffer) const
+{
+    localDef.clear();
+    try {
+        if (getDefinitionAt(expectedInternalIdent, buffer)) {
+            decodeLocalDef(ident, expectedInternalIdent, buffer, localDef);
+            return true;
+        }
+    }
+    catch (const NindLocalIndexException &) {
+        //another document there (a real corruption shows up below, read by its id)
+        localDef.clear();
+    }
+    return getLocalDef(ident, localDef, buffer);
+}
+////////////////////////////////////////////////////////////
 //dejcode la dejfinition d'un document lue dans in
 void NindLocalIndex::decodeLocalDef(const NindDocId ident,
                                     const unsigned int identInt,

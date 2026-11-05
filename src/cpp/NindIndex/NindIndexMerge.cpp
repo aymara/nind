@@ -97,6 +97,8 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
 {
     const unsigned int shardsNb = m_shardNames.size();
     const unsigned int specificsNumber = getTermSpecificsNumber();
+    if (!m_options.deletedDocuments.empty() && m_options.deletedDocuments.size() != shardsNb)
+        throw NindIndexException("NindIndexMerge::merge deleted documents not per shard");
     Stats stats;
     stats.shardsNb = shardsNb;
 
@@ -157,6 +159,12 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         shardLocalIndexes.push_back(unique_ptr<NindLocalIndex>(
             new NindLocalIndex(m_shardNames[shard], false, shardIdentifications[shard])));
         shardLocalIndexes.back()->getDocIdents(shardDocuments[shard]);
+        if (!m_options.deletedDocuments.empty() && !m_options.deletedDocuments[shard].empty()) {
+            const vector<NindDocId> &deleted = m_options.deletedDocuments[shard];
+            vector<NindDocId> &documents = shardDocuments[shard];
+            documents.erase(remove_if(documents.begin(), documents.end(), [&deleted](const NindDocId ident) {
+                return binary_search(deleted.begin(), deleted.end(), ident); }), documents.end());
+        }
     }
     vector<unsigned int> shardOrder;
     for (unsigned int shard = 0; shard < shardsNb; shard++)
@@ -276,11 +284,25 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
                         byCg[k].sorted = true;
                     }
                     MergedCategory &category = byCg[k];
-                    category.frequency += shardCategories[c].second;
-                    if (begin == shardEnds[c]) continue;
+                    size_t end = shardEnds[c];
+                    const vector<NindDocId> *deleted = m_options.deletedDocuments.empty() ? 0 : &m_options.deletedDocuments[shardTerms[last].shard];
+                    if (deleted != 0 && !deleted->empty()) {
+                        //this category's live documents, in place; its frequency from them
+                        size_t kept = begin;
+                        uint64_t frequency = 0;
+                        for (size_t d = begin; d < end; d++) {
+                            if (binary_search(deleted->begin(), deleted->end(), shardPostings[d].ident)) continue;
+                            frequency += shardPostings[d].frequency;
+                            shardPostings[kept++] = shardPostings[d];
+                        }
+                        category.frequency += frequency;
+                        end = kept;
+                    }
+                    else category.frequency += shardCategories[c].second;
+                    if (begin == end) continue;
                     if (!category.documents.empty() && shardPostings[begin].ident <= category.documents.back().ident)
                         category.sorted = false;
-                    category.documents.insert(category.documents.end(), shardPostings.begin() + begin, shardPostings.begin() + shardEnds[c]);
+                    category.documents.insert(category.documents.end(), shardPostings.begin() + begin, shardPostings.begin() + end);
                 }
             }
             first = last;
@@ -289,6 +311,7 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
             for (size_t k = 0; k < categoriesNb; k++) {
                 MergedCategory &category = byCg[k];
                 vector<NindTermIndex::Document> &documents = category.documents;
+                if (documents.empty()) continue;        //(all its documents deleted)
                 if (!category.sorted) {
                     sort(documents.begin(), documents.end(), documentInfejrieur);
                     //documents disjoints entre shards : un doublon vient d'un fichier inverse incohejrent
@@ -302,6 +325,7 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
                 categories.push_back(NindTermIndex::CategoryPostings(category.cg, (unsigned int)category.frequency,
                                                                      documents.data(), documents.size()));
             }
+            if (categories.empty()) continue;
             list<string> components;
             getUnionComponents(mergedToUnion[mergedIdent], components);
             countTerm(components, categories);

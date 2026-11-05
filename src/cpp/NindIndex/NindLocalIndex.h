@@ -82,7 +82,15 @@ public:
                      std::list<struct Term> &localDef,
                      NindReadBuffer &buffer) const;
 
-    /**\brief Return the length of a full document in term of terms 
+    /**\brief Thread-safe (const) getLocalDef of a document expected at an internal id: a segment's
+    * documents written by increasing id are at internal ids 1, 2...; then the document's id map
+    * isn't loaded. Otherwise (not there): as getLocalDef */
+    bool getLocalDefAt(const NindDocId ident,
+                       const unsigned int expectedInternalIdent,
+                       std::list<struct Term> &localDef,
+                       NindReadBuffer &buffer) const;
+
+    /**\brief Return the length of a full document in term of terms
     *\param ident ident of doc
     *\param localLength the resulting length
     *\return true if doc was found, false otherwise */

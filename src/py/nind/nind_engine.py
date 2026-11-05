@@ -27,6 +27,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import struct
 import sys
@@ -998,7 +999,7 @@ class NindIndexer:
     def _with_local_index(self):
         return self.local_index is not False
 
-    def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None, shards=1):
+    def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None, shards=1, merge=True):
         """Index a JSON Lines corpus (one document per line) as a nind index.
 
         The format read by pyserini's ``JsonCollection``: each non-blank line
@@ -1028,6 +1029,9 @@ class NindIndexer:
             times that, then the merge's (~30 bytes per document, plus the
             longest term's postings at 16 bytes each). The shards and the merged
             index are on disk together until the merge ends.
+        :param merge: with ``shards > 1``, ``False`` keeps the shards as the
+            index's segments, without merging them (see
+            :class:`nind._native.SegmentedIndex`): the same search results.
         :return: the ``id_field`` value of every indexed record: element
             ``n`` is the identifier of document ``n``. With ``shards > 1``, a
             read-only sequence of them as strings, read from the index files
@@ -1042,7 +1046,7 @@ class NindIndexer:
         if workers is None:
             workers = os.cpu_count() or 1
         if shards > 1:
-            return self._index_jsonl_sharded(path, end, id_field, text_field, workers, shards)
+            return self._index_jsonl_sharded(path, end, id_field, text_field, workers, shards, merge)
         if workers <= 1 or end < self.JSONL_PARALLEL_MIN_BYTES:
             parts = [self._tokenize_jsonl_range(path, 0, end, id_field, text_field)]
         else:
@@ -1064,13 +1068,19 @@ class NindIndexer:
     #: A shard of :meth:`index_jsonl` parses at most this many bytes of the file at a time.
     JSONL_SHARD_PIECE_BYTES = 1 << 26
 
-    def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards):
+    def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards, merge=True):
         ranges = self._jsonl_ranges(path, end, shards)
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             # inside the new generation, so they go away with it if anything fails
             shard_dir = tempfile.mkdtemp(prefix=".shards-", dir=os.path.dirname(base))
             try:
-                shard_bases = [os.path.join(shard_dir, "shard%d" % i) for i in range(len(ranges))]
+                if merge:
+                    shard_bases = [os.path.join(shard_dir, "shard%d" % i) for i in range(len(ranges))]
+                else:
+                    segments = ["seg-%06d-%s" % (i, secrets.token_hex(4)) for i in range(len(ranges))]
+                    shard_bases = [native.SegmentedIndex.segment_base(base, segment) for segment in segments]
+                    for shard_base in shard_bases:
+                        os.mkdir(os.path.dirname(shard_base))
                 with ProcessPoolExecutor(max_workers=max(1, min(workers, len(ranges))),
                                          initializer=_pool_worker_init) as pool:
                     # the documents before each shard: its documents' global ids
@@ -1081,7 +1091,10 @@ class NindIndexer:
                                            id_field, text_field, firsts[i]) for i in range(len(ranges))]
                     for future in futures:
                         future.result()
-                self._merge_shards(shard_bases, base, with_names=True)
+                if merge:
+                    self._merge_shards(shard_bases, base, with_names=True)
+                else:
+                    native.SegmentedIndex.write_manifest(base, segments)
             finally:
                 shutil.rmtree(shard_dir, ignore_errors=True)
             _write_meta(base, self.tokenizer_options, self._with_local_index)
