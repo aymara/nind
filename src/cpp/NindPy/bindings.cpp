@@ -849,12 +849,14 @@ PYBIND11_MODULE(_native, m) {
         .def_readonly("merges_nb", &NindSegmentedUpdate::Stats::mergesNb)
         .def_readonly("merged_docs_nb", &NindSegmentedUpdate::Stats::mergedDocsNb);
     py::class_<NindSegmentedUpdate>(m, "SegmentedUpdate")
-        .def(py::init([](const std::string &base, bool withLocalIndex, unsigned int mergeFactor) {
+        .def(py::init([](const std::string &base, bool withLocalIndex, unsigned int mergeFactor, uint64_t maxMergedDocs) {
             NindSegmentedUpdate::Options options;
             options.withLocalIndex = withLocalIndex;
             options.mergeFactor = mergeFactor;
+            options.maxMergedDocs = maxMergedDocs;
             return new NindSegmentedUpdate(base, options);
-        }), py::arg("base"), py::arg("with_local_index") = true, py::arg("merge_factor") = 10)
+        }), py::arg("base"), py::arg("with_local_index") = true, py::arg("merge_factor") = 10,
+           py::arg("max_merged_docs") = 5000000)
         .def("add_document", &NindSegmentedUpdate::addDocument, py::arg("doc_id"), py::arg("words"), py::arg("name") = std::string())
         .def("remove_document", &NindSegmentedUpdate::removeDocument, py::arg("doc_id"))
         .def("commit", &NindSegmentedUpdate::commit, py::call_guard<py::gil_scoped_release>())

@@ -200,6 +200,48 @@ TEST_CASE("NindSegmentedUpdate.CostsWhatChanges") {
     CHECK_FALSE(deletes.read(NindSegmentedIndex::segmentBase(base, before[0]) + ".ninddeletes"));
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindSegmentedUpdate.LargeSegmentsAreNotMerged") {
+    // 6 segments of 30 documents (a tier of 25..124), factor 5: a merge would make 150
+    TestTempDir tmp;
+    const string base = tmp.file("index");
+    uint64_t state = 9;
+    NindSegmentedUpdate::Options options;
+    options.mergeFactor = 0;
+    for (unsigned int s = 0; s < 6; s++) {
+        NindSegmentedUpdate update(base, options);
+        for (unsigned int d = 0; d < 30; d++) update.addDocument(100 * s + d, randomDocument(state));
+        update.commit();
+    }
+    options.mergeFactor = 5;
+    options.maxMergedDocs = 99;
+    {
+        NindSegmentedUpdate update(base, options);
+        update.addDocument(1000, randomDocument(state));
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_EQ(0u, stats.mergesNb);
+        CHECK_EQ(7u, stats.segmentsNb);
+    }
+    // but a segment over half deleted is rewritten, whatever its size
+    {
+        NindSegmentedUpdate update(base, options);
+        for (unsigned int d = 0; d < 20; d++) update.removeDocument(d);
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_EQ(1u, stats.mergesNb);
+        CHECK_EQ(10u, stats.mergedDocsNb);
+        CHECK_EQ(7u, stats.segmentsNb);
+    }
+    // without limit, the tier is merged
+    options.maxMergedDocs = 0;
+    {
+        NindSegmentedUpdate update(base, options);
+        update.addDocument(1001, randomDocument(state));
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_GE(stats.mergesNb, 1u);
+        CHECK_LT(stats.segmentsNb, 8u);
+    }
+    CHECK_EQ(6u * 30 - 20 + 2, NindSegmentedIndex(base).docsNb());
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindSegmentedUpdate.RemovingEverythingLeavesAnEmptyIndex") {
     TestTempDir tmp;
     const string base = tmp.file("index");

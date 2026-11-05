@@ -291,7 +291,7 @@ void mergeSegments(const string &base, vector<string> &segments, const vector<si
     stats.mergedDocsNb += docIds.size();
 }
 // what the tiered policy merges now (empty: nothing)
-vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned int mergeFactor)
+vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned int mergeFactor, const uint64_t maxMergedDocs)
 {
     const vector<NindSegmentedIndex::SegmentInfo> infos = index.segments();
     map<unsigned int, vector<size_t> > tiers;
@@ -303,8 +303,13 @@ vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned i
         for (uint64_t limit = mergeFactor; live >= limit; limit *= mergeFactor) tier++;
         tiers[tier].push_back(s);
     }
-    for (map<unsigned int, vector<size_t> >::const_iterator t = tiers.begin(); t != tiers.end(); t++)
-        if (t->second.size() >= mergeFactor) return t->second;
+    for (map<unsigned int, vector<size_t> >::const_iterator t = tiers.begin(); t != tiers.end(); t++) {
+        if (t->second.size() < mergeFactor) continue;
+        uint64_t live = 0;
+        for (size_t i = 0; i < t->second.size(); i++) live += infos[t->second[i]].docsNb - infos[t->second[i]].deletedNb;
+        //a large segment isn't worth rewriting: the segments of a large build stay as they are
+        if (maxMergedDocs == 0 || live <= maxMergedDocs) return t->second;
+    }
     return vector<size_t>();
 }
 }
@@ -395,7 +400,7 @@ NindSegmentedUpdate::Stats NindSegmentedUpdate::commit()
     //3) the merges
     while (m_options.mergeFactor >= 2) {
         const NindSegmentedIndex index(m_base);
-        const vector<size_t> chosen = segmentsToMerge(index, m_options.mergeFactor);
+        const vector<size_t> chosen = segmentsToMerge(index, m_options.mergeFactor, m_options.maxMergedDocs);
         if (chosen.empty()) break;
         mergeSegments(m_base, segments, chosen, stats);
         NindSegmentedIndex::writeManifest(m_base, segments);

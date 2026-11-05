@@ -699,6 +699,9 @@ class IndexUpdate:
     #: searches more (MS MARCO 8.8M, one thread: +16% with 8, +69% with 32; with 8 threads, nothing).
     #: ``0``: never merge (see :meth:`NindIndexer.force_merge`).
     MERGE_FACTOR = 10
+    #: No merge into a segment of more live documents than this (rewriting those costs more than it
+    #: gains): the segments of a large build stay as they are. ``0``: no limit.
+    MAX_MERGED_DOCS = 5000000
 
     def __init__(self, indexer):
         self._indexer = indexer
@@ -875,7 +878,8 @@ class IndexUpdate:
     def _commit(self):
         # the changes, written by the C++ API (nind._native.SegmentedUpdate): a new segment, the
         # replaced and removed documents masked in theirs, the merges the policy asks for
-        update = native.SegmentedUpdate(self._base, with_local_index=self._local, merge_factor=self.MERGE_FACTOR)
+        update = native.SegmentedUpdate(self._base, with_local_index=self._local, merge_factor=self.MERGE_FACTOR,
+                                        max_merged_docs=self.MAX_MERGED_DOCS)
         for doc_id, tokens in self._pending.items():
             if not tokens:
                 update.remove_document(doc_id)
