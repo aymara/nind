@@ -634,6 +634,7 @@ def test_sharded_jsonl_equals_direct_jsonl(tmp_path, monkeypatch, shards):
     ids = NindIndexer(str(tmp_path / "sharded")).index_jsonl(str(path), limit=399, workers=2, shards=shards)
     assert len(ids) == 399
     assert list(ids) == direct_ids
+    assert ids == direct_ids and direct_ids == ids and ids != direct_ids[:-1]
     assert ids[7] == "d7" and ids[-1] == "d398" and ids[1:3] == ["d1", "d2"]
     with pytest.raises(IndexError):
         ids[399]

@@ -83,9 +83,12 @@ NindLocalIndex::NindLocalIndex(const std::string &fileNameExtensionLess,
 {
     //lit le plus grand identifiant interne utilisej
     getSpecifics();
-    //initialise la map de traduction des id externes -> id internes
-    fillDocIdTradExtInt(1, m_file.getInt4());
-}        
+    const unsigned int maxIdentifiantInterne = m_file.getInt4();
+    //initialise la map de traduction des id externes -> id internes : tout de suite pour un ejcrivain,
+    //pour un lecteur au premier document demandej (une lecture par document : 7 s pour 8,8 M documents,
+    //inutiles ah qui n'interroge pas l'index local)
+    if (m_isWriter) fillDocIdTradExtInt(1, maxIdentifiantInterne);
+}
 ////////////////////////////////////////////////////////////
 NindLocalIndex::~NindLocalIndex()
 {

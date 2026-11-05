@@ -541,7 +541,9 @@ build's; every sharded index also passes `verify_index(cross_check=True)`.
   (a worker: 0.53 GB for 1/32 of this corpus, stable over several shards), so choose
   `shards` for memory: several times `workers`. Few shards cost more than a direct
   build (8 shards with 8 workers: not investigated).
-- Opening the 32-shard index and a first search: 7.3 s, 0.54 GB.
+- Opening the 32-shard index: 0.4 s, 0.50 GB with a first search (7.3 s before a
+  local index reader stopped reading a header per document at open: it now does at
+  its first lookup, once).
 - Extrapolated, linearly, to 300M documents of this kind (not run): ~77 min, ~120 GB
   of index and as much again for the shards during the merge, ~9 GB of merge plus
   the longest term's postings.
@@ -554,9 +556,9 @@ The worst term: `worst_case_term.py`, one term in each of 350M documents (over t
 | each shard (87.5M documents) | 7–22 s | 5–6.3 GB |
 | merge | 22.2 s | 18.32 GB |
 
-The merged term file takes 71 MB. The run was stopped by the machine's memory
-pressure during `verify_index`, which read such a term twice as lists at the time
-(it reads flat now), so the read back and the search weren't measured: rerun it.
+The merged term file takes 71 MB. The run was stopped under system memory pressure
+during `verify_index` (possibly a contributor: it read such a term twice as lists at
+the time; it reads flat now), so the read back and the search weren't measured: rerun it.
 
 ## Notes
 

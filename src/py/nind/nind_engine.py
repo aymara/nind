@@ -300,6 +300,14 @@ class _RecordNames(Sequence):
     def __len__(self):
         return self._count
 
+    def __eq__(self, other):
+        # as a list compares (Sequence defines no __eq__): against any sequence, element by element
+        if not isinstance(other, Sequence) or isinstance(other, (str, bytes)):
+            return NotImplemented
+        return len(other) == self._count and all(a == b for a, b in zip(self, other))
+
+    __hash__ = None
+
     def __getitem__(self, index):
         if isinstance(index, slice):
             return [self[i] for i in range(*index.indices(self._count))]
