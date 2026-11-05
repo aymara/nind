@@ -34,7 +34,9 @@ import tempfile
 import threading
 import time
 from array import array
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from itertools import accumulate, compress
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
@@ -224,11 +226,10 @@ def _lengths_arrays(lengths):
     return array('Q', lengths.keys()), array('I', lengths.values())
 
 
-def _write_doc_lengths(base, lengths):
-    """Write ``{document id: length in tokens}`` (documents of length 0 are left out)."""
-    doc_ids = array('Q', sorted(doc_id for doc_id, length in lengths.items() if length))
-    values = array('I', (lengths[doc_id] for doc_id in doc_ids))
+def _write_doc_length_arrays(base, doc_ids, values):
+    """Write the lengths of documents: arrays by increasing id, no length 0 (no dict: ~100 bytes a document)."""
     if sys.byteorder == "big":
+        doc_ids, values = array('Q', doc_ids), array('I', values)
         doc_ids.byteswap()
         values.byteswap()
     with open(base + DOC_LENGTHS_EXTENSION, "wb") as f:
@@ -237,8 +238,20 @@ def _write_doc_lengths(base, lengths):
         f.write(values.tobytes())
 
 
+def _write_doc_lengths(base, lengths):
+    """Write ``{document id: length in tokens}`` (documents of length 0 are left out)."""
+    doc_ids = array('Q', sorted(doc_id for doc_id, length in lengths.items() if length))
+    _write_doc_length_arrays(base, doc_ids, array('I', (lengths[doc_id] for doc_id in doc_ids)))
+
+
 def _read_doc_lengths(base):
     """``{document id: length in tokens}`` (``None`` if the index has no such file)."""
+    arrays = _read_doc_length_arrays(base)
+    return None if arrays is None else dict(zip(*arrays))
+
+
+def _read_doc_length_arrays(base):
+    """(document ids, lengths in tokens) arrays (``None`` if the index has no such file)."""
     try:
         with open(base + DOC_LENGTHS_EXTENSION, "rb") as f:
             data = f.read()
@@ -262,7 +275,7 @@ def _read_doc_lengths(base):
     if sys.byteorder == "big":
         doc_ids.byteswap()
         values.byteswap()
-    return dict(zip(doc_ids, values))
+    return doc_ids, values
 
 
 def _write_doc_names(base, names):
@@ -270,6 +283,32 @@ def _write_doc_names(base, names):
     doc_ids = sorted(names)
     native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('Q', doc_ids),
                               [name if isinstance(name, str) else str(name) for name in map(names.__getitem__, doc_ids)])
+
+
+class _RecordNames(Sequence):
+    """The record ids a sharded :meth:`NindIndexer.index_jsonl` returns, as strings: element
+    ``n`` is the name of document ``n``, read from the build's names file at the first access
+    (hundreds of millions of ids don't fit in a Python list). A later build of the index
+    removes that file, and with it any element not read yet."""
+
+    def __init__(self, file_name, count):
+        self._file_name = file_name
+        self._count = count
+        self._names = None
+
+    def __len__(self):
+        return self._count
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(self._count))]
+        if index < 0:
+            index += self._count
+        if not 0 <= index < self._count:
+            raise IndexError(index)
+        if self._names is None:
+            self._names = native.NindDocNames(self._file_name)
+        return self._names.name(index)
 
 
 def _read_doc_names(base):
@@ -944,7 +983,7 @@ class NindIndexer:
     def _with_local_index(self):
         return self.local_index is not False
 
-    def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None):
+    def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None, shards=1):
         """Index a JSON Lines corpus (one document per line) as a nind index.
 
         The format read by pyserini's ``JsonCollection``: each non-blank line
@@ -965,8 +1004,19 @@ class NindIndexer:
         :param workers: number of processes parsing and tokenizing the file
             (default: ``os.cpu_count()``); ``1``, or a file smaller than
             ``JSONL_PARALLEL_MIN_BYTES``, works in this process.
+        :param shards: number of independent indexes, each over a line-aligned
+            part of the file of about the same bytes, built in worker processes
+            (at most ``workers`` at a time) then merged into this one: the same
+            search results as a direct build. This is the way to index a corpus
+            too large to build at once: a build holds ~19 bytes per token in
+            memory, so the peak is about ``workers`` times a shard's tokens
+            times that, then the merge's (~30 bytes per document, plus the
+            longest term's postings at 16 bytes each). The shards and the merged
+            index are on disk together until the merge ends.
         :return: the ``id_field`` value of every indexed record: element
-            ``n`` is the identifier of document ``n``.
+            ``n`` is the identifier of document ``n``. With ``shards > 1``, a
+            read-only sequence of them as strings, read from the index files
+            at the first access (no list of every id in memory).
         :raises ValueError: if a line isn't a JSON object with both fields.
         """
         if native is None:
@@ -976,6 +1026,8 @@ class NindIndexer:
         end = self._jsonl_end(path, limit)
         if workers is None:
             workers = os.cpu_count() or 1
+        if shards > 1:
+            return self._index_jsonl_sharded(path, end, id_field, text_field, workers, shards)
         if workers <= 1 or end < self.JSONL_PARALLEL_MIN_BYTES:
             parts = [self._tokenize_jsonl_range(path, 0, end, id_field, text_field)]
         else:
@@ -994,6 +1046,58 @@ class NindIndexer:
 
     #: Below this many bytes of JSON Lines, :meth:`index_jsonl` works in-process.
     JSONL_PARALLEL_MIN_BYTES = 1 << 20
+    #: A shard of :meth:`index_jsonl` parses at most this many bytes of the file at a time.
+    JSONL_SHARD_PIECE_BYTES = 1 << 26
+
+    def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards):
+        ranges = self._jsonl_ranges(path, end, shards)
+        with IndexStore(self.index_dir, self.prefix).new_generation() as base:
+            # inside the new generation, so they go away with it if anything fails
+            shard_dir = tempfile.mkdtemp(prefix=".shards-", dir=os.path.dirname(base))
+            try:
+                shard_bases = [os.path.join(shard_dir, "shard%d" % i) for i in range(len(ranges))]
+                with ProcessPoolExecutor(max_workers=max(1, min(workers, len(ranges))),
+                                         initializer=_pool_worker_init) as pool:
+                    # the documents before each shard: its documents' global ids
+                    counts = list(pool.map(self._count_jsonl_range, [path] * len(ranges),
+                                           [start for start, _ in ranges], [stop for _, stop in ranges]))
+                    firsts = list(accumulate([0] + counts[:-1]))
+                    futures = [pool.submit(self._build_jsonl_shard, shard_bases[i], path, ranges[i][0], ranges[i][1],
+                                           id_field, text_field, firsts[i]) for i in range(len(ranges))]
+                    for future in futures:
+                        future.result()
+                self._merge_shards(shard_bases, base, with_names=True)
+            finally:
+                shutil.rmtree(shard_dir, ignore_errors=True)
+            _write_meta(base, self.tokenizer_options, self._with_local_index)
+        return _RecordNames(base + DOC_NAMES_EXTENSION, sum(counts))
+
+    @staticmethod
+    def _count_jsonl_range(path, start, stop):
+        # Runs in a worker process: the records of the lines in [start, stop).
+        count, position = 0, start
+        with open(path, 'rb') as f:
+            f.seek(start)
+            while position < stop:
+                line = f.readline()
+                if not line:
+                    break
+                position += len(line)
+                if line.strip():
+                    count += 1
+        return count
+
+    def _build_jsonl_shard(self, shard_base, path, start, stop, id_field, text_field, first_doc_id):
+        # Runs in a worker process: the index, lengths and names of the lines in [start, stop).
+        pieces = max(1, -(-(stop - start) // self.JSONL_SHARD_PIECE_BYTES))
+        record_ids, chunks = [], []
+        for piece_start, piece_stop in self._jsonl_ranges(path, stop, pieces, start):
+            piece_ids, chunk = self._tokenize_jsonl_range(path, piece_start, piece_stop, id_field, text_field)
+            record_ids.extend(map(str, piece_ids))
+            chunks.append(chunk)
+        self._write_chunks(chunks, first_doc_id, shard_base)
+        native.NindDocNames.write(shard_base + DOC_NAMES_EXTENSION,
+                                  array('Q', range(first_doc_id, first_doc_id + len(record_ids))), record_ids)
 
     @staticmethod
     def _jsonl_end(path, limit):
@@ -1011,12 +1115,13 @@ class NindIndexer:
             return f.tell()
 
     @staticmethod
-    def _jsonl_ranges(path, end, pieces):
-        # [start, stop) byte ranges covering [0, end), each starting at the beginning of a line
-        bounds = [0]
+    def _jsonl_ranges(path, end, pieces, begin=0):
+        # [start, stop) byte ranges covering [begin, end) (begin: at the beginning of a line), each
+        # starting at the beginning of a line
+        bounds = [begin]
         with open(path, 'rb') as f:
             for i in range(1, pieces):
-                target = end * i // pieces
+                target = begin + (end - begin) * i // pieces
                 if target <= bounds[-1]:
                     continue
                 f.seek(target - 1)
@@ -1138,7 +1243,9 @@ class NindIndexer:
                 future.result()
         del writers
         doc_ids, lengths = builder.doc_lengths()
-        _write_doc_lengths(base, dict(zip(_doc_id_array(doc_ids), _uint_array(lengths))))
+        lengths = _uint_array(lengths)
+        _write_doc_length_arrays(base, array('Q', compress(_doc_id_array(doc_ids), lengths)),
+                                 array('I', filter(None, lengths)))
 
     def _write_index(self, token_lists, first_doc_id, base):
         # writes the index of documents given as token lists (first one: document first_doc_id)
@@ -1158,15 +1265,23 @@ class NindIndexer:
                            for i in range(shards)]
                 for future in futures:
                     future.result()
-            # disjoint documents: the shards' lengths together
-            lengths = {}
-            for shard_base in shard_bases:
-                lengths.update(_read_doc_lengths(shard_base))
-            doc_ids, doc_lengths = _lengths_arrays(lengths)
-            native.merge_indexes(shard_bases, base, doc_ids=doc_ids, doc_lengths=doc_lengths)
-            _write_doc_lengths(base, lengths)
+            self._merge_shards(shard_bases, base)
         finally:
             shutil.rmtree(shard_dir, ignore_errors=True)
+
+    @staticmethod
+    def _merge_shards(shard_bases, base, with_names=False):
+        # shards of contiguous documents, in document order: their lengths concatenated
+        doc_ids, lengths = array('Q'), array('I')
+        for shard_base in shard_bases:
+            shard_ids, shard_lengths = _read_doc_length_arrays(shard_base)
+            doc_ids.extend(shard_ids)
+            lengths.extend(shard_lengths)
+        native.merge_indexes(shard_bases, base, doc_ids=doc_ids, doc_lengths=lengths)
+        _write_doc_length_arrays(base, doc_ids, lengths)
+        if with_names:
+            native.NindDocNames.merge([shard_base + DOC_NAMES_EXTENSION for shard_base in shard_bases],
+                                      base + DOC_NAMES_EXTENSION)
 
     def _build_shard(self, shard_base, file_paths, first_doc_id):
         # Runs in a worker process (self is a copy: keeps an overridden tokenizer).

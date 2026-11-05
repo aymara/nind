@@ -618,6 +618,52 @@ def test_index_jsonl_in_parallel_parts(tmp_path, monkeypatch):
     assert engine.get_df(tag(399)) == 0
 
 
+@pytest.mark.parametrize("shards", [2, 7, 1000])
+def test_sharded_jsonl_equals_direct_jsonl(tmp_path, monkeypatch, shards):
+    records = [{"id": "d%d" % i, "contents": "tag%s common %s" % ("abcdefghij"[i % 10], "pad " * (i % 50))}
+               for i in range(400)]
+    lines = [json.dumps(record) for record in records]
+    lines[5:5] = ["", "   "]     # blank lines count for no document
+    path = tmp_path / "corpus.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # shards parsed in several pieces
+    monkeypatch.setattr(NindIndexer, "JSONL_SHARD_PIECE_BYTES", 512)
+    (tmp_path / "direct").mkdir()
+    (tmp_path / "sharded").mkdir()
+    direct_ids = NindIndexer(str(tmp_path / "direct")).index_jsonl(str(path), limit=399, workers=1)
+    ids = NindIndexer(str(tmp_path / "sharded")).index_jsonl(str(path), limit=399, workers=2, shards=shards)
+    assert len(ids) == 399
+    assert list(ids) == direct_ids
+    assert ids[7] == "d7" and ids[-1] == "d398" and ids[1:3] == ["d1", "d2"]
+    with pytest.raises(IndexError):
+        ids[399]
+    direct, sharded = NindEngine(str(tmp_path / "direct")), NindEngine(str(tmp_path / "sharded"))
+    assert sharded.total_docs == direct.total_docs == 399
+    assert sharded.avg_doc_len == pytest.approx(direct.avg_doc_len)
+    for doc_id in (0, 1, 57, 398):
+        assert sharded.get_doc_len(doc_id) == direct.get_doc_len(doc_id)
+        assert sharded.doc_name(doc_id) == direct.doc_name(doc_id)
+    for query in ["taga", "common pad", "tagj pad"]:
+        direct_results, sharded_results = direct.search(query, doc_names=True), sharded.search(query, doc_names=True)
+        assert [name for name, _ in sharded_results] == [name for name, _ in direct_results]
+        assert [score for _, score in sharded_results] == pytest.approx([score for _, score in direct_results])
+    # a sound index, without the shards' files
+    from nind import _native as native
+    assert native.verify_index(sharded._snapshot.base, cross_check=True).ok
+    assert not [entry for entry in os.listdir(os.path.dirname(sharded._snapshot.base)) if entry.startswith(".shards-")]
+
+
+def test_sharded_jsonl_rejects_names_in_several_shards_and_keeps_previous_index(tmp_path):
+    index_dir = tmp_path / "jsonl"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    indexer.index_jsonl(write_jsonl(tmp_path / "good.jsonl", [{"id": "a", "contents": "cat"}]))
+    bad = write_jsonl(tmp_path / "bad.jsonl", [{"id": "same", "contents": "x" * 100}, {"id": "same", "contents": "y" * 100}])
+    with pytest.raises(ValueError):
+        indexer.index_jsonl(bad, shards=2, workers=2)
+    assert NindEngine(str(index_dir), prefix="corpus").total_docs == 1
+
+
 def test_jsonl_ranges_are_line_aligned(tmp_path):
     path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": i, "contents": "x" * (i * 7)} for i in range(30)])
     data = open(path, "rb").read()
