@@ -57,8 +57,7 @@ of 3.0.0 (format v2).
 - **Hundreds of millions of documents** (`docs/proposals/segments.md`). Done:
   `index_jsonl(shards=N)`, a merge without lists, Python dicts or global sort,
   search across segments, updates that cost what they change, tiered merges
-  (`bench/README.md` section 6: +88k documents in 2.7 s at 8.8M, build 24 s vs
-  46 s, identical top 10). Left:
+  (+88k documents in 2.6 s at 8.8M, build 25 s vs 46 s, identical top 10). Left:
   - **Run it for real.** No real corpus above 8.8M documents has been indexed
     yet. A synthetic term in 350M documents went through shards and merge (18.3
     GB, 71 MB); the run was stopped under system memory pressure during
@@ -73,8 +72,12 @@ of 3.0.0 (format v2).
     once (~4 min at 300M, extrapolated): store the id map in the file?
   - **Names.** Read whole and validated at open (0.10 s at 8.8M, ~30 bytes per
     document): `mmap`?
-  - **Merges.** A commit's merges are synchronous and single-threaded: in the
-    background, published as their own generation?
+  - **Merges.** A commit's merges are synchronous and single-threaded (17.6 s for
+    the first update of a 16-shard 8.8M build): in the background, published as
+    their own generation?
+  - **Writer memory.** An update needing a lookup (removal, replacement, name)
+    opens the whole index, ~40 bytes per document (~12 GB at 300M): lookups in
+    the files instead? The scorer's 256 MB directory cache is per segment.
   - **Search.** Measure at 100M+ with threads; an exhaustive search takes 12
     bytes per document of scratch per concurrent search (per segment, so at
     most its own size at a time).

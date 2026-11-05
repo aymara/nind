@@ -36,10 +36,12 @@ namespace latecon {
 *   the .ninddeletes it changes (remove, then create) and removes merged segments' files.
 * - Merges, at the end of commit(): log-structured, as with Lucene's tiers. Segments are in the
 *   tier of their number of live documents, tiers growing by mergeFactor; mergeFactor segments in
-*   a tier are merged into one, unless that makes a segment of more than maxMergedDocs (rewriting
-*   those costs more than it gains: the segments of a large build stay as they are, searched in
-*   parallel); a segment over half deleted is rewritten alone. A document is rewritten about log(N)
-*   times over its life, at most. forceMerge() merges everything, whatever the size. */
+*   a tier are merged into one, or those of them that fit if that would make a segment of more than
+*   maxMergedDocs. A segment of at least half of it is full: it stays as it is (rewriting it costs
+*   more than it gains; a large build's segments are searched in parallel). So, however many
+*   updates, at most about 2 N / maxMergedDocs full segments and mergeFactor per tier below them. A
+*   segment over half deleted is rewritten alone. A document is rewritten about log(N) times over
+*   its life, at most. forceMerge() merges everything, whatever the size. */
 class DLLExportLexicon NindSegmentedUpdate {
 public:
     struct Options {

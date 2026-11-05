@@ -57,11 +57,17 @@ and removed ones are masked. A new id costs no lookup at all (only the last id o
 is read). Python passes tokens and names, and holds no whole-corpus structure.
 
 **Merges.** Log-structured, at the end of a commit: segments in tiers of live documents (factor
-10); a tier of 10 is merged unless the result exceeds `maxMergedDocs` (5M); a segment over half
-deleted is rewritten alone. `NindIndexMerge` and `NindDocNames::merge` drop deleted documents and
-accept interleaved ids (a replaced document keeps its id in a newer segment). `force_merge` makes
-one segment of everything. Without the size limit, a first update merged all the shards of a
-build (63 s at 8.8M, hours at 300M).
+10); a tier of 10 is merged, or those of its smallest that fit under `maxMergedDocs` (5M); a
+segment of at least half of that is *full* and stays as it is; a segment over half deleted is
+rewritten alone. However many updates, that leaves at most about 2 N / maxMergedDocs full segments
+(120 at 300M) and fewer than 10 per tier below. `NindIndexMerge` and `NindDocNames::merge` drop
+deleted documents and accept interleaved ids (a replaced document keeps its id in a newer
+segment). `force_merge` makes one segment of everything. Without the limit, a first update merged
+all the shards of a build (63 s at 8.8M, hours at 300M); without "full", full segments piled up in
+a tier that could never merge, so that steady updates made the count grow without bound.
+
+A build's shards are segments like any others: those under 2.5M documents may be merged by a
+later update. A large build (64 shards of 4.7M at 300M) is full, so left alone.
 
 **Builds.** `shards=N` keeps its shards as segments (`merge=True` for one index). Names are checked
 unique across shards, by merging them and dropping the result.
@@ -77,16 +83,18 @@ gave the single index's documents in the same order.
 | 8 | 26.2 s | 1.82 ms | 0.72 ms | 0.74 ms | 6.88 ms |
 | 32 | 24.3 s | 2.65 ms | 1.03 ms | 0.90 ms | 6.90 ms |
 
-Updates of the 16-segment index (base + 1%):
+Updates of the index built in 8 shards (base + 1%; after each update of 88k documents, top 10
+identical to a direct build: 2000/2000):
 
-| update | time | | before |
-|---|---|---|---|
-| +88,418 documents | 2.73 s | top 10 identical to a direct build: 2000/2000 | 237 s (v1); 5.3–22.9 s per 20k at 4M |
-| +1 | 0.30 s | | |
-| +1000 | 0.21 s | | |
-| -1, -100 (no local index) | 0.61 s, 0.65 s | | |
-| reader switching to it | under 10 ms | | |
-| `force_merge` | 26.8 s | one index, verified | |
+| update | time | before |
+|---|---|---|
+| +88,418 documents | 2.57 s | 237 s (v1); 5.3–22.9 s per 20k at 4M |
+| the same, built in 16 shards | 17.55 s: one merge of 9 of them (550k each), once | |
+| +1 | 0.27 s | |
+| +1000 | 0.24 s | |
+| -1, -100 (no local index) | 0.80 s, 0.81 s | |
+| reader switching to it | under 10 ms | |
+| `force_merge` | 24.3 s (35.0 s from 16 shards) | |
 
 ## Limits, and what's left
 
@@ -95,8 +103,12 @@ Updates of the 16-segment index (base + 1%):
 - Names are read whole when a segment opens (~30 bytes per document); `mmap` would help. The
   uniqueness check of a sharded build needs them all in memory at once.
 - A commit's merges are synchronous, single-threaded.
-- A removal, or a replacement, opens the index (every segment's lengths), and without a local
-  index reads the directories of the touched segments' terms: 0.6 s at 8.8M, growing with them.
+- An update needing a lookup (a removal, a replacement, a name) opens the whole index in the writer:
+  every segment's lengths and names, ~40 bytes per document (~12 GB at 300M). Only new documents
+  without names avoid it. Without a local index, a removal also reads the directories of the touched
+  segments' terms: 0.8 s at 8.8M, growing with them.
+- The scorer's directory cache is per segment (256 MB at most each): several GB at most with many
+  segments.
 - `NindEngine.lexicon`, `term_index`, `local_index`, `get_term_id` raise `ValueError` on several
   segments or deletions: they assume one index (`force_merge` gives them back).
 

@@ -665,8 +665,9 @@ class IndexUpdate:
     #: searches more (MS MARCO 8.8M, one thread: +16% with 8, +69% with 32; with 8 threads, nothing).
     #: ``0``: never merge (see :meth:`NindIndexer.force_merge`).
     MERGE_FACTOR = 10
-    #: No merge into a segment of more live documents than this (rewriting those costs more than it
-    #: gains): the segments of a large build stay as they are. ``0``: no limit.
+    #: No merge into a segment of more live documents than this; at half of it a segment is full and
+    #: stays as it is (rewriting it costs more than it gains: a large build's segments are left
+    #: alone). ``0``: no limit.
     MAX_MERGED_DOCS = 5000000
 
     def __init__(self, indexer):

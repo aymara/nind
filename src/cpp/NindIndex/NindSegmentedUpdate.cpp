@@ -298,16 +298,29 @@ vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned i
         const uint64_t live = infos[s].docsNb - infos[s].deletedNb;
         //over half deleted: rewritten alone
         if (infos[s].deletedNb * 2 > infos[s].docsNb) return vector<size_t>(1, s);
+        //at half the limit, a segment is full: without this, such segments would pile up in a tier
+        //that can't be merged, and two others always fit under the limit
+        if (maxMergedDocs != 0 && live * 2 >= maxMergedDocs) continue;
         unsigned int tier = 0;
         for (uint64_t limit = mergeFactor; live >= limit; limit *= mergeFactor) tier++;
         tiers[tier].push_back(s);
     }
     for (map<unsigned int, vector<size_t> >::const_iterator t = tiers.begin(); t != tiers.end(); t++) {
         if (t->second.size() < mergeFactor) continue;
+        //its smallest segments that fit under the limit (all of them, most of the time)
+        vector<size_t> chosen = t->second;
+        stable_sort(chosen.begin(), chosen.end(), [&infos](const size_t a, const size_t b) {
+            return infos[a].docsNb - infos[a].deletedNb < infos[b].docsNb - infos[b].deletedNb; });
         uint64_t live = 0;
-        for (size_t i = 0; i < t->second.size(); i++) live += infos[t->second[i]].docsNb - infos[t->second[i]].deletedNb;
-        //a large segment isn't worth rewriting: the segments of a large build stay as they are
-        if (maxMergedDocs == 0 || live <= maxMergedDocs) return t->second;
+        size_t kept = 0;
+        for (; kept < chosen.size(); kept++) {
+            live += infos[chosen[kept]].docsNb - infos[chosen[kept]].deletedNb;
+            if (maxMergedDocs != 0 && live > maxMergedDocs) break;
+        }
+        chosen.resize(kept);
+        //(mergeSegments puts the new segment at the first one's place, in manifest order)
+        sort(chosen.begin(), chosen.end());
+        if (chosen.size() >= 2) return chosen;
     }
     return vector<size_t>();
 }
