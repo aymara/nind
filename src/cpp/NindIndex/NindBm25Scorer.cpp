@@ -376,6 +376,10 @@ private:
                                 approximation += cursor.info->multiplicity *
                                                  contribution(cursor.info->idf, posting.frequency, length, parameters);
                             if (++cursor.pos >= cursor.docs.size()) continue;
+                            //the length of a document a few postings ahead, fetched early (a cache miss
+                            //otherwise: the documents' lengths are scattered)
+                            if (cursor.pos + PREFETCH_DISTANCE < cursor.docs.size())
+                                prefetchLength(cursor.docs[cursor.pos + PREFETCH_DISTANCE].ident);
                         }
                         const NindDocId current = cursor.docs[cursor.pos].ident;
                         if (current <= windowMax && (!anyNext || current < nextDoc)) { nextDoc = current; anyNext = true; }
@@ -655,6 +659,13 @@ private:
     std::vector<uint64_t> m_docIds;     //position -> document id
     std::vector<uint32_t> m_lengths;    //position -> length (or, all under 2^16:)
     std::vector<uint16_t> m_shortLengths;
+    static const size_t PREFETCH_DISTANCE = 8;
+    void prefetchLength(const NindDocId docId) const {
+        const uint32_t position = positionOf(docId);
+        if (position == NO_POSITION) return;
+        if (m_shortLengths.empty()) __builtin_prefetch(&m_lengths[position]);
+        else __builtin_prefetch(&m_shortLengths[position]);
+    }
     double lengthOf(const uint32_t position) const {
         return m_shortLengths.empty() ? (double)m_lengths[position] : (double)m_shortLengths[position];
     }
