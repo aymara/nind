@@ -63,12 +63,23 @@ of 3.0.0 (format v2).
   top 1000 are timed).
 - **Search, what's left** (done in 3.1.2–3.2: windowed block-max MaxScore,
   intra-query threads with a persistent pool, impacts, a directory cache,
-  length prefetching). perf on MS MARCO 8.8M: the window scan is 70% of a
-  search, mostly the scattered length of each scored document and the BM25
-  division after it; decoding ~17%. Leads: score a decoded block's documents
-  in batches (lengths gathered first, divisions vectorised); 1-byte quantised
-  lengths (Lucene's norms: 8.8 MB, but scores change: measure nDCG); several
-  categories (Amose) aren't pruned yet.
+  length prefetching; MS MARCO 8.8M top 10: 2.4–2.5 ms on one thread, about
+  1.5× Lucene's 1.6 ms). perf shows the window scan at ~70% of a search and
+  charges it to the length of each scored document and the BM25 division;
+  decoding ~17%. Tried after 3.2.0 and dropped, measured with alternated runs
+  (identical results each time):
+  - batch scoring (a decoded essential block's contributions computed at once,
+    lengths gathered first): +1–2%, no gain;
+  - re-sorting the window's terms from the previous order (nearly sorted):
+    +4%;
+  - lengths on one byte (Lucene's norms, 8.8 MB instead of 17.7): no gain
+    (2.63 vs 2.58 ms), so scores weren't changed for it.
+  So the cost isn't the lengths' memory: ~70 ns (~250 cycles) per scored
+  document goes to instructions spread over windows and probes. What's left
+  is deeper: score windows in batches as Lucene's MaxScoreBulkScorer does
+  (fixed windows of documents, arrays and bitsets, fewer per-document
+  branches), compare documents scored per query with Lucene's, SIMD
+  decoding. Several categories (Amose) aren't pruned yet.
 - **Large k on small corpora.** The v2 exhaustive path is ~25% slower than v1
   at top 1000 on 1–2M documents (block decoding); not a target size.
 - **Original author's to-do.** `NindLexiconIndex::addWord` doesn't check that
