@@ -15,6 +15,7 @@
 // GNU Less General Public License for more details.
 ////////////////////////////////////////////////////////////
 #include "NindIndexVerify.h"
+#include "NindSegmentedIndex.h"
 #include "NindLexiconIndex.h"
 #include "NindTermIndex.h"
 #include "NindLocalIndex.h"
@@ -203,6 +204,26 @@ NindIndexVerify::Report NindIndexVerify::verify(const string &fileNameExtensionL
 {
     Report report;
     Problems problems(report, maxProblems);
+    //an index of several segments: each of them, and that it opens as an index
+    if (fileExists(fileNameExtensionLess + ".nindsegments")) {
+        report.formatV2 = true;
+        try {
+            const vector<string> segments = NindSegmentedIndex::readManifest(fileNameExtensionLess);
+            for (size_t s = 0; s < segments.size(); s++) {
+                const Report segment = verify(NindSegmentedIndex::segmentBase(fileNameExtensionLess, segments[s]), crossCheck, maxProblems);
+                report.formatV2 = report.formatV2 && segment.formatV2;
+                report.wordsNb += segment.wordsNb;
+                report.termsNb += segment.termsNb;
+                report.postingsNb += segment.postingsNb;
+                report.documentsNb += segment.documentsNb;
+                report.withLocalIndex = report.withLocalIndex || segment.withLocalIndex;
+                for (size_t p = 0; p < segment.problems.size(); p++) problems.add(segments[s] + ": " + segment.problems[p]);
+            }
+            const NindSegmentedIndex index(fileNameExtensionLess);
+        }
+        catch (const FileException &e) { problems.add(string("segments: ") + e.what()); }
+        return report;
+    }
     //the lexicon
     NindPadFile::Identification identification;
     try {

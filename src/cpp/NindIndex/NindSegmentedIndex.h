@@ -131,7 +131,8 @@ public:
     /**\brief The live documents with a word, every category counted */
     uint64_t documentFrequency(const std::list<std::string> &word) const;
 
-    /**\brief A word's occurrences in a live document, every category (0: none) */
+    /**\brief A word's occurrences in a live document, as searches score it: in the first of its
+    * categories having the document (0: none) */
     uint64_t termFrequency(const std::list<std::string> &word,
                            const NindDocId docId) const;
 

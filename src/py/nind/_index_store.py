@@ -14,6 +14,10 @@ publish it::
             <prefix>.nindmeta, <prefix>.ninddoclengths, <prefix>.ninddocnames (if named)
             generation.lock         shared by readers while they open the files,
                                     exclusive while the generation is deleted
+            or, instead of the index files, an index of several segments:
+            <prefix>.nindsegments   the list of its segments (nind._native.SegmentedIndex)
+            seg-<n>-<hex>/          a segment: the same files, never modified, hard links
+                                    between generations; <prefix>.ninddeletes, its masked documents
 
 - A reader resolves ``CURRENT`` once, then opens every file of that
   generation under a shared lock: it gets one consistent index, however
@@ -42,7 +46,8 @@ except ImportError:         # Windows
     fcntl = None
     import msvcrt
 
-__all__ = ["IndexStore", "INDEX_EXTENSIONS", "META_EXTENSION", "DOC_LENGTHS_EXTENSION", "DOC_NAMES_EXTENSION"]
+__all__ = ["IndexStore", "INDEX_EXTENSIONS", "META_EXTENSION", "DOC_LENGTHS_EXTENSION", "DOC_NAMES_EXTENSION",
+           "MANIFEST_EXTENSION"]
 
 #: Index metadata written by NindIndexer (JSON: tokenizer options, local index or not).
 META_EXTENSION = ".nindmeta"
@@ -50,6 +55,8 @@ META_EXTENSION = ".nindmeta"
 DOC_LENGTHS_EXTENSION = ".ninddoclengths"
 #: Document names (their identifiers in the corpus), written by NindIndexer (nind._native.NindDocNames).
 DOC_NAMES_EXTENSION = ".ninddocnames"
+#: The segments of an index made of several (nind._native.SegmentedIndex).
+MANIFEST_EXTENSION = ".nindsegments"
 #: Extensions of the files making up an index (``.nindretrolexicon`` only for some writers,
 #: ``.nindlocalindex`` only with a local index, the last three only for indexes written by
 #: NindIndexer since it writes them, document names only for named documents).
@@ -253,9 +260,12 @@ class IndexStore:
                 with _FileLock(os.path.join(generation, _GENERATION_LOCK)) as lock:
                     lock.acquire()      # nobody opens it before it's published
                     yield os.path.join(generation, self.prefix)
-                    for entry in os.listdir(generation):
-                        if entry != _GENERATION_LOCK:
-                            _fsync_path(os.path.join(generation, entry))
+                    for root, directories, files in os.walk(generation):
+                        for entry in files:
+                            if entry != _GENERATION_LOCK:
+                                _fsync_path(os.path.join(root, entry))
+                        for entry in directories:
+                            _fsync_path(os.path.join(root, entry), directory=True)
                     _fsync_path(generation, directory=True)
                     self._publish(name)
             except BaseException:
@@ -282,6 +292,41 @@ class IndexStore:
         os.replace(temporary, self._current_path)       # atomic, on POSIX and Windows
         _fsync_path(self.index_dir, directory=True)
 
+    def link_generation(self, source, base):
+        """Make the new generation at ``base`` an index of segments holding the published one.
+
+        Segments never change, so their files are hard links (each generation stays complete by
+        itself: deleting one leaves the others' files, whatever its age); the update then replaces
+        the files it changes. The other files are copied. An index of one segment without manifest
+        (or a flat one, written before generations) becomes one segment.
+        """
+        manifest = source + MANIFEST_EXTENSION
+        if os.path.exists(manifest):
+            shutil.copyfile(manifest, base + MANIFEST_EXTENSION)
+            if os.path.exists(source + META_EXTENSION):
+                shutil.copyfile(source + META_EXTENSION, base + META_EXTENSION)
+            with open(manifest, "r", encoding="utf-8") as f:
+                segments = [line.strip() for line in f.readlines()[1:]]
+            for segment in segments:
+                directory = os.path.join(os.path.dirname(source), segment)
+                target = os.path.join(os.path.dirname(base), segment)
+                os.mkdir(target)
+                for entry in os.listdir(directory):
+                    _link_or_copy(os.path.join(directory, entry), os.path.join(target, entry))
+            return
+        segment = "seg-000000-" + secrets.token_hex(4)
+        target = os.path.join(os.path.dirname(base), segment)
+        os.mkdir(target)
+        for extension in INDEX_EXTENSIONS:
+            if not os.path.exists(source + extension):
+                continue
+            if extension == META_EXTENSION:
+                shutil.copyfile(source + extension, base + extension)
+            else:
+                _link_or_copy(source + extension, os.path.join(target, self.prefix + extension))
+        with open(base + MANIFEST_EXTENSION, "w", encoding="utf-8") as f:
+            f.write("nindsegments 1\n%s\n" % segment)
+
     def _collect(self, keep):
         # only the writer collects, holding the writer lock: no build is in progress
         for entry in os.listdir(self.index_dir):
@@ -298,6 +343,13 @@ class IndexStore:
                 _remove_quietly(path)                   # left by an interrupted publish
         for extension in INDEX_EXTENSIONS:
             _remove_quietly(os.path.join(self.index_dir, self.prefix + extension))
+
+
+def _link_or_copy(source, target):
+    try:
+        os.link(source, target)
+    except OSError:         # a file system without hard links
+        shutil.copyfile(source, target)
 
 
 def _remove_quietly(path):

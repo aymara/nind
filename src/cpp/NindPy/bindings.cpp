@@ -38,6 +38,7 @@
 #include "NindIndex/NindTokenizer.h"
 #include "NindIndex/NindDocNames.h"
 #include "NindIndex/NindSegmentedIndex.h"
+#include "NindIndex/NindSegmentedUpdate.h"
 #include <unordered_map>
 #include <cmath>
 #include <mutex>
@@ -840,6 +841,29 @@ PYBIND11_MODULE(_native, m) {
         .def_static("read_manifest", &NindSegmentedIndex::readManifest, py::arg("base"))
         .def_static("write_manifest", &NindSegmentedIndex::writeManifest, py::arg("base"), py::arg("segments"))
         .def_static("segment_base", &NindSegmentedIndex::segmentBase, py::arg("base"), py::arg("segment"));
+
+    py::class_<NindSegmentedUpdate::Stats>(m, "SegmentedUpdateStats")
+        .def_readonly("added_docs_nb", &NindSegmentedUpdate::Stats::addedDocsNb)
+        .def_readonly("removed_docs_nb", &NindSegmentedUpdate::Stats::removedDocsNb)
+        .def_readonly("segments_nb", &NindSegmentedUpdate::Stats::segmentsNb)
+        .def_readonly("merges_nb", &NindSegmentedUpdate::Stats::mergesNb)
+        .def_readonly("merged_docs_nb", &NindSegmentedUpdate::Stats::mergedDocsNb);
+    py::class_<NindSegmentedUpdate>(m, "SegmentedUpdate")
+        .def(py::init([](const std::string &base, bool withLocalIndex, unsigned int mergeFactor) {
+            NindSegmentedUpdate::Options options;
+            options.withLocalIndex = withLocalIndex;
+            options.mergeFactor = mergeFactor;
+            return new NindSegmentedUpdate(base, options);
+        }), py::arg("base"), py::arg("with_local_index") = true, py::arg("merge_factor") = 10)
+        .def("add_document", &NindSegmentedUpdate::addDocument, py::arg("doc_id"), py::arg("words"), py::arg("name") = std::string())
+        .def("remove_document", &NindSegmentedUpdate::removeDocument, py::arg("doc_id"))
+        .def("commit", &NindSegmentedUpdate::commit, py::call_guard<py::gil_scoped_release>())
+        .def_static("force_merge", &NindSegmentedUpdate::forceMerge, py::arg("base"), py::call_guard<py::gil_scoped_release>())
+        .def_static("max_doc_id", [](const std::string &base) -> py::object {
+            NindDocId docId = 0;
+            if (!NindSegmentedUpdate::getMaxDocIdent(base, docId)) return py::none();
+            return py::int_((uint64_t)docId);
+        }, py::arg("base"));
 
     // ---- Bm25Scorer -------------------------------------------------------
     // Okapi BM25 search driven by the postings of the query terms (only the documents

@@ -35,14 +35,13 @@ import tempfile
 import threading
 import time
 from array import array
-from bisect import bisect_left
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from itertools import accumulate, compress
 from .NindLexiconindex import NindLexiconindex
 from .NindTermindex import NindTermindex
 from .NindLocalindex import NindLocalindex
-from ._index_store import IndexStore, INDEX_EXTENSIONS, META_EXTENSION, DOC_LENGTHS_EXTENSION, DOC_NAMES_EXTENSION
+from ._index_store import IndexStore, META_EXTENSION, DOC_LENGTHS_EXTENSION, DOC_NAMES_EXTENSION
 try:
     from . import _native as native
 except ImportError:
@@ -293,8 +292,8 @@ class _RecordNames(Sequence):
     (hundreds of millions of ids don't fit in a Python list). A later build of the index
     removes that file, and with it any element not read yet."""
 
-    def __init__(self, file_name, count):
-        self._file_name = file_name
+    def __init__(self, base, count):
+        self._base = base
         self._count = count
         self._names = None
 
@@ -317,7 +316,7 @@ class _RecordNames(Sequence):
         if not 0 <= index < self._count:
             raise IndexError(index)
         if self._names is None:
-            self._names = native.NindDocNames(self._file_name)
+            self._names = native.SegmentedIndex(self._base)
         return self._names.name(index)
 
 
@@ -341,70 +340,55 @@ def _local_index_lengths(base):
 class _Snapshot:
     """One opened generation of an index: every file from the same build."""
 
-    def __init__(self, base):
-        # every file is opened here, while the generation can't be deleted (see _index_store)
+    def __init__(self, base, previous=None):
+        # every file is opened here, while the generation can't be deleted (see _index_store);
+        # the segments the previous snapshot had are shared, not read again
         self.base = base
-        self.lexicon = NindLexiconindex(base + ".nindlexiconindex")
-        lexicon_identification = self.lexicon.donneIdentification()
-        self.term_index = NindTermindex(base + ".nindtermindex", lexicon_identification)
-        # an index built with local_index=False has none
-        self.local_index = NindLocalindex(base + ".nindlocalindex", lexicon_identification) \
-            if os.path.exists(base + ".nindlocalindex") else None
+        self.index = native.SegmentedIndex(base, previous.index if previous is not None else None)
         meta = _read_meta(base)
         # an index written before tokenizer options were stored: the original tokenizer
         self.tokenizer_options = meta["tokenizer"] if meta is not None else LEGACY_TOKENIZER
-        # arrays by increasing id, as in the file: 12 bytes per document (a dict and a list: ~130)
-        self._legacy_lengths = None
-        arrays = _read_doc_length_arrays(base)
-        if arrays is not None:
-            doc_ids, lengths = array('Q', arrays[0]), arrays[1]
-        else:
-            # written before document lengths were stored apart: read from the local index
-            if self.local_index is None:
-                raise FileNotFoundError("No document lengths nor local index for %s" % base)
-            doc_ids = array('Q', (ext_id for ext_id, _ in self.local_index.donneidentifiantsExternes()))
-            self._legacy_lengths = {doc_id: sum(len(term.localisation) for term in self.local_index.donneListeTermes(doc_id))
-                                    for doc_id in doc_ids}
-            lengths = array('I', (self._legacy_lengths[doc_id] for doc_id in doc_ids))
-        self.doc_ids, self._lengths = doc_ids, lengths
-        self.total_docs = len(doc_ids)
-        self.avg_doc_len = sum(lengths) / self.total_docs if self.total_docs else 0
-        self.scorer = native.Bm25Scorer(doc_ids, lengths, self.avg_doc_len)
-        self.doc_names = _read_doc_names(base)
+        self.total_docs = self.index.docs_nb
+        self.avg_doc_len = self.index.avg_doc_len
+        # the files of an index of one segment, without deleted documents, for direct access
+        self.lexicon = self.term_index = self.local_index = None
+        segments = self.index.segments()
+        self.single = len(segments) == 1 and segments[0].deleted_nb == 0
+        if self.single:
+            single = segments[0].base
+            self.lexicon = NindLexiconindex(single + ".nindlexiconindex")
+            lexicon_identification = self.lexicon.donneIdentification()
+            self.term_index = NindTermindex(single + ".nindtermindex", lexicon_identification)
+            # an index built with local_index=False has none
+            self.local_index = NindLocalindex(single + ".nindlocalindex", lexicon_identification) \
+                if os.path.exists(single + ".nindlocalindex") else None
 
     def search(self, terms, k1, b, top_k, threads=1):
-        # the scores of the documents containing the terms, by decreasing score (see native.Bm25Scorer)
-        term_ids = [self.term_id(term) for term in terms]
-        # the native term index reader behind self.term_index; block-max MaxScore (same results)
-        # when k is small for the corpus: measured faster from 4000 documents per result up
-        # (MS MARCO 1M/4M, FiQA), slower below (see docs/proposals/format-v2-blocks.md)
+        # the scores of the documents containing the terms, by decreasing score (see
+        # native.SegmentedIndex); block-max MaxScore (same results) when k is small for the corpus:
+        # measured faster from 4000 documents per result up (MS MARCO 1M/4M, FiQA), slower below (see
+        # docs/proposals/format-v2-blocks.md)
         prune = 0 < top_k and top_k * PRUNING_DOCS_PER_RESULT <= self.total_docs
-        return self.scorer.search(self.term_index._native, term_ids, k1, b, top_k, prune=prune, threads=threads)
+        return self.index.search(terms, k1, b, top_k, prune=prune, threads=threads)
 
     def term_id(self, term):
+        if not self.single:
+            raise ValueError("term ids are per segment: this index has several, or deleted documents "
+                             "(NindIndexer.force_merge makes it one index)")
         return self.lexicon.donneIdentifiant([term])
 
-    def term_defs(self, term):
-        term_id = self.term_id(term)
-        return self.term_index.donneListeTermesCG(term_id) if term_id else []
-
     def tf(self, term, doc_id):
-        for term_cg in self.term_defs(term):
-            for document in term_cg.documents:
-                if document.ident == doc_id:
-                    return document.frequency
-        return 0
+        return self.index.term_frequency(term, doc_id)
 
     def df(self, term):
-        return sum(len(term_cg.documents) for term_cg in self.term_defs(term))
+        return self.index.document_frequency(term)
 
     def doc_len(self, doc_id):
-        if self._legacy_lengths is not None:
-            return self._legacy_lengths.get(doc_id, 0)
-        position = bisect_left(self.doc_ids, doc_id)
-        if position < len(self.doc_ids) and self.doc_ids[position] == doc_id:
-            return self._lengths[position]
-        return 0
+        return self.index.document_length(doc_id)
+
+    @property
+    def doc_ids(self):
+        return _doc_id_array(self.index.documents()[0])
 
 
 class NindEngine:
@@ -474,31 +458,42 @@ class NindEngine:
         if self._store.current_version() != self._state[1]:
             with self._switch_lock:
                 if self._store.current_version() != self._state[1]:
-                    self._state = self._store.open_current(_Snapshot)
+                    previous = self._state[0]
+                    self._state = self._store.open_current(lambda base: _Snapshot(base, previous))
         calls.snapshot = self._state[0]
         try:
             yield calls.snapshot
         finally:
             calls.snapshot = None
 
+    @staticmethod
+    def _one_index(snapshot):
+        if not snapshot.single:
+            raise ValueError("this index has several segments, or deleted documents: "
+                             "NindIndexer.force_merge makes it one index")
+        return snapshot
+
     @property
     def lexicon(self):
-        """The :class:`~nind.NindLexiconindex.NindLexiconindex` of the current build."""
+        """The :class:`~nind.NindLexiconindex.NindLexiconindex` of the current build, if it
+        is one index (else ``ValueError``; see :meth:`NindIndexer.force_merge`)."""
         with self._session() as snapshot:
-            return snapshot.lexicon
+            return self._one_index(snapshot).lexicon
 
     @property
     def term_index(self):
-        """The :class:`~nind.NindTermindex.NindTermindex` of the current build."""
+        """The :class:`~nind.NindTermindex.NindTermindex` of the current build, if it is one
+        index (else ``ValueError``; see :meth:`NindIndexer.force_merge`)."""
         with self._session() as snapshot:
-            return snapshot.term_index
+            return self._one_index(snapshot).term_index
 
     @property
     def local_index(self):
-        """The :class:`~nind.NindLocalindex.NindLocalindex` of the current build
-        (``None`` for an index built with ``local_index=False``)."""
+        """The :class:`~nind.NindLocalindex.NindLocalindex` of the current build, if it is
+        one index (else ``ValueError``; see :meth:`NindIndexer.force_merge`); ``None`` for an
+        index built with ``local_index=False``."""
         with self._session() as snapshot:
-            return snapshot.local_index
+            return self._one_index(snapshot).local_index
 
     @property
     def total_docs(self):
@@ -575,7 +570,7 @@ class NindEngine:
         :return: its name, or ``None`` if it has none.
         """
         with self._session() as snapshot:
-            return snapshot.doc_names.name(doc_id) if snapshot.doc_names is not None else None
+            return snapshot.index.name(doc_id)
 
     def doc_id(self, name):
         """The identifier in the index of the document named ``name`` (see :meth:`doc_name`).
@@ -583,7 +578,7 @@ class NindEngine:
         :return: the document's identifier, or ``None`` if no document has that name.
         """
         with self._session() as snapshot:
-            return snapshot.doc_names.doc_id(name) if snapshot.doc_names is not None else None
+            return snapshot.index.doc_id(name)
 
     def bm25_score(self, query, doc_id, k1=1.5, b=0.75):
         """Compute the Okapi BM25 relevance score of a document for a query.
@@ -626,9 +621,9 @@ class NindEngine:
         :param k1: BM25 term-frequency saturation parameter.
         :param b: BM25 document-length normalization parameter.
         :param threads: threads searching this one query at once (default:
-            the engine's ``search_threads``). Block-max pruning only, i.e. a
-            ``top_k`` small for the corpus: the documents are cut into as
-            many ranges, with the same results. For many queries at once,
+            the engine's ``search_threads``): the index's segments in parallel,
+            and for a ``top_k`` small for the corpus, more threads than segments
+            within them, with the same results. For many queries at once,
             calling ``search`` from several threads scales better (each
             call releases the GIL).
         :return: a list of ``(doc_id, score)`` tuples (``(name, score)``
@@ -652,9 +647,7 @@ class NindEngine:
             if limit < 0:
                 results = results[:top_k]
             if doc_names:
-                names = snapshot.doc_names.names([doc_id for doc_id, _ in results]) \
-                    if snapshot.doc_names is not None else [None] * len(results)
-                results = [(name, score) for name, (_, score) in zip(names, results)]
+                results = [(snapshot.index.name(doc_id), score) for doc_id, score in results]
         return results
 
 class _CancelUpdate(Exception):
@@ -688,30 +681,30 @@ class IndexUpdate:
     as it was. An update holds the index's writer lock from start to end:
     other updates and :meth:`NindIndexer.index_files` on the same index wait.
 
-    The published index is copied when the update starts, so an update costs
-    at least a copy of the index files: group many documents in one update
-    rather than making one update per document on a large index.
+    An update costs what it changes, whatever the size of the index: its
+    documents are written into a new segment, the replaced and removed ones
+    are masked in theirs, the published segments stay as they are (hard links);
+    segments are merged now and then (see ``MERGE_FACTOR``), which makes each
+    document be rewritten about log(N) times over its life. The results are
+    those of an index built at once from the live documents.
 
     Documents are tokenized as the index's were (its stored tokenizer
     options); an index built without local index stays without (replacing
-    or removing documents then reads every term of the index).
+    or removing documents then reads every term's directory in their segments).
 
     Not thread-safe: use an update from one thread at a time.
     """
 
-    #: Hash buckets of the lexicon of a new index (at least).
-    LEXICON_MIN_BUCKETS = 4096
-    #: Above this many words per hash bucket, the lexicon is rebuilt with twice
-    #: as many buckets as words (the bucket count is fixed in the file).
-    LEXICON_MAX_LOAD = 4
-    #: Entries in each new indirection block of the term and local files (at least).
-    INDIRECTION_BLOC_MIN = 4096
+    #: Segments of a size tier merged into one (tiers grow by this factor): more segments cost
+    #: searches more (MS MARCO 8.8M, one thread: +16% with 8, +69% with 32; with 8 threads, nothing).
+    #: ``0``: never merge (see :meth:`NindIndexer.force_merge`).
+    MERGE_FACTOR = 10
 
     def __init__(self, indexer):
         self._indexer = indexer
         self._stack = None
-        #: What the last commit did (``nind._native.IndexUpdateStats``: ``terms_nb``,
-        #: ``in_place_terms_nb``, ``migrated``, ``rebuilt``...), ``None`` before.
+        #: What the last commit did (``nind._native.SegmentedUpdateStats``: ``added_docs_nb``,
+        #: ``removed_docs_nb``, ``segments_nb``, ``merges_nb``, ``merged_docs_nb``), ``None`` before.
         self.stats = None
 
     # -- context ------------------------------------------------------------
@@ -724,43 +717,39 @@ class IndexUpdate:
         store = IndexStore(indexer.index_dir, indexer.prefix)
         with contextlib.ExitStack() as stack:
             self._base = stack.enter_context(store.new_generation())
-            self._with_retrolexicon = False
             self._tokenizer_options = indexer.tokenizer_options
             self._local = indexer.local_index is not False
-            self._lengths = {}
             source = store.published_base()
             if source is not None:
-                # the published generation is never modified: work on a copy of it
-                for extension in INDEX_EXTENSIONS:
-                    if os.path.exists(source + extension):
-                        shutil.copyfile(source + extension, self._base + extension)
-                self._with_retrolexicon = os.path.exists(self._base + ".nindretrolexicon")
+                # the published segments never change: this generation links them
+                store.link_generation(source, self._base)
                 # the index keeps the tokenizer and layout it was built with
                 meta = _read_meta(self._base)
                 options = meta["tokenizer"] if meta is not None else LEGACY_TOKENIZER
                 if indexer._explicit_tokenizer and options != indexer.tokenizer_options:
                     raise ValueError("the index was built with other tokenizer options: %r" % (options,))
-                local = os.path.exists(self._base + ".nindlocalindex")
+                segments = native.SegmentedIndex.read_manifest(self._base)
+                if segments:
+                    local = any(os.path.exists(native.SegmentedIndex.segment_base(self._base, segment) + ".nindlocalindex")
+                                for segment in segments)
+                else:   # no document left
+                    local = meta["local_index"] if meta is not None else self._local
                 if indexer.local_index is not None and indexer.local_index != local:
                     raise ValueError("the index was built %s local index" % ("with" if local else "without"))
                 self._tokenizer_options, self._local = options, local
-                lengths = _read_doc_lengths(self._base)
-                self._lengths = lengths if lengths is not None else _local_index_lengths(self._base)
+            else:
+                native.SegmentedIndex.write_manifest(self._base, [])
             self._stack = stack.pop_all()
         # tokenizes like the index: the indexer, with the index's tokenizer options
         self._tokenizing_indexer = copy.copy(indexer)
         self._tokenizing_indexer.tokenizer_options = self._tokenizer_options
-        self._existing = set(self._lengths)
         self._pending = {}      # doc id -> its tokens, or None to remove it
-        self._next_id = max(self._existing) + 1 if self._existing else 0
-        # document names: doc id -> name and back
-        names = _read_doc_names(self._base)
-        self._had_names = names is not None
+        self._published = None  # the index before this update, opened when first needed
+        self._max_published = native.SegmentedUpdate.max_doc_id(self._base)
+        self._next_id = self._max_published + 1 if self._max_published is not None else 0
+        # names given in this update: doc id -> name (None: none), and back
         self._names = {}
-        if names is not None:
-            doc_ids, doc_names = names.entries()
-            self._names = dict(zip(_doc_id_array(doc_ids), doc_names))
-        self._ids_by_name = {name: doc_id for doc_id, name in self._names.items()}
+        self._ids_by_name = {}
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -781,6 +770,28 @@ class IndexUpdate:
         stack.close()
         return False
 
+    # -- the index before this update -----------------------------------------
+    def _before(self):
+        # (reads its documents' lengths: an update that only adds new documents doesn't)
+        if self._published is None:
+            self._published = native.SegmentedIndex(self._base)
+        return self._published
+
+    def _was_published(self, doc_id):
+        return self._max_published is not None and doc_id <= self._max_published and self._before().contains(doc_id)
+
+    def _owner(self, name):
+        # the document named name now, changes of this update included
+        if name in self._ids_by_name:
+            return self._ids_by_name[name]
+        if self._max_published is None:
+            return None
+        doc_id = self._before().doc_id(name)
+        # (a published document whose name this update changed, or that it removed, has lost it)
+        if doc_id is None or doc_id in self._names or self._pending.get(doc_id, ()) is None:
+            return None
+        return doc_id
+
     # -- changes ------------------------------------------------------------
     def add_file(self, path, doc_id=None, name=None):
         """Index the text file ``path`` as one document.
@@ -789,8 +800,8 @@ class IndexUpdate:
             ignored) text file.
         :param doc_id: the document's identifier; replaces the document with
             this id if there is one. Default: the document named ``name`` if
-            there is one, else one more than the highest id in the index or
-            in this update (``0`` for the first document).
+            there is one, else one more than the highest id ever given in the
+            index or in this update (``0`` for the first document).
         :param name: the document's name (see :meth:`NindEngine.doc_name`),
             unique in the index: adding a document with the name of another
             one replaces it (unless ``doc_id`` is another document: then
@@ -815,7 +826,7 @@ class IndexUpdate:
         self._check_active()
         if name is not None:
             name = name if isinstance(name, str) else str(name)
-            owner = self._ids_by_name.get(name)
+            owner = self._owner(name)
             if doc_id is None:
                 doc_id = owner
             elif owner is not None and owner != _check_doc_id(doc_id):
@@ -831,14 +842,14 @@ class IndexUpdate:
         """The identifier of the document named ``name`` (``None`` if there is none),
         changes of this update included."""
         self._check_active()
-        return self._ids_by_name.get(name)
+        return self._owner(name)
 
     def _set_name(self, doc_id, name):
-        previous = self._names.pop(doc_id, None)
+        previous = self._names.get(doc_id)
         if previous is not None:
-            del self._ids_by_name[previous]
+            self._ids_by_name.pop(previous, None)
+        self._names[doc_id] = name
         if name is not None:
-            self._names[doc_id] = name
             self._ids_by_name[name] = doc_id
 
     def remove(self, doc_id):
@@ -850,7 +861,7 @@ class IndexUpdate:
         self._check_active()
         doc_id = _check_doc_id(doc_id)
         self._set_name(doc_id, None)
-        if doc_id in self._existing:
+        if self._was_published(doc_id):
             found = self._pending.get(doc_id, True) is not None
             self._pending[doc_id] = None
             return found
@@ -862,36 +873,22 @@ class IndexUpdate:
 
     # -- writing ------------------------------------------------------------
     def _commit(self):
-        # the changes, written by the C++ API (nind._native.NindIndexUpdate): touched terms only,
-        # their last block in place when they only gain documents; a format v1 index migrated, a
-        # full lexicon rebuilt
-        options = native.IndexUpdateOptions()
-        options.with_local_index = self._local
-        options.with_retrolexicon = self._with_retrolexicon
-        options.lexicon_min_buckets = self.LEXICON_MIN_BUCKETS
-        options.lexicon_max_load = self.LEXICON_MAX_LOAD
-        options.indirection_bloc_min = self.INDIRECTION_BLOC_MIN
-        update = native.NindIndexUpdate(self._base, options)
-        # the lengths before the update (the blocks' shortest document)
-        update.set_document_lengths(*_lengths_arrays(self._lengths))
+        # the changes, written by the C++ API (nind._native.SegmentedUpdate): a new segment, the
+        # replaced and removed documents masked in theirs, the merges the policy asks for
+        update = native.SegmentedUpdate(self._base, with_local_index=self._local, merge_factor=self.MERGE_FACTOR)
         for doc_id, tokens in self._pending.items():
-            if tokens is None:
-                update.remove_document(doc_id)
-            else:
-                update.add_document(doc_id, tokens)
-                if tokens:
-                    self._lengths[doc_id] = len(tokens)
             if not tokens:
-                self._lengths.pop(doc_id, None)
+                update.remove_document(doc_id)
+                continue
+            if doc_id in self._names:
+                name = self._names[doc_id]
+            else:
+                # a replaced document keeps its name
+                name = self._before().name(doc_id) if self._max_published is not None and doc_id <= self._max_published else None
+            update.add_document(doc_id, tokens, name or "")
+        self._published = None
         self.stats = update.commit()
-        _write_doc_lengths(self._base, self._lengths)
         _write_meta(self._base, self._tokenizer_options, self._local)
-        if self._names or self._had_names:
-            # the names of documents that are no longer stored (no tokens left) go too
-            if os.path.exists(self._base + DOC_NAMES_EXTENSION):
-                os.remove(self._base + DOC_NAMES_EXTENSION)
-            _write_doc_names(self._base, {doc_id: name for doc_id, name in self._names.items()
-                                          if doc_id in self._lengths})
 
 
 class NindIndexer:
@@ -946,7 +943,7 @@ class NindIndexer:
         # Do not initialize engine here; files may not exist yet
         self.engine = None
 
-    def index_files(self, file_paths, workers=None, shards=1, doc_names=None):
+    def index_files(self, file_paths, workers=None, shards=1, doc_names=None, merge=False):
         """Tokenize ``file_paths`` and write the resulting corpus as a nind index.
 
         Each file becomes one document, identified externally by its
@@ -971,9 +968,11 @@ class NindIndexer:
             ``PARALLEL_MIN_FILES`` files, tokenizes in this process instead,
             since starting worker processes would then cost more than it saves.
         :param shards: number of independent indexes (each over a contiguous
-            part of ``file_paths``) built in parallel processes, then merged
-            into this one by ``nind._native.merge_indexes``. ``1`` builds the
-            index directly. At most ``workers`` shards are built at a time.
+            part of ``file_paths``) built in parallel processes, at most
+            ``workers`` at a time, which become the index's segments. ``1`` builds
+            the index directly. See :meth:`index_jsonl`.
+        :param merge: with ``shards > 1``, merge them into one index. Default:
+            they stay segments (see :meth:`index_jsonl`).
         :param doc_names: the documents' names (their identifiers in the
             corpus, unique), in ``file_paths`` order; :meth:`NindEngine.doc_name`
             and ``search(..., doc_names=True)`` return them. Default: none.
@@ -988,18 +987,18 @@ class NindIndexer:
         shards = max(1, min(shards, len(file_paths)))
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             if shards > 1:
-                self._index_sharded(file_paths, workers, shards, base)
+                self._index_sharded(file_paths, workers, shards, base, doc_names, merge)
             else:
                 self._write_chunks(self._tokenize_chunks(file_paths, workers), 0, base)
+                if doc_names is not None:
+                    _write_doc_names(base, dict(enumerate(doc_names)))
             _write_meta(base, self.tokenizer_options, self._with_local_index)
-            if doc_names is not None:
-                _write_doc_names(base, dict(enumerate(doc_names)))
 
     @property
     def _with_local_index(self):
         return self.local_index is not False
 
-    def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None, shards=1, merge=True):
+    def index_jsonl(self, path, id_field="id", text_field="contents", limit=None, workers=None, shards=1, merge=False):
         """Index a JSON Lines corpus (one document per line) as a nind index.
 
         The format read by pyserini's ``JsonCollection``: each non-blank line
@@ -1022,16 +1021,17 @@ class NindIndexer:
             ``JSONL_PARALLEL_MIN_BYTES``, works in this process.
         :param shards: number of independent indexes, each over a line-aligned
             part of the file of about the same bytes, built in worker processes
-            (at most ``workers`` at a time) then merged into this one: the same
-            search results as a direct build. This is the way to index a corpus
-            too large to build at once: a build holds ~19 bytes per token in
-            memory, so the peak is about ``workers`` times a shard's tokens
-            times that, then the merge's (~30 bytes per document, plus the
-            longest term's postings at 16 bytes each). The shards and the merged
-            index are on disk together until the merge ends.
-        :param merge: with ``shards > 1``, ``False`` keeps the shards as the
-            index's segments, without merging them (see
-            :class:`nind._native.SegmentedIndex`): the same search results.
+            (at most ``workers`` at a time), which become the index's segments:
+            the same search results as a direct build, searched in parallel
+            with ``threads``, and no time spent merging (MS MARCO 8.8M: 25 s
+            with 8 or 32 shards, 45 s direct; searches on one thread cost 16%
+            more with 8, 69% with 32; with 8 threads, nothing more). This is the
+            way to index a corpus too large to build at once: a build holds ~19
+            bytes per token in memory, so the peak is about ``workers`` times a
+            shard's tokens times that.
+        :param merge: with ``shards > 1``, merge them into one index at the end
+            (the merge's memory: ~30 bytes per document, plus the longest term's
+            postings at 16 bytes each; shards and merged index on disk together).
         :return: the ``id_field`` value of every indexed record: element
             ``n`` is the identifier of document ``n``. With ``shards > 1``, a
             read-only sequence of them as strings, read from the index files
@@ -1068,7 +1068,7 @@ class NindIndexer:
     #: A shard of :meth:`index_jsonl` parses at most this many bytes of the file at a time.
     JSONL_SHARD_PIECE_BYTES = 1 << 26
 
-    def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards, merge=True):
+    def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards, merge):
         ranges = self._jsonl_ranges(path, end, shards)
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             # inside the new generation, so they go away with it if anything fails
@@ -1094,11 +1094,12 @@ class NindIndexer:
                 if merge:
                     self._merge_shards(shard_bases, base, with_names=True)
                 else:
+                    self._check_names_unique(shard_bases, shard_dir)
                     native.SegmentedIndex.write_manifest(base, segments)
             finally:
                 shutil.rmtree(shard_dir, ignore_errors=True)
             _write_meta(base, self.tokenizer_options, self._with_local_index)
-        return _RecordNames(base + DOC_NAMES_EXTENSION, sum(counts))
+        return _RecordNames(base, sum(counts))
 
     @staticmethod
     def _count_jsonl_range(path, start, stop):
@@ -1182,13 +1183,30 @@ class NindIndexer:
             texts.append(text)
         return record_ids, self._tokenize_texts(texts)
 
+    def force_merge(self):
+        """Merge the index's segments into one standard index, its deleted documents dropped.
+
+        Searches on one thread are at their fastest then, and
+        :attr:`NindEngine.lexicon` and the other direct accesses work. Costs a
+        rewrite of the index; published at once, as a build.
+
+        :return: what was done (``nind._native.SegmentedUpdateStats``).
+        """
+        if native is None:
+            raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
+        store = IndexStore(self.index_dir, self.prefix)
+        with store.new_generation() as base:
+            source = store.published_base()
+            if source is None:
+                raise FileNotFoundError("No nind index %s in %s" % (self.prefix, self.index_dir))
+            store.link_generation(source, base)
+            return native.SegmentedUpdate.force_merge(base)
+
     def update(self):
         """Start an incremental update of the index (created if there is none yet).
 
-        The first update of an index written in format v1 (by a nind older
-        than format v2) first rebuilds it in format v2. This costs about as
-        much as rewriting the index (term ids change, document ids and names
-        don't).
+        An index written in format v1 (by a nind older than format v2) stays
+        readable as a segment; merges rewrite it in format v2.
 
         :return: an :class:`IndexUpdate`, to use as a context manager; its
             changes are published together when the ``with`` block ends.
@@ -1279,7 +1297,7 @@ class NindIndexer:
         # writes the index of documents given as token lists (first one: document first_doc_id)
         self._write_chunks([_chunk_from_token_lists(token_lists)], first_doc_id, base)
 
-    def _index_sharded(self, file_paths, workers, shards, base):
+    def _index_sharded(self, file_paths, workers, shards, base, doc_names, merge):
         if workers is None:
             workers = os.cpu_count() or 1
         # contiguous parts, so that each shard's documents keep their global ids
@@ -1287,15 +1305,35 @@ class NindIndexer:
         # inside the new generation, so they go away with it if anything fails
         shard_dir = tempfile.mkdtemp(prefix=".shards-", dir=os.path.dirname(base))
         try:
-            shard_bases = [os.path.join(shard_dir, "shard%d" % i) for i in range(shards)]
+            if merge:
+                shard_bases = [os.path.join(shard_dir, "shard%d" % i) for i in range(shards)]
+            else:
+                segments = ["seg-%06d-%s" % (i, secrets.token_hex(4)) for i in range(shards)]
+                shard_bases = [native.SegmentedIndex.segment_base(base, segment) for segment in segments]
+                for shard_base in shard_bases:
+                    os.mkdir(os.path.dirname(shard_base))
             with ProcessPoolExecutor(max_workers=max(1, min(workers, shards)), initializer=_pool_worker_init) as pool:
-                futures = [pool.submit(self._build_shard, shard_bases[i], file_paths[bounds[i]:bounds[i + 1]], bounds[i])
+                futures = [pool.submit(self._build_shard, shard_bases[i], file_paths[bounds[i]:bounds[i + 1]], bounds[i],
+                                       None if doc_names is None else doc_names[bounds[i]:bounds[i + 1]])
                            for i in range(shards)]
                 for future in futures:
                     future.result()
-            self._merge_shards(shard_bases, base)
+            if merge:
+                self._merge_shards(shard_bases, base, with_names=doc_names is not None)
+            else:
+                if doc_names is not None:
+                    self._check_names_unique(shard_bases, shard_dir)
+                native.SegmentedIndex.write_manifest(base, segments)
         finally:
             shutil.rmtree(shard_dir, ignore_errors=True)
+
+    @staticmethod
+    def _check_names_unique(shard_bases, directory):
+        # a name in two segments would make name -> document ambiguous (ValueError): their names
+        # merged, the result dropped
+        merged = os.path.join(directory, "names-check")
+        native.NindDocNames.merge([shard_base + DOC_NAMES_EXTENSION for shard_base in shard_bases], merged)
+        os.remove(merged)
 
     @staticmethod
     def _merge_shards(shard_bases, base, with_names=False):
@@ -1311,9 +1349,11 @@ class NindIndexer:
             native.NindDocNames.merge([shard_base + DOC_NAMES_EXTENSION for shard_base in shard_bases],
                                       base + DOC_NAMES_EXTENSION)
 
-    def _build_shard(self, shard_base, file_paths, first_doc_id):
+    def _build_shard(self, shard_base, file_paths, first_doc_id, doc_names=None):
         # Runs in a worker process (self is a copy: keeps an overridden tokenizer).
         self._write_chunks(self._tokenize_chunks(file_paths, 1), first_doc_id, shard_base)
+        if doc_names is not None:
+            _write_doc_names(shard_base, dict(enumerate(doc_names, first_doc_id)))
 
     #: Below this many files, :meth:`index_files` tokenizes in-process.
     PARALLEL_MIN_FILES = 64

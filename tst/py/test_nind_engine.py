@@ -243,8 +243,16 @@ def test_sharded_index_equals_direct_index(tmp_path, shards):
         assert sharded.get_doc_len(doc_id) == direct.get_doc_len(doc_id)
     for query in ["cat", "dog fish", "eel bird"]:
         assert sharded.search(query) == pytest.approx(direct.search(query))
-    # the shards were built in a temporary directory inside the new generation, and removed
-    assert index_files_of(tmp_path / "sharded") == \
+    # they stay segments; their temporary directory is removed
+    files = index_files_of(tmp_path / "sharded")
+    assert "corpus.nindsegments" in files and not [f for f in files if f.startswith(".shards-")]
+    assert len(sharded._snapshot.index.segments()) == min(shards, len(SHARDED_TEXTS))
+    # or merged into one standard index: the shards were built in a temporary directory inside the
+    # new generation, and removed
+    merged = build_engine(tmp_path, "merged", SHARDED_TEXTS, shards=shards, workers=2, merge=True)
+    for query in ["cat", "dog fish", "eel bird"]:
+        assert merged.search(query) == pytest.approx(direct.search(query))
+    assert index_files_of(tmp_path / "merged") == \
         INDEX_FILES
 
 
@@ -453,7 +461,13 @@ def test_files_indexed_one_by_one_equal_a_full_build(tmp_path):
     # starts without any index: the first file creates it
     assert [indexer.add_file(path) for path in paths] == list(range(len(paths)))
     assert_same_index(NindEngine(str(index_dir)), expected, INCREMENTAL_TERMS, range(len(paths)))
-    assert index_files_of(index_dir) == INDEX_FILES
+    # one generation, of segments
+    assert "corpus.nindsegments" in index_files_of(index_dir)
+    # and merged into one
+    engine = NindEngine(str(index_dir))
+    assert indexer.force_merge().segments_nb == 1
+    assert_same_index(engine, expected, INCREMENTAL_TERMS, range(len(paths)))
+    assert engine.term_index is not None and engine.get_term_id("cat") != 0
 
 
 def test_files_added_to_an_index_built_by_index_files(tmp_path):
@@ -532,25 +546,45 @@ def test_failed_or_empty_update_publishes_nothing(tmp_path):
         update.add_text("outside")
 
 
-def test_growing_lexicon_is_rebuilt_with_more_buckets(tmp_path, monkeypatch):
-    from nind import _native
+def test_updates_cost_what_they_change_and_segments_stay_few(tmp_path, monkeypatch):
     from nind.nind_engine import IndexUpdate
-    monkeypatch.setattr(IndexUpdate, "LEXICON_MIN_BUCKETS", 2)
-    monkeypatch.setattr(IndexUpdate, "LEXICON_MAX_LOAD", 2)
+    monkeypatch.setattr(IndexUpdate, "MERGE_FACTOR", 3)
     index_dir = tmp_path / "incremental"
     index_dir.mkdir()
     indexer = NindIndexer(str(index_dir), prefix="corpus")
     words = ["w%c%c" % (a, b) for a in "abcdefgh" for b in "abcdefgh"]
     texts = [" ".join(words[i:i + 5]) for i in range(0, len(words), 4)]
+    merges = 0
     for text in texts:
         with indexer.update() as update:
             update.add_text(text)
-    [generation] = generations(index_dir)
-    lexicon = _native.NindLexiconIndex(str(generation / "corpus"), is_writer=False)
-    assert lexicon.get_identification().lexicon_words_nb == len(words)
-    assert lexicon.get_modulo() >= len(words) / 2
+        merges += update.stats.merges_nb
+        # (3 tiers at most here, each with less than the factor)
+        assert update.stats.segments_nb <= 6
+    assert merges > 0
     expected = build_engine(tmp_path, "direct", texts)
     assert_same_index(NindEngine(str(index_dir)), expected, words[:3] + words[-3:] + ["unknown"], range(len(texts)))
+
+
+def test_an_update_leaves_the_published_segments_files_as_they_are(tmp_path):
+    index_dir = tmp_path / "incremental"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir), prefix="corpus")
+    indexer.add_files(write_texts(tmp_path / "docs", ["cat dog", "dog", "bird", "fish", "eel"]))
+    engine = NindEngine(str(index_dir))
+    before = engine._snapshot.index.segments()[0]
+    inode = os.stat(before.base + ".nindtermindex").st_ino
+    with indexer.update() as update:
+        update.remove(1)
+        update.add_text("whale")
+    assert engine.total_docs == 5
+    segments = engine._snapshot.index.segments()
+    assert len(segments) == 2 and segments[0].name == before.name and segments[0].deleted_nb == 1
+    # the same file, linked in the new generation; the old generation is gone
+    assert os.stat(segments[0].base + ".nindtermindex").st_ino == inode
+    assert len(generations(index_dir)) == 1
+    assert engine.search("dog") and [d for d, _ in engine.search("dog")] == [0]
+    assert engine.get_df("dog") == 1
 
 
 # -- JSON Lines input -----------------------------------------------------------
@@ -709,8 +743,9 @@ def build_with(tmp_path, name, texts, indexer_kwargs=None, **kwargs):
 def test_index_without_local_index_answers_like_one_with(tmp_path, kwargs):
     _, full = build_with(tmp_path, "full", SHARDED_TEXTS)
     _, light = build_with(tmp_path, "light", SHARDED_TEXTS, {"local_index": False}, **kwargs)
-    assert light.local_index is None
-    assert "corpus.nindlocalindex" not in index_files_of(tmp_path / "light")
+    if not kwargs:
+        assert light.local_index is None
+    assert not list((tmp_path / "light").rglob("corpus.nindlocalindex"))
     assert_same_index(light, full, INCREMENTAL_TERMS, range(len(SHARDED_TEXTS)))
 
 
@@ -723,7 +758,7 @@ def test_updates_of_an_index_without_local_index(tmp_path):
             update.add_text("fish fish fish", doc_id=0)     # replaced
             update.remove(1)
             update.add_text("whale cat")
-    assert light.local_index is None
+    assert not list((tmp_path / "light").rglob("corpus.nindlocalindex"))
     assert light.total_docs == 4
     assert_same_index(light, full, INCREMENTAL_TERMS + ["whale"], range(6))
     # the layout of an existing index can't be changed by an update
@@ -1125,13 +1160,18 @@ def test_block_max_pruning_returns_the_exhaustive_top_k(tmp_path):
     queries += [" ".join(rng.sample(vocabulary, rng.randint(1, 5))) for _ in range(100)]
     snapshot = engine._snapshot
     term_index = snapshot.term_index._native
+    from array import array
+    doc_ids, lengths = array('Q'), array('I')
+    for values, data in zip((doc_ids, lengths), snapshot.index.documents()):
+        values.frombytes(data)
+    scorer = native.Bm25Scorer(doc_ids, lengths, snapshot.avg_doc_len)
     for query in queries:
         term_ids = [snapshot.term_id(t) or 0 for t in engine.tokenize(query)]
-        everything = snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, -1)
+        everything = scorer.search(term_index, term_ids, 1.2, 0.75, -1)
         for k in (1, 3, 10, 50):
-            pruned = snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k, prune=True)
+            pruned = scorer.search(term_index, term_ids, 1.2, 0.75, k, prune=True)
             assert pruned == everything[:k], (query, k)
-            assert snapshot.scorer.search(term_index, term_ids, 1.2, 0.75, k) == everything[:k], (query, k)
+            assert scorer.search(term_index, term_ids, 1.2, 0.75, k) == everything[:k], (query, k)
 
 
 
@@ -1218,13 +1258,19 @@ def test_a_format_v1_index_is_read_then_migrated_by_its_first_update(tmp_path, l
     for query in V1_QUERIES:
         assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
         assert engine.search(query, top_k=2, doc_names=True) == reference.search(query, top_k=2, doc_names=True)
-    # an update: migrated, then updated
+    # an update: the v1 index stays a segment; a merge rewrites it in format v2
     more = write_texts(tmp_path / "more", ["a new dog", "the sun"])
     for indexer in (NindIndexer(str(index_dir), prefix="corpus", **kwargs), reference_indexer):
         with indexer.update() as update:
             update.add_file(more[0], name="m0")
             update.add_file(more[1], name="n5")        # replaces document 5
             update.remove(2)
+    for query in V1_QUERIES + ["new", "sun"]:
+        assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
+    report = native.verify_index(engine._snapshot.base, cross_check=True)
+    assert report.ok and not report.format_v2, report
+    assert engine.doc_id("m0") == reference.doc_id("m0") and engine.doc_name(5) == "n5"
+    NindIndexer(str(index_dir), prefix="corpus", **kwargs).force_merge()
     for query in V1_QUERIES + ["new", "sun"]:
         assert engine.search(query, top_k=None) == reference.search(query, top_k=None), query
     snapshot = engine._snapshot
@@ -1258,7 +1304,9 @@ def test_documents_with_64_bit_ids_are_replaced_and_removed(tmp_path, local_inde
     assert sorted(d for d, _ in engine.search("alpha", top_k=None)) == [7, big]
     assert engine.search("gamma", top_k=None) == []
     if local_index:
-        local = engine._snapshot.local_index._native
+        indexer.force_merge()
+        assert engine.total_docs == 2
+        local = engine.local_index._native
         assert sorted(t.term for t in local.get_local_def(big)) == sorted(local.get_term_idents(big))
         assert local.get_local_def(2 ** 64 - 1) is None
     assert native.verify_index(engine._snapshot.base, cross_check=True).ok
@@ -1266,31 +1314,35 @@ def test_documents_with_64_bit_ids_are_replaced_and_removed(tmp_path, local_inde
 
 def assert_blocks_hold_their_shortest_document(engine):
     # every block's min_length is its documents' shortest length (the lengths the engine scores with)
+    from nind.nind_engine import _read_doc_length_arrays
     engine.search("common")                 # (switches to the last published build)
     snapshot = engine._snapshot
-    term_index = snapshot.term_index._native
-    lengths = dict(zip(snapshot.doc_ids, snapshot._lengths))
     blocks = 0
-    for term_id in range(1, snapshot.lexicon._native.get_identification().lexicon_words_nb + 1):
-        for category in term_index.get_term_directory(term_id) or ():
-            if not category.blocks:
-                continue
-            postings = [d.ident for d in term_index.get_term_def(term_id)[0].documents]
-            for block in category.blocks:
-                docs = [d for d in postings if block.first <= d <= block.last]
-                assert len(docs) == block.docs_nb
-                assert block.min_length == min(lengths[d] for d in docs), (term_id, block.first)
-                # the impacts: the (frequency, length) Pareto frontier, at most 4 (then a corner)
-                frequencies = {d.ident: d.frequency for d in term_index.get_term_def(term_id)[0].documents}
-                pairs = sorted({(frequencies[d], lengths[d]) for d in docs}, key=lambda p: (-p[0], p[1]))
-                frontier = []
-                for pair in pairs:
-                    if not frontier or pair[1] < frontier[-1][1]:
-                        frontier.append(pair)
-                if len(frontier) > 4:
-                    frontier = frontier[:3] + [(frontier[3][0], frontier[-1][1])]
-                assert block.impacts == frontier, (term_id, block.first)
-                blocks += 1
+    for segment in snapshot.index.segments():
+        lexicon = native.NindLexiconIndex(segment.base, is_writer=False)
+        identification = lexicon.get_identification()
+        term_index = native.NindTermIndex(segment.base, is_writer=False, lexicon_identification=identification, specifics_number=0)
+        lengths = dict(zip(*_read_doc_length_arrays(segment.base)))
+        for term_id in range(1, identification.lexicon_words_nb + 1):
+            for category in term_index.get_term_directory(term_id) or ():
+                if not category.blocks:
+                    continue
+                postings = [d.ident for d in term_index.get_term_def(term_id)[0].documents]
+                for block in category.blocks:
+                    docs = [d for d in postings if block.first <= d <= block.last]
+                    assert len(docs) == block.docs_nb
+                    assert block.min_length == min(lengths[d] for d in docs), (term_id, block.first)
+                    # the impacts: the (frequency, length) Pareto frontier, at most 4 (then a corner)
+                    frequencies = {d.ident: d.frequency for d in term_index.get_term_def(term_id)[0].documents}
+                    pairs = sorted({(frequencies[d], lengths[d]) for d in docs}, key=lambda p: (-p[0], p[1]))
+                    frontier = []
+                    for pair in pairs:
+                        if not frontier or pair[1] < frontier[-1][1]:
+                            frontier.append(pair)
+                    if len(frontier) > 4:
+                        frontier = frontier[:3] + [(frontier[3][0], frontier[-1][1])]
+                    assert block.impacts == frontier, (term_id, block.first)
+                    blocks += 1
     assert native.verify_index(snapshot.base, cross_check=True).ok
     return blocks
 

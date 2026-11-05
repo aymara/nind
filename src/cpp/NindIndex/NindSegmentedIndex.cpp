@@ -286,11 +286,12 @@ public:
     // A segment in this index: what its deletions are here
     struct Part {
         shared_ptr<const Segment> segment;
+        string base;                    //its files in this index's generation (the segment may have been opened in another)
         vector<uint64_t> deleted;       //one bit per position (empty: none)
         uint64_t deletedNb;
         uint64_t liveLength;
         vector<pair<unsigned int, uint32_t> > termCounts;     //postings of deleted documents, by term
-        Part(): segment(), deleted(), deletedNb(0), liveLength(0), termCounts() {}
+        Part(): segment(), base(), deleted(), deletedNb(0), liveLength(0), termCounts() {}
         bool isLive(const size_t position) const {
             return position < segment->scorer->docsNb()
                 && (deleted.empty() || (deleted[position / 64] >> (position % 64) & 1) == 0);
@@ -351,6 +352,7 @@ NindSegmentedIndex::NindSegmentedIndex(const string &base,
         }
         const string segmentFiles = withManifest ? segmentBase(base, names[s]) : base;
         if (!part.segment) part.segment.reset(new Impl::Segment(names[s], segmentFiles));
+        part.base = segmentFiles;
         const NindBm25Scorer &scorer = *part.segment->scorer;
         part.liveLength = part.segment->totalLength;
         NindSegmentDeletes deletes;
@@ -488,15 +490,14 @@ uint64_t NindSegmentedIndex::termFrequency(const list<string> &word,
     vector<NindTermIndex::Document> postings;
     vector<size_t> categoryEnds;
     part->segment->terms->getTermPostings(term, postings, categoryEnds, buffer);
-    //each category's documents are in increasing order
-    uint64_t frequency = 0;
+    //each category's documents are in increasing order; as searches score it: its first category
     size_t begin = 0;
     for (size_t c = 0; c < categoryEnds.size(); begin = categoryEnds[c], c++) {
         const auto it = lower_bound(postings.begin() + begin, postings.begin() + categoryEnds[c], docId,
                                     [](const NindTermIndex::Document &d, const NindDocId id) { return d.ident < id; });
-        if (it != postings.begin() + categoryEnds[c] && it->ident == docId) frequency += it->frequency;
+        if (it != postings.begin() + categoryEnds[c] && it->ident == docId) return it->frequency;
     }
-    return frequency;
+    return 0;
 }
 ////////////////////////////////////////////////////////////
 uint32_t NindSegmentedIndex::documentLength(const NindDocId docId) const
@@ -596,7 +597,7 @@ vector<NindSegmentedIndex::SegmentInfo> NindSegmentedIndex::segments() const
     for (size_t p = 0; p < parts.size(); p++) {
         SegmentInfo info;
         info.name = parts[p].segment->name;
-        info.base = parts[p].segment->base;
+        info.base = parts[p].base;
         info.docsNb = parts[p].segment->scorer->docsNb();
         info.deletedNb = parts[p].deletedNb;
         result.push_back(info);
