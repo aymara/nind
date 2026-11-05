@@ -61,8 +61,14 @@ of 3.0.0 (format v2).
   v2.
 - **Top 100.** Measure top 100 in the comparison benchmark (only top 10 and
   top 1000 are timed).
-- **Search, beyond bit-packing.** Block-max WAND; parallel scoring of one
-  query's blocks across cores; several categories (Amose) aren't pruned yet.
+- **Search, what's left** (done in 3.1.2–3.2: windowed block-max MaxScore,
+  intra-query threads with a persistent pool, impacts, a directory cache,
+  length prefetching). perf on MS MARCO 8.8M: the window scan is 70% of a
+  search, mostly the scattered length of each scored document and the BM25
+  division after it; decoding ~17%. Leads: score a decoded block's documents
+  in batches (lengths gathered first, divisions vectorised); 1-byte quantised
+  lengths (Lucene's norms: 8.8 MB, but scores change: measure nDCG); several
+  categories (Amose) aren't pruned yet.
 - **Large k on small corpora.** The v2 exhaustive path is ~25% slower than v1
   at top 1000 on 1–2M documents (block decoding); not a target size.
 - **Original author's to-do.** `NindLexiconIndex::addWord` doesn't check that
