@@ -87,9 +87,19 @@ one is given. `update.doc_id(name)` finds a document by name, changes of the
 update included.
 
 `add_file(path)`, `add_files(paths)` and `remove_documents(ids)` on the
-indexer are one-update shortcuts. Each update copies the index and reopens
-its files, so on a large index group many documents per update rather than
-calling `add_file` once per file.
+indexer are one-update shortcuts. An update costs what it changes, whatever
+the size of the index (about 0.25 s to publish, with its `fsync`s, plus the
+new documents): it writes a new segment and masks the replaced and removed
+documents in theirs. Segments are merged now and then; the results are always
+those of one index of the live documents. `indexer.force_merge()` makes it one
+index, which a search on a single thread answers fastest, and which
+`engine.get_term_id`, `engine.lexicon`, `engine.term_index` and
+`engine.local_index` need (they raise `ValueError` on several segments or
+deleted documents).
+
+A corpus too large to build at once: `indexer.index_jsonl(path, shards=64)`
+builds that many segments in worker processes, in parallel, with memory bounded
+by `workers` shards; `merge=True` merges them into one index at the end.
 
 ## Search it
 
@@ -146,7 +156,7 @@ internally, which are handy for debugging relevance or inspecting a
 specific document:
 
 ```python
-engine.get_term_id("nombre")      # -> internal lexicon identifier, or 0
+engine.get_term_id("nombre")      # -> internal lexicon identifier, or 0 (one index only)
 engine.get_df("nombre")           # -> how many documents contain it
 engine.get_tf("nombre", doc_id=1) # -> occurrences in that one document
 engine.get_doc_len(doc_id=1)      # -> document length in tokens

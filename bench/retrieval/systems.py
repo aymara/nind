@@ -80,9 +80,9 @@ class Nind(System):
         with nind_engine.NindIndexer(index_dir, self.prefix).update() as update:
             for doc in read_jsonl(add):
                 update.add_tokens(doc["contents"].split(), name=doc["id"])
-        # past LEXICON_MAX_LOAD words per lexicon bucket, an update rebuilds the whole index: record it
-        if update.stats is not None and update.stats.rebuilt:
-            self.update_mode = "rebuilt (lexicon full)"
+        # a tier of segments merged in this update: record it
+        if update.stats is not None and update.stats.merges_nb:
+            self.update_mode = "merged %d documents" % update.stats.merged_docs_nb
 
     def index_path(self, index_dir):
         with open(os.path.join(index_dir, self.prefix + ".CURRENT")) as f:

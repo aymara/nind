@@ -82,6 +82,12 @@ local index or not), `<prefix>.ninddoclengths` (document lengths, so
 `<prefix>.ninddocnames` (document id <-> name, the C++ `NindDocNames`
 format: written once, read whole, name -> id by binary search).
 
+An index can also be made of immutable *segments*, each with those files:
+a generation then holds a manifest, `<prefix>.nindsegments`, and hard links to
+the unchanged segments of the previous one, and `NindSegmentedIndex` searches
+them as one, with the results of one index of the live documents. Sharded
+builds and updates produce them, see {doc}`proposals/segments`.
+
 None of these classes write the index-family formats themselves except
 `NindIndexer` (which, like the readers, delegates to `nind._native` rather
 than hand-rolling the envelope) - `nind_engine` is the whole package's only

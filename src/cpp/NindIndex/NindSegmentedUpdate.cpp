@@ -167,8 +167,6 @@ void writeSegment(const string &segmentBase, const map<NindDocId, vector<string>
             distinct.insert(d->second->begin(), d->second->end());
         vocabulary.assign(distinct.begin(), distinct.end());
     }
-    unordered_map<string, uint32_t> localIds;
-    for (size_t w = 0; w < vocabulary.size(); w++) localIds[vocabulary[w]] = (uint32_t)w;
     NindLexiconIndex lexicon(segmentBase, true, false, max((unsigned int)vocabulary.size(), 1u));
     vector<list<string> > words;
     words.reserve(vocabulary.size());
@@ -178,17 +176,18 @@ void writeSegment(const string &segmentBase, const map<NindDocId, vector<string>
     lexicon.addWords(words, idents);
     lexicon.endBulk();
     const NindPadFile::Identification identification = lexicon.getIdentification();
-    const vector<uint32_t> idMap(idents.begin(), idents.end());
+    unordered_map<string, uint32_t> termIds;
+    termIds.reserve(vocabulary.size());
+    for (size_t w = 0; w < vocabulary.size(); w++) termIds[vocabulary[w]] = idents[w];
     NindIndexBuilder builder;
     vector<NindDocId> docIds;
     vector<uint32_t> lengths, tokens;
     for (map<NindDocId, vector<string> const *>::const_iterator d = documents.begin(); d != documents.end(); d++) {
         tokens.clear();
-        for (size_t i = 0; i < d->second->size(); i++) tokens.push_back(localIds[(*d->second)[i]]);
-        const uint32_t end = (uint32_t)tokens.size();
-        builder.addDocuments(d->first, &end, 1, tokens.data(), tokens.size(), idMap.data(), idMap.size());
+        for (size_t i = 0; i < d->second->size(); i++) tokens.push_back(termIds[(*d->second)[i]]);
+        builder.addDocument(d->first, tokens.data(), tokens.size());
         docIds.push_back(d->first);
-        lengths.push_back(end);
+        lengths.push_back((uint32_t)tokens.size());
     }
     {
         NindTermIndex terms(segmentBase, true, identification, 0, (unsigned int)vocabulary.size() + 1);
@@ -291,7 +290,7 @@ void mergeSegments(const string &base, vector<string> &segments, const vector<si
     stats.mergedDocsNb += docIds.size();
 }
 // what the tiered policy merges now (empty: nothing)
-vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned int mergeFactor)
+vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned int mergeFactor, const uint64_t maxMergedDocs)
 {
     const vector<NindSegmentedIndex::SegmentInfo> infos = index.segments();
     map<unsigned int, vector<size_t> > tiers;
@@ -299,12 +298,30 @@ vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned i
         const uint64_t live = infos[s].docsNb - infos[s].deletedNb;
         //over half deleted: rewritten alone
         if (infos[s].deletedNb * 2 > infos[s].docsNb) return vector<size_t>(1, s);
+        //at half the limit, a segment is full: without this, such segments would pile up in a tier
+        //that can't be merged, and two others always fit under the limit
+        if (maxMergedDocs != 0 && live * 2 >= maxMergedDocs) continue;
         unsigned int tier = 0;
         for (uint64_t limit = mergeFactor; live >= limit; limit *= mergeFactor) tier++;
         tiers[tier].push_back(s);
     }
-    for (map<unsigned int, vector<size_t> >::const_iterator t = tiers.begin(); t != tiers.end(); t++)
-        if (t->second.size() >= mergeFactor) return t->second;
+    for (map<unsigned int, vector<size_t> >::const_iterator t = tiers.begin(); t != tiers.end(); t++) {
+        if (t->second.size() < mergeFactor) continue;
+        //its smallest segments that fit under the limit (all of them, most of the time)
+        vector<size_t> chosen = t->second;
+        stable_sort(chosen.begin(), chosen.end(), [&infos](const size_t a, const size_t b) {
+            return infos[a].docsNb - infos[a].deletedNb < infos[b].docsNb - infos[b].deletedNb; });
+        uint64_t live = 0;
+        size_t kept = 0;
+        for (; kept < chosen.size(); kept++) {
+            live += infos[chosen[kept]].docsNb - infos[chosen[kept]].deletedNb;
+            if (maxMergedDocs != 0 && live > maxMergedDocs) break;
+        }
+        chosen.resize(kept);
+        //(mergeSegments puts the new segment at the first one's place, in manifest order)
+        sort(chosen.begin(), chosen.end());
+        if (chosen.size() >= 2) return chosen;
+    }
     return vector<size_t>();
 }
 }
@@ -395,7 +412,7 @@ NindSegmentedUpdate::Stats NindSegmentedUpdate::commit()
     //3) the merges
     while (m_options.mergeFactor >= 2) {
         const NindSegmentedIndex index(m_base);
-        const vector<size_t> chosen = segmentsToMerge(index, m_options.mergeFactor);
+        const vector<size_t> chosen = segmentsToMerge(index, m_options.mergeFactor, m_options.maxMergedDocs);
         if (chosen.empty()) break;
         mergeSegments(m_base, segments, chosen, stats);
         NindSegmentedIndex::writeManifest(m_base, segments);

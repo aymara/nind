@@ -556,6 +556,10 @@ The worst term: `worst_case_term.py`, one term in each of 350M documents (over t
 | each shard (87.5M documents) | 7–22 s | 5–6.3 GB |
 | merge | 22.2 s | 18.32 GB |
 
+Segments instead of merging (`bench/segments_search.py`, `bench/segments_update.py`;
+results and design in `docs/proposals/segments.md`): at 8.84M passages without stopwords,
+an 8-shard build takes 25 s (46 s direct), +88k documents 2.6 s, top 10 identical.
+
 The merged term file takes 71 MB. The run was stopped under system memory pressure
 during `verify_index` (possibly a contributor: it read such a term twice as lists at
 the time; it reads flat now), so the read back and the search weren't measured: rerun it.

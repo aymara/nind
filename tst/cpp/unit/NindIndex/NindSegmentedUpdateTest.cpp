@@ -200,6 +200,87 @@ TEST_CASE("NindSegmentedUpdate.CostsWhatChanges") {
     CHECK_FALSE(deletes.read(NindSegmentedIndex::segmentBase(base, before[0]) + ".ninddeletes"));
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindSegmentedUpdate.SegmentsStayFewUnderSteadyUpdates") {
+    // however many commits: full segments (at least half the limit), and few below them in each
+    // tier; no merge beyond the limit
+    TestTempDir tmp;
+    const string base = tmp.file("index");
+    NindSegmentedUpdate::Options options;
+    options.mergeFactor = 3;
+    options.maxMergedDocs = 1000;
+    options.withLocalIndex = false;
+    uint64_t state = 13;
+    Documents live;
+    NindDocId next_id = 0;
+    unsigned int merges = 0;
+    for (unsigned int c = 0; c < 300; c++) {
+        NindSegmentedUpdate update(base, options);
+        for (unsigned int d = 0; d < 20; d++) {
+            live[next_id] = vector<string>(1, "w" + to_string(next(state) % 50));
+            update.addDocument(next_id, live[next_id]);
+            next_id++;
+        }
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        merges += stats.mergesNb;
+        CAPTURE(c);
+        //(2 N / limit full ones; below half the limit, 7 tiers of less than the factor each)
+        REQUIRE_LE(stats.segmentsNb, 2 * live.size() / 1000 + 3 * 7);
+    }
+    CHECK_GE(merges, 50u);
+    const NindSegmentedIndex index(base);
+    CHECK_EQ(live.size(), index.docsNb());
+    const vector<NindSegmentedIndex::SegmentInfo> segments = index.segments();
+    unsigned int full = 0;
+    for (size_t s = 0; s < segments.size(); s++) {
+        CHECK_LE(segments[s].docsNb, 1000u);
+        if (segments[s].docsNb >= 500) full++;
+    }
+    CHECK_GE(full, 3u);
+    for (Documents::const_iterator d = live.begin(); d != live.end(); d++) REQUIRE(index.contains(d->first));
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindSegmentedUpdate.LargeSegmentsAreNotMerged") {
+    // 6 segments of 30 documents (a tier of 25..124), factor 5, limit 50: each of them full
+    TestTempDir tmp;
+    const string base = tmp.file("index");
+    uint64_t state = 9;
+    NindSegmentedUpdate::Options options;
+    options.mergeFactor = 0;
+    for (unsigned int s = 0; s < 6; s++) {
+        NindSegmentedUpdate update(base, options);
+        for (unsigned int d = 0; d < 30; d++) update.addDocument(100 * s + d, randomDocument(state));
+        update.commit();
+    }
+    options.mergeFactor = 5;
+    options.maxMergedDocs = 50;
+    {
+        NindSegmentedUpdate update(base, options);
+        update.addDocument(1000, randomDocument(state));
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_EQ(0u, stats.mergesNb);
+        CHECK_EQ(7u, stats.segmentsNb);
+    }
+    // but a segment over half deleted is rewritten, whatever its size
+    {
+        NindSegmentedUpdate update(base, options);
+        for (unsigned int d = 0; d < 20; d++) update.removeDocument(d);
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_EQ(1u, stats.mergesNb);
+        CHECK_EQ(10u, stats.mergedDocsNb);
+        CHECK_EQ(7u, stats.segmentsNb);
+    }
+    // without limit, the tier is merged
+    options.maxMergedDocs = 0;
+    {
+        NindSegmentedUpdate update(base, options);
+        update.addDocument(1001, randomDocument(state));
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_GE(stats.mergesNb, 1u);
+        CHECK_LT(stats.segmentsNb, 8u);
+    }
+    CHECK_EQ(6u * 30 - 20 + 2, NindSegmentedIndex(base).docsNb());
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindSegmentedUpdate.RemovingEverythingLeavesAnEmptyIndex") {
     TestTempDir tmp;
     const string base = tmp.file("index");
