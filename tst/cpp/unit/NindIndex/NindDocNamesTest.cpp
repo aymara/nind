@@ -23,6 +23,79 @@ void checkAll(const NindDocNames &names, const vector<NindDocId> &idents, const 
 }
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.MergeWritesTheSameFileAsWrite") {
+    TestTempDir tmp;
+    // consecutive documents (their idents not stored), then with gaps; an empty name; an empty
+    // shard; names sorted across shards; shards listed out of order
+    const vector<vector<NindDocId> > allIdents = {{10, 11, 12, 13, 14, 15}, {10, 11, 40, 41, 77, 1ull << 40}};
+    for (size_t variant = 0; variant < allIdents.size(); variant++) {
+        CAPTURE(variant);
+        const vector<NindDocId> &idents = allIdents[variant];
+        const vector<string> names = {"m", "", "a", "z", "ab", "\xc3\xa9t\xc3\xa9"};
+        const string prefix = "v" + to_string(variant) + "-";
+        NindDocNames::write(tmp.file(prefix + "all"), idents, names);
+        NindDocNames::write(tmp.file(prefix + "s0"), vector<NindDocId>(idents.begin(), idents.begin() + 2),
+                            vector<string>(names.begin(), names.begin() + 2));
+        NindDocNames::write(tmp.file(prefix + "s1"), vector<NindDocId>(), vector<string>());
+        NindDocNames::write(tmp.file(prefix + "s2"), vector<NindDocId>(idents.begin() + 2, idents.end()),
+                            vector<string>(names.begin() + 2, names.end()));
+        NindDocNames::merge({tmp.file(prefix + "s2"), tmp.file(prefix + "s1"), tmp.file(prefix + "s0")}, tmp.file(prefix + "merged"));
+        CHECK(readFileBytes(tmp.file(prefix + "merged")) == readFileBytes(tmp.file(prefix + "all")));
+    }
+    NindDocNames::merge({tmp.file("v0-s1")}, tmp.file("empty"));
+    CHECK_EQ(0u, NindDocNames(tmp.file("empty")).size());
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.MergeInterleavedShardsWithoutDeletedDocuments") {
+    TestTempDir tmp;
+    // a replaced document: its old id, in a newer shard, the old one deleted; names moved between shards
+    NindDocNames::write(tmp.file("old"), {1, 2, 3, 7}, {"a", "same", "c", "g"});
+    NindDocNames::write(tmp.file("new"), {2, 5, 8}, {"same", "e", "h"});
+    NindDocNames::merge({tmp.file("old"), tmp.file("new")}, {{2}, {}}, tmp.file("merged"));
+    NindDocNames::write(tmp.file("expected"), {1, 3, 7, 2, 5, 8}, {"a", "c", "g", "same", "e", "h"});
+    CHECK(readFileBytes(tmp.file("merged")) == readFileBytes(tmp.file("expected")));
+    // every document deleted
+    NindDocNames::merge({tmp.file("new")}, {{2, 5, 8}}, tmp.file("none"));
+    CHECK_EQ(0u, NindDocNames(tmp.file("none")).size());
+    // a list per shard
+    CHECK_THROWS_AS(NindDocNames::merge({tmp.file("new")}, {{}, {}}, tmp.file("wrong")), std::invalid_argument);
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.MergeRefusesOverlapsAndDuplicatesAndRemovesItsFile") {
+    TestTempDir tmp;
+    NindDocNames::write(tmp.file("a"), {1, 2}, {"a", "b"});
+    NindDocNames::write(tmp.file("overlap"), {2, 3}, {"c", "d"});
+    NindDocNames::write(tmp.file("duplicate"), {3, 4}, {"d", "b"});
+    CHECK_THROWS_AS(NindDocNames::merge({tmp.file("a"), tmp.file("overlap")}, tmp.file("m1")), std::invalid_argument);
+    CHECK(readFileBytes(tmp.file("m1")).empty());
+    CHECK_THROWS_AS(NindDocNames::merge({tmp.file("a"), tmp.file("duplicate")}, tmp.file("m2")), std::invalid_argument);
+    CHECK_THROWS_AS(NindDocNames(tmp.file("m2")), OpenFileException);
+    // an existing target isn't overwritten
+    CHECK_THROWS_AS(NindDocNames::merge({tmp.file("a")}, tmp.file("overlap")), OpenFileException);
+    CHECK_EQ(2u, NindDocNames(tmp.file("overlap")).size());
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.WideOffsetsAreRead") {
+    // NINDDN03 is written only for names over 4 GiB: built by hand here
+    TestTempDir tmp;
+    NindDocNames::write(tmp.file("narrow"), {5, 6}, {"bb", "a"});
+    const vector<unsigned char> narrow = readFileBytes(tmp.file("narrow"));
+    vector<unsigned char> wide(narrow.begin(), narrow.begin() + 24);
+    wide[7] = '3';
+    for (size_t i = 0; i < 3; i++) {
+        wide.insert(wide.end(), narrow.begin() + 24 + 4 * i, narrow.begin() + 28 + 4 * i);
+        wide.insert(wide.end(), 4, 0);
+    }
+    wide.insert(wide.end(), narrow.begin() + 36, narrow.end());
+    writeFileBytes(tmp.file("wide"), wide);
+    checkAll(NindDocNames(tmp.file("wide")), {5, 6}, {"bb", "a"});
+    // an offset beyond 32 bits, as read from a corrupt file: refused, not wrapped
+    vector<unsigned char> corrupt = wide;
+    corrupt[24 + 8 * 2 + 4] = 1;
+    writeFileBytes(tmp.file("corrupt"), corrupt);
+    CHECK_THROWS_AS(NindDocNames(tmp.file("corrupt")), FormatFileException);
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindDocNamesTest.ConsecutiveIdentsRoundTrip") {
     TestTempDir tmp;
     const string file = tmp.file("dense.ninddocnames");

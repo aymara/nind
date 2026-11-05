@@ -21,6 +21,7 @@
 #include "NindTermIndex.h"
 #include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -72,6 +73,45 @@ public:
                                                       const long topK,
                                                       const bool prune,
                                                       const unsigned int threads = 1) const;
+
+    /**\brief What a search takes from the corpus around this scorer's documents when they are one
+    * segment of an index (see NindSegmentedIndex); the scorer itself stays the same whatever the
+    * rest of the index and the segment's deletions */
+    struct SearchContext {
+        uint64_t docsNb;                //the corpus's documents (N of the idf)
+        double avgDocLength;            //their average length
+        //per term of the search, in the order of termIds: its document frequency in the corpus
+        const std::vector<uint64_t> *documentFrequencies;
+        //one bit per position: the documents not to return; null: none
+        const std::vector<uint64_t> *deleted;
+        //a lower bound of the k-th best score, raised and shared by the segments of a search; null: none
+        std::atomic<double> *threshold;
+        SearchContext(): docsNb(0), avgDocLength(0), documentFrequencies(0), deleted(0), threshold(0) {}
+    };
+
+    /**\brief search() with its corpus given by context (see SearchContext); same arguments */
+    std::vector<std::pair<NindDocId, double> > search(const NindTermIndex &termIndex,
+                                                      const std::vector<unsigned int> &termIds,
+                                                      const double k1,
+                                                      const double b,
+                                                      const long topK,
+                                                      const bool prune,
+                                                      const unsigned int threads,
+                                                      const SearchContext &context) const;
+
+    /**\brief A term's documents in termIndex, every category counted (its directory only, cached) */
+    uint64_t documentFrequency(const NindTermIndex &termIndex,
+                               const unsigned int termId,
+                               NindReadBuffer &buffer) const;
+
+    /**\brief The position of a document among those given to the constructor (docsNb(): none) */
+    size_t position(const NindDocId docId) const;
+
+    /**\brief The document at a position */
+    NindDocId docIdAt(const size_t position) const;
+
+    /**\brief The length of the document at a position */
+    uint32_t lengthAt(const size_t position) const;
 
     /**\brief Number of documents of the corpus */
     size_t docsNb() const;

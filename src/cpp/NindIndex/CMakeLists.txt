@@ -23,6 +23,11 @@ SET(NindIndex_LIB_SRCS
   NindIndexUpdate.cpp
   NindBm25Scorer.h
   NindBm25Scorer.cpp
+  NindSegmentedIndex.h
+  NindSegmentedIndex.cpp
+  NindSegmentedUpdate.h
+  NindSegmentedUpdate.cpp
+  NindThreadPool.h
   NindIndexBuilder.h
   NindIndexBuilder.cpp
 )
@@ -35,4 +40,4 @@ set_target_properties(NindIndex PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSION
 install(TARGETS NindIndex DESTINATION lib)
 
 ########### install files ###############
-install(FILES NindIndex.h NindLexiconIndex.h NindTermIndex.h NindLocalIndex.h NindIndexMerge.h NindTokenizer.h NindDocNames.h NindIndexVerify.h NindIndexUpdate.h NindBm25Scorer.h NindIndexBuilder.h DESTINATION include/NindIndex)
+install(FILES NindIndex.h NindLexiconIndex.h NindTermIndex.h NindLocalIndex.h NindDocIdMap.h NindSegmentedIndex.h NindSegmentedUpdate.h NindIndexMerge.h NindTokenizer.h NindDocNames.h NindIndexVerify.h NindIndexUpdate.h NindBm25Scorer.h NindIndexBuilder.h DESTINATION include/NindIndex)

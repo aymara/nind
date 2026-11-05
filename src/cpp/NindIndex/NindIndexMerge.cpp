@@ -97,6 +97,8 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
 {
     const unsigned int shardsNb = m_shardNames.size();
     const unsigned int specificsNumber = getTermSpecificsNumber();
+    if (!m_options.deletedDocuments.empty() && m_options.deletedDocuments.size() != shardsNb)
+        throw NindIndexException("NindIndexMerge::merge deleted documents not per shard");
     Stats stats;
     stats.shardsNb = shardsNb;
 
@@ -149,20 +151,44 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
 
     //les documents de tous les shards, vejrifiejs disjoints avant toute ejcriture
     //(sans index local, un document dans deux shards est vu dans le fichier inverse)
+    //les shards d'intervalles d'identifiants disjoints (le cas d'un dejcoupage en parties contiguës) :
+    //leurs documents dans l'ordre des shards par premier document, sans tri global
     vector<unique_ptr<NindLocalIndex> > shardLocalIndexes;
-    vector<pair<NindDocId, unsigned int> > documents;          //(identifiant externe, shard)
+    vector<vector<NindDocId> > shardDocuments(shardsNb);      //par ordre croissant (getDocIdents)
     for (unsigned int shard = 0; shard < shardsNb && withLocalIndex; shard++) {
         shardLocalIndexes.push_back(unique_ptr<NindLocalIndex>(
             new NindLocalIndex(m_shardNames[shard], false, shardIdentifications[shard])));
-        vector<NindDocId> docIdents;
-        shardLocalIndexes.back()->getDocIdents(docIdents);
-        for (size_t i = 0; i < docIdents.size(); i++) documents.push_back(make_pair(docIdents[i], shard));
+        shardLocalIndexes.back()->getDocIdents(shardDocuments[shard]);
+        if (!m_options.deletedDocuments.empty() && !m_options.deletedDocuments[shard].empty()) {
+            const vector<NindDocId> &deleted = m_options.deletedDocuments[shard];
+            vector<NindDocId> &documents = shardDocuments[shard];
+            documents.erase(remove_if(documents.begin(), documents.end(), [&deleted](const NindDocId ident) {
+                return binary_search(deleted.begin(), deleted.end(), ident); }), documents.end());
+        }
     }
-    sort(documents.begin(), documents.end());
-    for (size_t i = 1; i < documents.size(); i++) {
-        if (documents[i].first == documents[i - 1].first)
-            throw NindIndexException("NindIndexMerge::merge document in several shards : " + to_string(documents[i].first));
+    vector<unsigned int> shardOrder;
+    for (unsigned int shard = 0; shard < shardsNb; shard++)
+        if (!shardDocuments[shard].empty()) shardOrder.push_back(shard);
+    sort(shardOrder.begin(), shardOrder.end(), [&shardDocuments](const unsigned int a, const unsigned int b) {
+        return shardDocuments[a].front() < shardDocuments[b].front(); });
+    bool disjointRanges = true;
+    for (size_t i = 1; i < shardOrder.size(); i++)
+        if (shardDocuments[shardOrder[i]].front() <= shardDocuments[shardOrder[i - 1]].back()) disjointRanges = false;
+    //sinon, (identifiant externe, shard) de tous les documents, trijs, vejrifiejs disjoints
+    vector<pair<NindDocId, unsigned int> > documents;
+    if (!disjointRanges) {
+        for (unsigned int shard = 0; shard < shardsNb; shard++) {
+            for (size_t i = 0; i < shardDocuments[shard].size(); i++) documents.push_back(make_pair(shardDocuments[shard][i], shard));
+            vector<NindDocId>().swap(shardDocuments[shard]);
+        }
+        sort(documents.begin(), documents.end());
+        for (size_t i = 1; i < documents.size(); i++) {
+            if (documents[i].first == documents[i - 1].first)
+                throw NindIndexException("NindIndexMerge::merge document in several shards : " + to_string(documents[i].first));
+        }
     }
+    size_t documentsNb = documents.size();
+    for (unsigned int shard = 0; shard < shardsNb; shard++) documentsNb += shardDocuments[shard].size();
 
     //2) le lexique fusionnej, dimensionnej pour l'union
     NindLexiconIndex lexicon(targetName, true, m_options.withRetrolexicon,
@@ -219,42 +245,91 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         NindTermIndex termIndex(targetName, true, identification, specificsNumber,
                                 m_options.termIndirectionBlocSize ? m_options.termIndirectionBlocSize : stats.wordsNb + 1);
         termIndex.setDocumentLengths(m_options.documentLengths);
+        vector<pair<NindDocId, unsigned int> >().swap(m_options.documentLengths);   //16 bytes per document: the writer has its copy
         termIndex.beginBulk();
+        //une catejgorie grammaticale du terme fusionnej : ses documents, tous shards confondus, ah plat
+        //(16 octets par document : un terme dans des centaines de millions de documents tient en mejmoire)
+        struct MergedCategory {
+            unsigned char cg;
+            uint64_t frequency;
+            vector<NindTermIndex::Document> documents;
+            bool sorted;                //documents dejjah en ordre croissant (shards d'intervalles ordonnejs)
+        };
+        vector<MergedCategory> byCg;    //par catejgorie croissante ; rejutilisej d'un terme ah l'autre
+        size_t categoriesNb = 0;
+        vector<NindTermIndex::Document> shardPostings;
+        vector<size_t> shardEnds;
+        vector<pair<unsigned char, unsigned int> > shardCategories;
+        vector<NindTermIndex::CategoryPostings> categories;
         size_t first = 0;
         while (first < shardTerms.size()) {
             const unsigned int mergedIdent = shardTerms[first].mergedIdent;
-            //une catejgorie grammaticale -> ses documents, tous shards confondus
-            map<unsigned char, NindTermIndex::TermCG> byCg;
+            categoriesNb = 0;
             size_t last = first;
             for (; last < shardTerms.size() && shardTerms[last].mergedIdent == mergedIdent; last++) {
-                list<NindTermIndex::TermCG> shardDef;
-                if (!shardTermIndexes[shardTerms[last].shard]->getTermDef(shardTerms[last].shardIdent, shardDef)) continue;
-                for (list<NindTermIndex::TermCG>::iterator it = shardDef.begin(); it != shardDef.end(); it++) {
-                    NindTermIndex::TermCG &termCG = byCg[(*it).cg];
-                    termCG.cg = (*it).cg;
-                    termCG.frequency += (*it).frequency;
-                    termCG.documents.splice(termCG.documents.end(), (*it).documents);
+                if (!shardTermIndexes[shardTerms[last].shard]->getTermPostings(shardTerms[last].shardIdent,
+                                                                               shardPostings, shardEnds, shardCategories)) continue;
+                for (size_t c = 0, begin = 0; c < shardCategories.size(); begin = shardEnds[c], c++) {
+                    const unsigned char cg = shardCategories[c].first;
+                    size_t k = 0;
+                    while (k < categoriesNb && byCg[k].cg < cg) k++;
+                    if (k == categoriesNb || byCg[k].cg != cg) {
+                        //une nouvelle catejgorie, insejreje ah sa place (les vecteurs sont rejutilisejs)
+                        if (categoriesNb == byCg.size()) byCg.push_back(MergedCategory());
+                        for (size_t j = categoriesNb; j > k; j--) swap(byCg[j], byCg[j - 1]);
+                        categoriesNb++;
+                        byCg[k].cg = cg;
+                        byCg[k].frequency = 0;
+                        byCg[k].documents.clear();
+                        byCg[k].sorted = true;
+                    }
+                    MergedCategory &category = byCg[k];
+                    size_t end = shardEnds[c];
+                    const vector<NindDocId> *deleted = m_options.deletedDocuments.empty() ? 0 : &m_options.deletedDocuments[shardTerms[last].shard];
+                    if (deleted != 0 && !deleted->empty()) {
+                        //this category's live documents, in place; its frequency from them
+                        size_t kept = begin;
+                        uint64_t frequency = 0;
+                        for (size_t d = begin; d < end; d++) {
+                            if (binary_search(deleted->begin(), deleted->end(), shardPostings[d].ident)) continue;
+                            frequency += shardPostings[d].frequency;
+                            shardPostings[kept++] = shardPostings[d];
+                        }
+                        category.frequency += frequency;
+                        end = kept;
+                    }
+                    else category.frequency += shardCategories[c].second;
+                    if (begin == end) continue;
+                    if (!category.documents.empty() && shardPostings[begin].ident <= category.documents.back().ident)
+                        category.sorted = false;
+                    category.documents.insert(category.documents.end(), shardPostings.begin() + begin, shardPostings.begin() + end);
                 }
             }
             first = last;
-            if (byCg.empty()) continue;
-            list<NindTermIndex::TermCG> termDef;
-            for (map<unsigned char, NindTermIndex::TermCG>::iterator it = byCg.begin(); it != byCg.end(); it++) {
-                list<NindTermIndex::Document> &termDocuments = (*it).second.documents;
-                termDocuments.sort(documentInfejrieur);
-                for (list<NindTermIndex::Document>::const_iterator itdoc = termDocuments.begin(); itdoc != termDocuments.end(); itdoc++) {
-                    list<NindTermIndex::Document>::const_iterator itnext = itdoc;
+            if (categoriesNb == 0) continue;
+            categories.clear();
+            for (size_t k = 0; k < categoriesNb; k++) {
+                MergedCategory &category = byCg[k];
+                vector<NindTermIndex::Document> &documents = category.documents;
+                if (documents.empty()) continue;        //(all its documents deleted)
+                if (!category.sorted) {
+                    sort(documents.begin(), documents.end(), documentInfejrieur);
                     //documents disjoints entre shards : un doublon vient d'un fichier inverse incohejrent
-                    if (++itnext != termDocuments.end() && (*itnext).ident == (*itdoc).ident)
-                        throw NindIndexException("NindIndexMerge::merge document twice in a term : " + to_string((*itdoc).ident));
+                    for (size_t d = 1; d < documents.size(); d++) {
+                        if (documents[d].ident == documents[d - 1].ident)
+                            throw NindIndexException("NindIndexMerge::merge document twice in a term : " + to_string(documents[d].ident));
+                    }
                 }
-                termDef.push_back(NindTermIndex::TermCG());
-                swap(termDef.back(), (*it).second);
+                if (category.frequency > 0xFFFFFFFFull)
+                    throw NindIndexException("NindIndexMerge::merge term frequency over 32 bits : " + to_string(mergedIdent));
+                categories.push_back(NindTermIndex::CategoryPostings(category.cg, (unsigned int)category.frequency,
+                                                                     documents.data(), documents.size()));
             }
+            if (categories.empty()) continue;
             list<string> components;
             getUnionComponents(mergedToUnion[mergedIdent], components);
-            countTerm(components, termDef);
-            termIndex.setTermDef(mergedIdent, termDef, identification, getTermSpecifics());
+            countTerm(components, categories);
+            termIndex.setTermPostings(mergedIdent, categories, identification, getTermSpecifics());
             stats.termsNb++;
         }
         //les spejcifiques dejfinitifs, une fois tous les termes comptejs
@@ -265,20 +340,30 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
     //4) les index locaux : chaque document est recopiej avec ses termes renumejrotejs
     if (withLocalIndex) {
         NindLocalIndex localIndex(targetName, true, identification,
-                                  m_options.localIndirectionBlocSize ? m_options.localIndirectionBlocSize : documents.size() + 1);
+                                  m_options.localIndirectionBlocSize ? m_options.localIndirectionBlocSize : documentsNb + 1);
         localIndex.beginBulk();
-        for (size_t i = 0; i < documents.size(); i++) {
-            const unsigned int shard = documents[i].second;
+        list<NindLocalIndex::Term> localDef;
+        //un document du shard, recopiej
+        auto copyDocument = [&](const NindDocId docIdent, const unsigned int shard) {
             const vector<unsigned int> &toMerged = shardToMerged[shard];
-            list<NindLocalIndex::Term> localDef;
-            if (!shardLocalIndexes[shard]->getLocalDef(documents[i].first, localDef)) continue;
+            if (!shardLocalIndexes[shard]->getLocalDef(docIdent, localDef)) return;
             for (list<NindLocalIndex::Term>::iterator it = localDef.begin(); it != localDef.end(); it++) {
                 if ((*it).term >= toMerged.size() || toMerged[(*it).term] == 0)
                     throw NindIndexException("NindIndexMerge::merge term not in lexicon : " + m_shardNames[shard]);
                 (*it).term = toMerged[(*it).term];
             }
-            localIndex.setLocalDef(documents[i].first, localDef, identification);
+            localIndex.setLocalDef(docIdent, localDef, identification);
             stats.docsNb++;
+        };
+        //par identifiant externe croissant
+        if (disjointRanges) {
+            for (size_t i = 0; i < shardOrder.size(); i++) {
+                const vector<NindDocId> &docIdents = shardDocuments[shardOrder[i]];
+                for (size_t d = 0; d < docIdents.size(); d++) copyDocument(docIdents[d], shardOrder[i]);
+            }
+        }
+        else {
+            for (size_t i = 0; i < documents.size(); i++) copyDocument(documents[i].first, documents[i].second);
         }
         localIndex.endBulk();
     }
@@ -293,7 +378,7 @@ unsigned int NindIndexMerge::getTermSpecificsNumber() const
 ////////////////////////////////////////////////////////////
 //brief called for every term written into the merged term index */
 void NindIndexMerge::countTerm(const list<string> &,
-                               const list<NindTermIndex::TermCG> &)
+                               const vector<NindTermIndex::CategoryPostings> &)
 {
 }
 ////////////////////////////////////////////////////////////

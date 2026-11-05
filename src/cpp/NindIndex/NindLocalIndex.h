@@ -22,6 +22,7 @@
 #define NindLocalIndex_H
 ////////////////////////////////////////////////////////////
 #include "NindIndex.h"
+#include "NindDocIdMap.h"
 #include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
@@ -81,7 +82,15 @@ public:
                      std::list<struct Term> &localDef,
                      NindReadBuffer &buffer) const;
 
-    /**\brief Return the length of a full document in term of terms 
+    /**\brief Thread-safe (const) getLocalDef of a document expected at an internal id: a segment's
+    * documents written by increasing id are at internal ids 1, 2...; then the document's id map
+    * isn't loaded. Otherwise (not there): as getLocalDef */
+    bool getLocalDefAt(const NindDocId ident,
+                       const unsigned int expectedInternalIdent,
+                       std::list<struct Term> &localDef,
+                       NindReadBuffer &buffer) const;
+
+    /**\brief Return the length of a full document in term of terms
     *\param ident ident of doc
     *\param localLength the resulting length
     *\return true if doc was found, false otherwise */
@@ -139,7 +148,7 @@ private:
    
     //map de traduction des identifiants externes vers les identifiants internes
     //(mutable : complejteje par les lecteurs, sous m_docIdMutex, lectures partagejes, mises ah jour exclusives)
-    mutable std::map<NindDocId, unsigned int> m_docIdTradExtInt;
+    mutable NindDocIdMap m_docIdTradExtInt;
     //max des identifiants internes, pour la numejrotation
     mutable unsigned int m_currIdent;
     mutable std::shared_timed_mutex m_docIdMutex;

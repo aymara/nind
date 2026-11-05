@@ -83,9 +83,12 @@ NindLocalIndex::NindLocalIndex(const std::string &fileNameExtensionLess,
 {
     //lit le plus grand identifiant interne utilisej
     getSpecifics();
-    //initialise la map de traduction des id externes -> id internes
-    fillDocIdTradExtInt(1, m_file.getInt4());
-}        
+    const unsigned int maxIdentifiantInterne = m_file.getInt4();
+    //initialise la map de traduction des id externes -> id internes : tout de suite pour un ejcrivain,
+    //pour un lecteur au premier document demandej (une lecture par document : 7 s pour 8,8 M documents,
+    //inutiles ah qui n'interroge pas l'index local)
+    if (m_isWriter) fillDocIdTradExtInt(1, maxIdentifiantInterne);
+}
 ////////////////////////////////////////////////////////////
 NindLocalIndex::~NindLocalIndex()
 {
@@ -121,6 +124,26 @@ bool NindLocalIndex::getLocalDef(const NindDocId ident,
     if (!getDefinitionAt(identInt, buffer)) return false;
     decodeLocalDef(ident, identInt, buffer, localDef);
     return true;
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) getLocalDef of a document expected at an internal id (see the header)
+bool NindLocalIndex::getLocalDefAt(const NindDocId ident,
+                                   const unsigned int expectedInternalIdent,
+                                   list<struct Term> &localDef,
+                                   NindReadBuffer &buffer) const
+{
+    localDef.clear();
+    try {
+        if (getDefinitionAt(expectedInternalIdent, buffer)) {
+            decodeLocalDef(ident, expectedInternalIdent, buffer, localDef);
+            return true;
+        }
+    }
+    catch (const NindLocalIndexException &) {
+        //another document there (a real corruption shows up below, read by its id)
+        localDef.clear();
+    }
+    return getLocalDef(ident, localDef, buffer);
 }
 ////////////////////////////////////////////////////////////
 //dejcode la dejfinition d'un document lue dans in
@@ -243,22 +266,22 @@ void NindLocalIndex::setLocalDef(const NindDocId ident,
     NindCriticalSection criticalSection(m_file);
     std::unique_lock<std::shared_timed_mutex> lock(m_docIdMutex);
     //est-ce que ce document est dejah connu ?
-    map<NindDocId, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
+    unsigned int known = m_docIdTradExtInt.find(ident);
     //si non, on le creje
-    if (itident == m_docIdTradExtInt.end()) {
+    if (known == 0) {
         //sauf si c'est pour un effacement, auquel cas, rien n'est fait
         if (localDef.size() == 0) return;
-        m_docIdTradExtInt[ident] = ++m_currIdent;
-        itident = m_docIdTradExtInt.find(ident);
+        known = ++m_currIdent;
+        m_docIdTradExtInt.set(ident, known);
     }
-    const unsigned int identInt = (*itident).second;
+    const unsigned int identInt = known;
     //1) verifie que l'identInt n'est pas en dehors du dernier bloc d'indirection
     //il faut le faire maintenant parce que le buffer d'ecriture est unique
     checkExtendIndirection(identInt, fileIdentification);
     //effacement ?
     if (localDef.size() == 0) {
         //efface dans la map de traduction des ids
-        m_docIdTradExtInt.erase(itident);
+        m_docIdTradExtInt.erase(ident);
         //efface dans le fichier en l'ejcrivant vide
         m_file.createBuffer(getSpecificsAndIdentificationSize()); 
         //ejcrit les spejcifiques et l'identification
@@ -336,8 +359,7 @@ void NindLocalIndex::getDocIdents(vector<NindDocId> &docIdents)
         fillDocIdTradExtInt(m_currIdent + 1, m_file.getInt4());
     }
     docIdents.reserve(m_docIdTradExtInt.size());
-    for (map<NindDocId, unsigned int>::const_iterator it = m_docIdTradExtInt.begin(); it != m_docIdTradExtInt.end(); it++)
-        docIdents.push_back((*it).first);
+    m_docIdTradExtInt.forEach([&docIdents](const NindDocId external, const unsigned int) { docIdents.push_back(external); });
 }
 ////////////////////////////////////////////////////////////
 //brief List the (external, internal) idents of all documents of the collection
@@ -349,7 +371,9 @@ void NindLocalIndex::getDocIdentPairs(vector<pair<NindDocId, unsigned int> > &do
         getSpecifics();
         fillDocIdTradExtInt(m_currIdent + 1, m_file.getInt4());
     }
-    docIdents.assign(m_docIdTradExtInt.begin(), m_docIdTradExtInt.end());
+    docIdents.reserve(m_docIdTradExtInt.size());
+    m_docIdTradExtInt.forEach([&docIdents](const NindDocId external, const unsigned int internal) {
+        docIdents.push_back(make_pair(external, internal)); });
 }
 ////////////////////////////////////////////////////////////
 //brief write specifics footer and identification into write buffer
@@ -368,9 +392,9 @@ unsigned int NindLocalIndex::getInternalIdent(const NindDocId ident)
 {
     std::unique_lock<std::shared_timed_mutex> lock(m_docIdMutex);
     //cherche l'identifiant dans la map courante
-    map<NindDocId, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
+    unsigned int known = m_docIdTradExtInt.find(ident);
     //si l'identifiant externe est connu, retourne l'identifiant interne
-    if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+    if (known != 0) return known;
     //l'identifiant externe n'est pas connu
     //lit le plus grand identifiant interne utilisej
     getSpecifics();
@@ -378,9 +402,9 @@ unsigned int NindLocalIndex::getInternalIdent(const NindDocId ident)
     //initialise la map de traduction des id externes -> id internes uniquement pour les nouveaux docs
     fillDocIdTradExtInt(m_currIdent +1, m_file.getInt4());
     //cherche l'identifiant dans la map courante
-    itident = m_docIdTradExtInt.find(ident);
+    known = m_docIdTradExtInt.find(ident);
     //si l'identifiant externe est connu, retourne l'identifiant interne
-    if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+    if (known != 0) return known;
     //sinon retourne 0
     return 0;
 }
@@ -407,7 +431,7 @@ void NindLocalIndex::fillDocIdTradExtInt(const unsigned int intIdMin,
         if (identDoc != ident) 
             throw NindLocalIndexException("NindLocalIndex::fillDocIdTradExtInt B : " + m_fileName);
         const NindDocId identExt = getExternalDocId(m_file.inBuffer());       //<identifiantExterne>
-        m_docIdTradExtInt[identExt] = identDoc;
+        m_docIdTradExtInt.set(identExt, identDoc);
         m_currIdent = identDoc;
     }
 }
@@ -418,19 +442,19 @@ unsigned int NindLocalIndex::getInternalIdentAt(const NindDocId ident,
 {
     {
         std::shared_lock<std::shared_timed_mutex> lock(m_docIdMutex);
-        map<NindDocId, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
-        if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+        unsigned int known = m_docIdTradExtInt.find(ident);
+        if (known != 0) return known;
     }
     //inconnu : complehte la map avec les documents ajoutejs depuis (un seul ah la fois)
     std::unique_lock<std::shared_timed_mutex> lock(m_docIdMutex);
-    map<NindDocId, unsigned int>::const_iterator itident = m_docIdTradExtInt.find(ident);
-    if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+    unsigned int known = m_docIdTradExtInt.find(ident);
+    if (known != 0) return known;
     //<spejcifique> ::= <maxIdentifiantInterne> <nombreDocuments>
     getSpecificsAt(buffer);
     const unsigned int maxIdentifiantInterne = buffer.getInt4();
     fillDocIdTradExtIntAt(m_currIdent + 1, maxIdentifiantInterne, buffer);
-    itident = m_docIdTradExtInt.find(ident);
-    if (itident != m_docIdTradExtInt.end()) return (*itident).second;
+    known = m_docIdTradExtInt.find(ident);
+    if (known != 0) return known;
     return 0;
 }
 ////////////////////////////////////////////////////////////
@@ -453,7 +477,7 @@ void NindLocalIndex::fillDocIdTradExtIntAt(const unsigned int intIdMin,
         if (identDoc != ident)
             throw NindLocalIndexException("NindLocalIndex::fillDocIdTradExtIntAt B : " + m_fileName);
         const NindDocId identExt = getExternalDocId(buffer);
-        m_docIdTradExtInt[identExt] = identDoc;
+        m_docIdTradExtInt.set(identExt, identDoc);
         m_currIdent = identDoc;
     }
 }

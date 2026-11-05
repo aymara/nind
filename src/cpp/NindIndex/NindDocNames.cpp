@@ -17,7 +17,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
+#include <utility>
 #include <sys/stat.h>
 using namespace latecon::nindex;
 using namespace std;
@@ -26,6 +28,8 @@ namespace {
 //NINDDN01: 4-byte document idents (read only); NINDDN02: 8-byte (64-bit NindDocId), written
 const char MAGIC_V1[8] = {'N', 'I', 'N', 'D', 'D', 'N', '0', '1'};
 const char MAGIC_V2[8] = {'N', 'I', 'N', 'D', 'D', 'N', '0', '2'};
+//NINDDN03: NINDDN02 with 8-byte offsets, written only when the names take over 4 GiB
+const char MAGIC_V3[8] = {'N', 'I', 'N', 'D', 'D', 'N', '0', '3'};
 //<magic> <flags> <nombre> <premierIdent>
 const size_t HEADER_SIZE_V1 = 20;
 const size_t HEADER_SIZE_V2 = 24;
@@ -38,6 +42,11 @@ void put4(vector<unsigned char> &bytes, const uint32_t value)
 void put8(vector<unsigned char> &bytes, const uint64_t value)
 {
     for (int i = 0; i < 8; i++) bytes.push_back((unsigned char)(value >> (8 * i)));
+}
+void putOffset(vector<unsigned char> &bytes, const uint64_t value, const bool wide)
+{
+    if (wide) put8(bytes, value);
+    else put4(bytes, (uint32_t)value);
 }
 
 struct NameLess {
@@ -80,17 +89,20 @@ void NindDocNames::write(const string &fileName,
     }
     const bool dense = count == 0 || sortedIdents.back() - sortedIdents.front() == (uint64_t)count - 1;
     //the file (NINDDN02: 8-byte idents)
-    vector<unsigned char> bytes(MAGIC_V2, MAGIC_V2 + sizeof(MAGIC_V2));
+    uint64_t namesBytes = 0;
+    for (uint32_t i = 0; i < count; i++) namesBytes += sortedNames[i].size();
+    const bool wide = namesBytes > 0xFFFFFFFFu;
+    const char *magic = wide ? MAGIC_V3 : MAGIC_V2;
+    vector<unsigned char> bytes(magic, magic + sizeof(MAGIC_V2));
     put4(bytes, dense ? 0 : FLAG_IDENTS);
     put4(bytes, count);
     put8(bytes, count ? sortedIdents.front() : 0);
     if (!dense) for (uint32_t i = 0; i < count; i++) put8(bytes, sortedIdents[i]);
     uint64_t offset = 0;
-    put4(bytes, 0);
+    putOffset(bytes, 0, wide);
     for (uint32_t i = 0; i < count; i++) {
         offset += sortedNames[i].size();
-        if (offset > 0xFFFFFFFFu) throw invalid_argument("NindDocNames::write: names too long together");
-        put4(bytes, (uint32_t)offset);
+        putOffset(bytes, offset, wide);
     }
     for (uint32_t i = 0; i < count; i++) put4(bytes, byName[i]);
     for (uint32_t i = 0; i < count; i++) bytes.insert(bytes.end(), sortedNames[i].begin(), sortedNames[i].end());
@@ -104,6 +116,158 @@ void NindDocNames::write(const string &fileName,
     }
 }
 ////////////////////////////////////////////////////////////
+//brief Merge the names files of shards into a new file
+void NindDocNames::merge(const vector<string> &shardFiles,
+                         const string &fileName)
+{
+    merge(shardFiles, vector<vector<NindDocId> >(), fileName);
+}
+////////////////////////////////////////////////////////////
+//brief Merge the names files of shards into a new file, without some of their documents
+void NindDocNames::merge(const vector<string> &shardFiles,
+                         const vector<vector<NindDocId> > &deleted,
+                         const string &fileName)
+{
+    if (!deleted.empty() && deleted.size() != shardFiles.size())
+        throw invalid_argument("NindDocNames::merge: as many lists of deleted documents as shards expected");
+    vector<unique_ptr<NindDocNames> > shards;
+    for (size_t s = 0; s < shardFiles.size(); s++) shards.push_back(unique_ptr<NindDocNames>(new NindDocNames(shardFiles[s])));
+    //the live documents' (ident, shard, rank in the shard), by increasing ident
+    struct Item { NindDocId ident; uint32_t shard, rank; };
+    vector<Item> items;
+    size_t total = 0;
+    for (size_t s = 0; s < shards.size(); s++) total += shards[s]->size();
+    items.reserve(total);
+    for (size_t s = 0; s < shards.size(); s++) {
+        for (size_t r = 0; r < shards[s]->size(); r++) {
+            const NindDocId ident = shards[s]->docIdentAt(r);
+            if (!deleted.empty() && binary_search(deleted[s].begin(), deleted[s].end(), ident)) continue;
+            Item item;
+            item.ident = ident;
+            item.shard = (uint32_t)s;
+            item.rank = (uint32_t)r;
+            items.push_back(item);
+        }
+    }
+    const auto byIdent = [](const Item &a, const Item &b) { return a.ident < b.ident; };
+    if (!is_sorted(items.begin(), items.end(), byIdent)) sort(items.begin(), items.end(), byIdent);
+    if (items.size() > 0xFFFFFFFFu) throw invalid_argument("NindDocNames::merge: too many documents");
+    uint64_t namesBytes = 0;
+    //rank in a shard -> rank in the merged file (a deleted document: NO_RANK)
+    const uint32_t NO_RANK = 0xFFFFFFFFu;
+    vector<vector<uint32_t> > mergedRanks(shards.size());
+    for (size_t s = 0; s < shards.size(); s++) mergedRanks[s].assign(shards[s]->size(), NO_RANK);
+    for (size_t i = 0; i < items.size(); i++) {
+        if (i > 0 && items[i].ident == items[i - 1].ident)
+            throw invalid_argument("NindDocNames::merge: document " + to_string(items[i].ident) + " in several shards");
+        mergedRanks[items[i].shard][items[i].rank] = (uint32_t)i;
+        namesBytes += shards[items[i].shard]->nameAt(items[i].rank).second;
+    }
+    const uint64_t count = items.size();
+    const NindDocId firstIdent = items.empty() ? 0 : items.front().ident;
+    const bool dense = items.empty() || items.back().ident - firstIdent == count - 1;
+    const bool wide = namesBytes > 0xFFFFFFFFu;
+
+    FILE *file = fopen(fileName.c_str(), "wbx");
+    if (file == 0) throw OpenFileException(fileName);
+    try {
+        vector<unsigned char> bytes;
+        const size_t FLUSH_BYTES = 1 << 20;
+        auto write = [&]() {
+            if (!bytes.empty() && fwrite(bytes.data(), 1, bytes.size(), file) != bytes.size()) throw WriteFileException(fileName);
+            bytes.clear();
+        };
+        const char *magic = wide ? MAGIC_V3 : MAGIC_V2;
+        bytes.assign(magic, magic + sizeof(MAGIC_V2));
+        put4(bytes, dense ? 0 : FLAG_IDENTS);
+        put4(bytes, (uint32_t)count);
+        put8(bytes, firstIdent);
+        //<idents>
+        for (size_t i = 0; i < items.size() && !dense; i++) {
+            put8(bytes, items[i].ident);
+            if (bytes.size() >= FLUSH_BYTES) write();
+        }
+        //<offsets>
+        putOffset(bytes, 0, wide);
+        uint64_t offset = 0;
+        for (size_t i = 0; i < items.size(); i++) {
+            offset += shards[items[i].shard]->nameAt(items[i].rank).second;
+            putOffset(bytes, offset, wide);
+            if (bytes.size() >= FLUSH_BYTES) write();
+        }
+        //<parNom>: the shards' name orders merged, a heap of (shard, place in its name order), each
+        //at a live document
+        const auto advance = [&](pair<uint32_t, uint32_t> &cursor) {
+            const NindDocNames &shard = *shards[cursor.first];
+            while (cursor.second < shard.size()
+                   && mergedRanks[cursor.first][shard.read4(shard.m_byNamePos + 4 * (size_t)cursor.second)] == NO_RANK) cursor.second++;
+            return cursor.second < shard.size();
+        };
+        const auto nameOf = [&shards](const pair<uint32_t, uint32_t> &cursor) {
+            const NindDocNames &shard = *shards[cursor.first];
+            return shard.nameAt(shard.read4(shard.m_byNamePos + 4 * (size_t)cursor.second));
+        };
+        //name of a > name of b: the smallest name at the heap's top
+        const auto greaterName = [&shards, &nameOf](const pair<uint32_t, uint32_t> &a, const pair<uint32_t, uint32_t> &b) {
+            const pair<size_t, size_t> nameA = nameOf(a), nameB = nameOf(b);
+            const int cmp = memcmp(shards[a.first]->m_bytes.data() + nameA.first, shards[b.first]->m_bytes.data() + nameB.first,
+                                   min(nameA.second, nameB.second));
+            return cmp != 0 ? cmp > 0 : nameA.second > nameB.second;
+        };
+        vector<pair<uint32_t, uint32_t> > heap;
+        for (uint32_t s = 0; s < shards.size(); s++) {
+            pair<uint32_t, uint32_t> cursor(s, 0);
+            if (advance(cursor)) heap.push_back(cursor);
+        }
+        make_heap(heap.begin(), heap.end(), greaterName);
+        bool hasPrevious = false;
+        pair<uint32_t, uint32_t> previous(0, 0);
+        while (!heap.empty()) {
+            pop_heap(heap.begin(), heap.end(), greaterName);
+            pair<uint32_t, uint32_t> cursor = heap.back();
+            //(within a shard, names are unique)
+            if (hasPrevious && previous.first != cursor.first && !greaterName(cursor, previous)) {
+                const pair<size_t, size_t> name = nameOf(cursor);
+                throw invalid_argument("NindDocNames::merge: duplicate document name: "
+                                       + string((const char *)shards[cursor.first]->m_bytes.data() + name.first, name.second));
+            }
+            const NindDocNames &shard = *shards[cursor.first];
+            put4(bytes, mergedRanks[cursor.first][shard.read4(shard.m_byNamePos + 4 * (size_t)cursor.second)]);
+            if (bytes.size() >= FLUSH_BYTES) write();
+            previous = cursor;
+            hasPrevious = true;
+            cursor.second++;
+            if (advance(cursor)) {
+                heap.back() = cursor;
+                push_heap(heap.begin(), heap.end(), greaterName);
+            }
+            else heap.pop_back();
+        }
+        //<noms>: runs of consecutive names of a shard written at once
+        write();
+        for (size_t i = 0; i < items.size(); ) {
+            const NindDocNames &shard = *shards[items[i].shard];
+            const size_t begin = shard.nameAt(items[i].rank).first;
+            size_t j = i + 1;
+            while (j < items.size() && items[j].shard == items[i].shard && items[j].rank == items[j - 1].rank + 1) j++;
+            const pair<size_t, size_t> lastName = shard.nameAt(items[j - 1].rank);
+            const size_t length = lastName.first + lastName.second - begin;
+            if (length != 0 && fwrite(shard.m_bytes.data() + begin, 1, length, file) != length)
+                throw WriteFileException(fileName);
+            i = j;
+        }
+    }
+    catch (...) {
+        fclose(file);
+        remove(fileName.c_str());
+        throw;
+    }
+    if (fclose(file) != 0) {
+        remove(fileName.c_str());
+        throw WriteFileException(fileName);
+    }
+}
+////////////////////////////////////////////////////////////
 //brief Read the names of an index
 NindDocNames::NindDocNames(const string &fileName):
     m_fileName(fileName),
@@ -112,6 +276,7 @@ NindDocNames::NindDocNames(const string &fileName):
     m_hasIdents(false),
     m_firstIdent(0),
     m_identWidth(8),
+    m_offsetWidth(4),
     m_identsPos(0), m_offsetsPos(0), m_byNamePos(0), m_namesPos(0)
 {
     FILE *file = fopen(fileName.c_str(), "rb");
@@ -128,7 +293,12 @@ NindDocNames::NindDocNames(const string &fileName):
     //nothing read from the file is trusted: every size is checked against the file's size
     if (m_bytes.size() < HEADER_SIZE_V1) throw FormatFileException(fileName);
     size_t headerSize;
-    if (memcmp(m_bytes.data(), MAGIC_V2, sizeof(MAGIC_V2)) == 0) {
+    if (memcmp(m_bytes.data(), MAGIC_V3, sizeof(MAGIC_V3)) == 0) {
+        m_identWidth = 8;
+        m_offsetWidth = 8;
+        headerSize = HEADER_SIZE_V2;
+    }
+    else if (memcmp(m_bytes.data(), MAGIC_V2, sizeof(MAGIC_V2)) == 0) {
         m_identWidth = 8;
         headerSize = HEADER_SIZE_V2;
     }
@@ -143,23 +313,23 @@ NindDocNames::NindDocNames(const string &fileName):
     m_hasIdents = (flags & FLAG_IDENTS) != 0;
     const uint64_t count = read4(12);
     m_firstIdent = readIdent(16);
-    //idents (if any): m_identWidth bytes each; offsets, parNom: 4 bytes each
-    const uint64_t arraysBytes = (m_hasIdents ? m_identWidth * count : 0) + 4 * (count + 1) + 4 * count;
+    //idents (if any): m_identWidth bytes each; offsets: m_offsetWidth; parNom: 4 bytes each
+    const uint64_t arraysBytes = (m_hasIdents ? m_identWidth * count : 0) + m_offsetWidth * (count + 1) + 4 * count;
     if (headerSize + arraysBytes > m_bytes.size()) throw FormatFileException(fileName);
     m_size = (size_t)count;
     m_identsPos = headerSize;
     m_offsetsPos = m_identsPos + (m_hasIdents ? m_identWidth * m_size : 0);
-    m_byNamePos = m_offsetsPos + 4 * (m_size + 1);
+    m_byNamePos = m_offsetsPos + m_offsetWidth * (m_size + 1);
     m_namesPos = m_byNamePos + 4 * m_size;
     const uint64_t maxIdent = (m_identWidth == 4) ? 0xFFFFFFFFull : ~(uint64_t)0;
     if (!m_hasIdents && m_size != 0 && (uint64_t)(m_size - 1) > maxIdent - m_firstIdent)
         throw FormatFileException(fileName);
     //offsets: from 0, increasing, the last one the end of the file
-    if (read4(m_offsetsPos) != 0) throw FormatFileException(fileName);
+    if (readOffset(m_offsetsPos) != 0) throw FormatFileException(fileName);
     for (size_t i = 1; i <= m_size; i++) {
-        if (read4(m_offsetsPos + 4 * i) < read4(m_offsetsPos + 4 * (i - 1))) throw FormatFileException(fileName);
+        if (readOffset(m_offsetsPos + m_offsetWidth * i) < readOffset(m_offsetsPos + m_offsetWidth * (i - 1))) throw FormatFileException(fileName);
     }
-    if (m_namesPos + (uint64_t)read4(m_offsetsPos + 4 * m_size) != m_bytes.size()) throw FormatFileException(fileName);
+    if (m_namesPos + readOffset(m_offsetsPos + m_offsetWidth * m_size) != m_bytes.size()) throw FormatFileException(fileName);
     //idents strictly increasing
     for (size_t i = 1; i < m_size && m_hasIdents; i++) {
         if (readIdent(m_identsPos + m_identWidth * i) <= readIdent(m_identsPos + m_identWidth * (i - 1)))
@@ -235,6 +405,15 @@ uint32_t NindDocNames::read4(const size_t offset) const
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 ////////////////////////////////////////////////////////////
+uint64_t NindDocNames::readOffset(const size_t offset) const
+{
+    if (m_offsetWidth == 4) return read4(offset);
+    const unsigned char *p = m_bytes.data() + offset;
+    uint64_t value = 0;
+    for (int i = 7; i >= 0; i--) value = (value << 8) | p[i];
+    return value;
+}
+////////////////////////////////////////////////////////////
 NindDocId NindDocNames::readIdent(const size_t offset) const
 {
     if (m_identWidth == 4) return read4(offset);
@@ -251,8 +430,8 @@ NindDocId NindDocNames::docIdentAt(const size_t rank) const
 ////////////////////////////////////////////////////////////
 pair<size_t, size_t> NindDocNames::nameAt(const size_t rank) const
 {
-    const size_t begin = read4(m_offsetsPos + 4 * rank);
-    const size_t end = read4(m_offsetsPos + 4 * (rank + 1));
+    const size_t begin = (size_t)readOffset(m_offsetsPos + m_offsetWidth * rank);
+    const size_t end = (size_t)readOffset(m_offsetsPos + m_offsetWidth * (rank + 1));
     return pair<size_t, size_t>(m_namesPos + begin, end - begin);
 }
 ////////////////////////////////////////////////////////////

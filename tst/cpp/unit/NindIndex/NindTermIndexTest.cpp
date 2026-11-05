@@ -1,6 +1,7 @@
 #include "NindIndex/NindTermIndex.h"
 #include "NindExceptions.h"
 #include "TestTempDir.h"
+#include "TestFileBytes.h"
 #include "doctest.h"
 #include <list>
 #include <vector>
@@ -115,6 +116,80 @@ TEST_CASE("NindTermIndexTest.DefinitionOver16MiBRoundTrips") {
     REQUIRE_EQ(4500000u, read.front().documents.size());
     CHECK_EQ(4499999ull * 900, read.front().documents.back().ident);
     CHECK_EQ(200u, read.front().documents.back().frequency);
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.SetTermPostingsWritesTheSameFileAsSetTermDef") {
+    // the flat writer (no list node per posting) and the list one: byte-identical files, for
+    // inline lists, lists of blocks, several categories, 64-bit gaps (the buffer's exact bound
+    // for bit-packed blocks: 64 bits per gap) and an erasure
+    TestTempDir tmp;
+    vector<vector<TermCG> > terms(5);
+    terms[0].push_back(TermCG(0, 5));
+    terms[0].back().documents.push_back(Document(7, 2));
+    terms[0].back().documents.push_back(Document(9, 3));
+    for (unsigned int c = 0; c < 2; c++) {
+        terms[1].push_back(TermCG(3 + c, 0));
+        for (unsigned int i = 0; i < 1000 + 300 * c; i++) {
+            terms[1].back().documents.push_back(Document(i * (2 + c) + c, 1 + i % 7));
+            terms[1].back().frequency += 1 + i % 7;
+        }
+    }
+    terms[2].push_back(TermCG(1, 0));
+    unsigned long long ident = 1;
+    for (unsigned int i = 0; i < 700; i++) {
+        terms[2].back().documents.push_back(Document(ident, i % 3 ? 1 : 1000000));
+        terms[2].back().frequency += i % 3 ? 1 : 1000000;
+        ident += (i % 5 == 0) ? (1ull << 52) + i : 1;
+    }
+    terms[3].push_back(TermCG(0, 1));
+    terms[3].back().documents.push_back(Document(4, 1));
+    // terms[4] stays empty: written after terms[3] at the same ident, it erases it
+    {
+        NindTermIndex index(tmp.file("list"), true, kNoCheck, 0, 8);
+        for (unsigned int t = 0; t < 4; t++)
+            index.setTermDef(t + 1, list<TermCG>(terms[t].begin(), terms[t].end()), kNoCheck, list<unsigned int>());
+        index.setTermDef(4, list<TermCG>(), kNoCheck, list<unsigned int>());
+    }
+    {
+        NindTermIndex index(tmp.file("flat"), true, kNoCheck, 0, 8);
+        vector<vector<Document> > documents;
+        for (unsigned int t = 0; t < 5; t++) {
+            vector<NindTermIndex::CategoryPostings> categories;
+            documents.assign(terms[t].size(), vector<Document>());
+            for (size_t c = 0; c < terms[t].size(); c++) {
+                documents[c].assign(terms[t][c].documents.begin(), terms[t][c].documents.end());
+                categories.push_back(NindTermIndex::CategoryPostings(terms[t][c].cg, terms[t][c].frequency,
+                                                                     documents[c].data(), documents[c].size()));
+            }
+            index.setTermPostings(t < 4 ? t + 1 : 4, categories, kNoCheck, list<unsigned int>());
+        }
+    }
+    CHECK(readFileBytes(tmp.file("flat") + ".nindtermindex") == readFileBytes(tmp.file("list") + ".nindtermindex"));
+
+    // the categories read back with the postings
+    NindTermIndex reader(tmp.file("flat"), false, kNoCheck, 0);
+    vector<Document> postings;
+    vector<size_t> categoryEnds;
+    vector<pair<unsigned char, unsigned int> > categories;
+    REQUIRE(reader.getTermPostings(2, postings, categoryEnds, categories));
+    REQUIRE_EQ(2u, categories.size());
+    CHECK_EQ(3, categories[0].first);
+    CHECK_EQ(terms[1][0].frequency, categories[0].second);
+    CHECK_EQ(4, categories[1].first);
+    CHECK_EQ(terms[1][1].frequency, categories[1].second);
+    CHECK_EQ(1000u, categoryEnds[0]);
+    CHECK_EQ(2300u, categoryEnds[1]);
+    REQUIRE(reader.getTermPostings(3, postings, categoryEnds, categories));
+    CHECK(vector<Document>(terms[2][0].documents.begin(), terms[2][0].documents.end()).back().ident == postings.back().ident);
+    CHECK_FALSE(reader.getTermPostings(4, postings, categoryEnds, categories));
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.SetTermPostingsRefusesUnorderedDocuments") {
+    TestTempDir tmp;
+    NindTermIndex index(tmp.file("unordered"), true, kNoCheck, 0, 8);
+    const Document documents[] = {Document(5, 1), Document(3, 1)};
+    const vector<NindTermIndex::CategoryPostings> categories(1, NindTermIndex::CategoryPostings(0, 2, documents, 2));
+    CHECK_THROWS_AS(index.setTermPostings(1, categories, kNoCheck, list<unsigned int>()), NindTermIndexException);
 }
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindTermIndexTest.UnknownIdentReturnsFalse") {

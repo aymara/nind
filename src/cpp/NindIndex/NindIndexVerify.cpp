@@ -15,6 +15,7 @@
 // GNU Less General Public License for more details.
 ////////////////////////////////////////////////////////////
 #include "NindIndexVerify.h"
+#include "NindSegmentedIndex.h"
 #include "NindLexiconIndex.h"
 #include "NindTermIndex.h"
 #include "NindLocalIndex.h"
@@ -63,16 +64,6 @@ string str(const uint64_t value) {
     return out.str();
 }
 
-bool sameTermDefs(const list<TermCG> &a, const list<TermCG> &b) {
-    if (a.size() != b.size()) return false;
-    for (list<TermCG>::const_iterator x = a.begin(), y = b.begin(); x != a.end(); x++, y++) {
-        if (x->cg != y->cg || x->frequency != y->frequency || x->documents.size() != y->documents.size()) return false;
-        for (list<Document>::const_iterator dx = x->documents.begin(), dy = y->documents.begin(); dx != x->documents.end(); dx++, dy++)
-            if (dx->ident != dy->ident || dx->frequency != dy->frequency) return false;
-    }
-    return true;
-}
-
 bool sameLocalDefs(const list<Term> &a, const list<Term> &b) {
     if (a.size() != b.size()) return false;
     for (list<Term>::const_iterator x = a.begin(), y = b.begin(); x != a.end(); x++, y++) {
@@ -83,47 +74,86 @@ bool sameLocalDefs(const list<Term> &a, const list<Term> &b) {
     return true;
 }
 
-// one term's definition: decoded both ways, its lists checked; its triples for the cross check
+// a list read checked against the flat postings
+bool sameAsPostings(const list<TermCG> &termDef, const vector<Document> &postings, const vector<size_t> &categoryEnds,
+                    const vector<pair<unsigned char, unsigned int> > &categories) {
+    if (termDef.size() != categories.size()) return false;
+    size_t c = 0, p = 0;
+    for (list<TermCG>::const_iterator cg = termDef.begin(); cg != termDef.end(); cg++, c++) {
+        if (cg->cg != categories[c].first || cg->frequency != categories[c].second
+            || cg->documents.size() != categoryEnds[c] - p) return false;
+        for (list<Document>::const_iterator d = cg->documents.begin(); d != cg->documents.end(); d++, p++)
+            if (d->ident != postings[p].ident || d->frequency != postings[p].frequency) return false;
+    }
+    return true;
+}
+
+// the list read paths are also checked on definitions of at most this many postings (a list takes
+// ~48 bytes per posting; they decode the same blocks as the flat paths)
+const size_t LIST_PATHS_MAX_POSTINGS = 1000000;
+
+// one term's definition: decoded both ways, its lists checked; its triples for the cross check.
+// Flat arrays: ~32 bytes per posting of the term, at most (hundreds of millions of postings)
 void verifyTerm(NindTermIndex &termIndex, const unsigned int ident, const unsigned int wordsNb,
                 NindReadBuffer &buffer, Problems &problems, NindIndexVerify::Report &report,
                 vector<Triple> *triples, vector<Triple> *lengthClaims) {
     const string term = "term " + str(ident) + ": ";
-    list<TermCG> sequential, positioned;
+    vector<Document> postings;
+    vector<size_t> categoryEnds;
+    vector<pair<unsigned char, unsigned int> > categories;
     bool found;
     try {
-        found = termIndex.getTermDef(ident, sequential);
+        found = termIndex.getTermPostings(ident, postings, categoryEnds, categories);
     }
     catch (const FileException &e) { problems.add(term + "doesn't decode: " + e.what()); return; }
     try {
-        if (termIndex.getTermDef(ident, positioned, buffer) != found || !sameTermDefs(sequential, positioned))
-            problems.add(term + "the two read paths disagree");
+        vector<Document> positioned;
+        vector<size_t> positionedEnds;
+        bool same = termIndex.getTermPostings(ident, positioned, positionedEnds, buffer) == found
+            && positionedEnds == categoryEnds && positioned.size() == postings.size();
+        for (size_t p = 0; same && p < postings.size(); p++)
+            same = positioned[p].ident == postings[p].ident && positioned[p].frequency == postings[p].frequency;
+        vector<Document>().swap(positioned);
+        if (same && postings.size() <= LIST_PATHS_MAX_POSTINGS) {
+            list<TermCG> sequentialList, positionedList;
+            same = termIndex.getTermDef(ident, sequentialList) == found
+                && termIndex.getTermDef(ident, positionedList, buffer) == found
+                && sameAsPostings(sequentialList, postings, categoryEnds, categories)
+                && sameAsPostings(positionedList, postings, categoryEnds, categories);
+        }
+        if (!same) problems.add(term + "the two read paths disagree");
     }
     catch (const FileException &e) { problems.add(term + "doesn't decode (const path): " + e.what()); }
     if (!found) return;
     report.termsNb++;
     if (ident == 0 || ident > wordsNb) problems.add(term + "a definition for a term the lexicon doesn't have");
-    map<NindDocId, uint64_t> frequencies;          //per document, every category
-    for (list<TermCG>::const_iterator cg = sequential.begin(); cg != sequential.end(); cg++) {
+    size_t begin = 0;
+    for (size_t c = 0; c < categories.size(); begin = categoryEnds[c], c++) {
         uint64_t sum = 0;
-        bool first = true;
-        NindDocId previous = 0;
-        for (list<Document>::const_iterator d = cg->documents.begin(); d != cg->documents.end(); d++) {
-            if (!first && d->ident <= previous)
-                problems.add(term + "category " + str(cg->cg) + ": document ids not increasing at " + str(d->ident));
-            if (d->frequency == 0) problems.add(term + "document " + str(d->ident) + " with a frequency of 0");
-            first = false;
-            previous = d->ident;
-            sum += d->frequency;
-            frequencies[d->ident] += d->frequency;
+        for (size_t p = begin; p < categoryEnds[c]; p++) {
+            if (p > begin && postings[p].ident <= postings[p - 1].ident)
+                problems.add(term + "category " + str(categories[c].first) + ": document ids not increasing at " + str(postings[p].ident));
+            if (postings[p].frequency == 0) problems.add(term + "document " + str(postings[p].ident) + " with a frequency of 0");
+            sum += postings[p].frequency;
             report.postingsNb++;
         }
-        if (sum != cg->frequency)
-            problems.add(term + "category " + str(cg->cg) + ": frequency " + str(cg->frequency)
+        if (sum != categories[c].second)
+            problems.add(term + "category " + str(categories[c].first) + ": frequency " + str(categories[c].second)
                          + ", its documents' sum " + str(sum));
     }
-    if (triples != 0)
-        for (map<NindDocId, uint64_t>::const_iterator it = frequencies.begin(); it != frequencies.end(); it++)
-            triples->push_back(Triple(it->first, ident, it->second));
+    if (triples != 0) {
+        //per document, every category
+        if (categories.size() == 1) {
+            for (size_t p = 0; p < postings.size(); p++)
+                triples->push_back(Triple(postings[p].ident, ident, postings[p].frequency));
+        }
+        else {
+            map<NindDocId, uint64_t> frequencies;
+            for (size_t p = 0; p < postings.size(); p++) frequencies[postings[p].ident] += postings[p].frequency;
+            for (map<NindDocId, uint64_t>::const_iterator it = frequencies.begin(); it != frequencies.end(); it++)
+                triples->push_back(Triple(it->first, ident, it->second));
+        }
+    }
     //format v2: the directory, then every block, one by one (each checked against its descriptor)
     if (!termIndex.isFormatV2()) return;
     try {
@@ -132,30 +162,36 @@ void verifyTerm(NindTermIndex &termIndex, const unsigned int ident, const unsign
             problems.add(term + "no directory");
             return;
         }
-        if (directory.categories.size() != sequential.size()) {
+        if (directory.categories.size() != categories.size()) {
             problems.add(term + "the directory's categories aren't the definition's");
             return;
         }
-        list<TermCG>::const_iterator cg = sequential.begin();
-        for (size_t c = 0; c < directory.categories.size(); c++, cg++) {
+        vector<Document> blockPostings;
+        begin = 0;
+        for (size_t c = 0; c < directory.categories.size(); begin = categoryEnds[c], c++) {
             const NindTermIndex::TermDirectory::Category &category = directory.categories[c];
-            vector<Document> postings(category.inlinePostings.begin(), category.inlinePostings.end());
+            const size_t docsNb = categoryEnds[c] - begin;
+            const unsigned char cg = categories[c].first;
+            bool same = category.cg == cg && category.docsNb == docsNb && category.inlinePostings.size() <= docsNb;
+            size_t p = begin;
+            for (size_t i = 0; same && i < category.inlinePostings.size(); i++, p++)
+                same = category.inlinePostings[i].ident == postings[p].ident
+                    && category.inlinePostings[i].frequency == postings[p].frequency;
             for (size_t b = 0; b < category.blocks.size(); b++) {
-                const size_t blockBegin = postings.size();
-                termIndex.getTermBlocks(ident, directory, c, b, b + 1, postings, buffer);
+                blockPostings.clear();
+                termIndex.getTermBlocks(ident, directory, c, b, b + 1, blockPostings, buffer);
                 //(document, term, the block's shortest length): checked against the local index
                 if (lengthClaims != 0 && category.blocks[b].minLength != 0)
-                    for (size_t p = blockBegin; p < postings.size(); p++)
-                        lengthClaims->push_back(Triple(postings[p].ident, ident, category.blocks[b].minLength));
+                    for (size_t i = 0; i < blockPostings.size(); i++)
+                        lengthClaims->push_back(Triple(blockPostings[i].ident, ident, category.blocks[b].minLength));
+                if (blockPostings.size() > categoryEnds[c] - p) same = false;
+                for (size_t i = 0; same && i < blockPostings.size(); i++, p++)
+                    same = blockPostings[i].ident == postings[p].ident && blockPostings[i].frequency == postings[p].frequency;
             }
-            bool same = category.cg == cg->cg && category.docsNb == postings.size()
-                && postings.size() == cg->documents.size();
-            list<Document>::const_iterator d = cg->documents.begin();
-            for (size_t p = 0; same && p < postings.size(); p++, d++)
-                same = postings[p].ident == d->ident && postings[p].frequency == d->frequency;
-            if (!same) problems.add(term + "category " + str(cg->cg) + ": its blocks aren't its postings");
+            if (p != categoryEnds[c]) same = false;
+            if (!same) problems.add(term + "category " + str(cg) + ": its blocks aren't its postings");
             if (category.blocks.empty() && category.inlinePostings.size() > NindTermIndex::BLOCK_SIZE)
-                problems.add(term + "category " + str(cg->cg) + ": a long list without blocks");
+                problems.add(term + "category " + str(cg) + ": a long list without blocks");
         }
     }
     catch (const FileException &e) { problems.add(term + "a block doesn't match its descriptor: " + e.what()); }
@@ -168,6 +204,26 @@ NindIndexVerify::Report NindIndexVerify::verify(const string &fileNameExtensionL
 {
     Report report;
     Problems problems(report, maxProblems);
+    //an index of several segments: each of them, and that it opens as an index
+    if (fileExists(fileNameExtensionLess + ".nindsegments")) {
+        report.formatV2 = true;
+        try {
+            const vector<string> segments = NindSegmentedIndex::readManifest(fileNameExtensionLess);
+            for (size_t s = 0; s < segments.size(); s++) {
+                const Report segment = verify(NindSegmentedIndex::segmentBase(fileNameExtensionLess, segments[s]), crossCheck, maxProblems);
+                report.formatV2 = report.formatV2 && segment.formatV2;
+                report.wordsNb += segment.wordsNb;
+                report.termsNb += segment.termsNb;
+                report.postingsNb += segment.postingsNb;
+                report.documentsNb += segment.documentsNb;
+                report.withLocalIndex = report.withLocalIndex || segment.withLocalIndex;
+                for (size_t p = 0; p < segment.problems.size(); p++) problems.add(segments[s] + ": " + segment.problems[p]);
+            }
+            const NindSegmentedIndex index(fileNameExtensionLess);
+        }
+        catch (const FileException &e) { problems.add(string("segments: ") + e.what()); }
+        return report;
+    }
     //the lexicon
     NindPadFile::Identification identification;
     try {

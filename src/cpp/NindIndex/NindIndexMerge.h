@@ -48,8 +48,10 @@ public:
         //the documents' lengths, for the merged blocks' <longueurMin> (see
         //NindTermIndex::setDocumentLengths; none: 0, unknown)
         std::vector<std::pair<NindDocId, unsigned int> > documentLengths;
+        //per shard, its documents to leave out, in increasing order (empty: none)
+        std::vector<std::vector<NindDocId> > deletedDocuments;
         Options(): withRetrolexicon(false), lexiconIndirectionBlocSize(0), retroIndirectionBlocSize(0),
-            termIndirectionBlocSize(0), localIndirectionBlocSize(0), documentLengths() {}
+            termIndirectionBlocSize(0), localIndirectionBlocSize(0), documentLengths(), deletedDocuments() {}
     };
 
     /**\brief What was merged */
@@ -84,9 +86,9 @@ protected:
 
     /**\brief called for every term written into the merged term index
     *\param components components of the term (1 component = simple word, more components = compound word)
-    *\param termDef merged definition of the term */
+    *\param categories merged definition of the term (its categories' postings, flat) */
     virtual void countTerm(const std::list<std::string> &components,
-                           const std::list<NindTermIndex::TermCG> &termDef);
+                           const std::vector<NindTermIndex::CategoryPostings> &categories);
 
     /**\brief specifics of the merged term index, once every term was counted
     *\return getTermSpecificsNumber() specific unsigned int */

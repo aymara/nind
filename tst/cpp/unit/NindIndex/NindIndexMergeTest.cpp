@@ -240,6 +240,38 @@ TEST_CASE("NindIndexMerge.MergedIndexHasTheContentOfASingleIndexOfAllDocuments")
     CHECK_EQ(stats.identification, NindLexiconIndex(tmp.file("merged"), false).getIdentification());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindIndexMerge.ShardsOfContiguousDocumentsMergeWithoutAGlobalSort") {
+    // shards over contiguous ranges of documents (a corpus cut in parts): their documents are
+    // taken shard after shard, in the order of their ranges, whatever the order of the shards
+    TestTempDir tmp;
+    const Corpus corpus = sampleCorpus();
+    buildIndex(tmp.file("reference"), corpus);
+    const unsigned int docs0[] = {1, 2}, docs1[] = {3, 5}, docs2[] = {8, 13};
+    buildIndex(tmp.file("shard0"), part(corpus, vector<unsigned int>(docs0, docs0 + 2)));
+    buildIndex(tmp.file("shard1"), part(corpus, vector<unsigned int>(docs1, docs1 + 2)));
+    buildIndex(tmp.file("shard2"), part(corpus, vector<unsigned int>(docs2, docs2 + 2)));
+    const Content reference = readContent(tmp.file("reference"));
+    const char *orders[] = {"012", "201", "120"};
+    for (unsigned int o = 0; o < 3; o++) {
+        CAPTURE(orders[o]);
+        vector<string> shards;
+        for (unsigned int i = 0; i < 3; i++) shards.push_back(tmp.file(string("shard") + orders[o][i]));
+        const string target = tmp.file(string("merged") + orders[o]);
+        const NindIndexMerge::Stats stats = NindIndexMerge(shards).merge(target);
+        const Content merged = readContent(target);
+        CHECK(merged.words == reference.words);
+        CHECK(merged.terms == reference.terms);
+        CHECK(merged.locals == reference.locals);
+        CHECK_EQ(6u, stats.docsNb);
+        // the local index lists the documents in increasing order, as a direct build does
+        NindLocalIndex localIndex(target, false, NindIndex::Identification(0, 0));
+        vector<NindDocId> docIdents;
+        localIndex.getDocIdents(docIdents);
+        const unsigned int expected[] = {1, 2, 3, 5, 8, 13};
+        CHECK(docIdents == vector<NindDocId>(expected, expected + 6));
+    }
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindIndexMerge.MergedIndexCanBeExtendedByAWriter") {
     TestTempDir tmp;
     const Corpus corpus = sampleCorpus();

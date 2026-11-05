@@ -37,6 +37,8 @@
 #include "NindIndex/NindIndexBuilder.h"
 #include "NindIndex/NindTokenizer.h"
 #include "NindIndex/NindDocNames.h"
+#include "NindIndex/NindSegmentedIndex.h"
+#include "NindIndex/NindSegmentedUpdate.h"
 #include <unordered_map>
 #include <cmath>
 #include <mutex>
@@ -743,6 +745,12 @@ PYBIND11_MODULE(_native, m) {
             py::gil_scoped_release release;
             NindDocNames::write(fileName, ids.values, names);
         }, py::arg("file_name"), py::arg("doc_ids"), py::arg("names"))
+        // the shards' files into a new file, without the names in Python; ValueError on documents
+        // overlapping between shards or a name in several of them
+        .def_static("merge", [](const std::vector<std::string> &shardFiles, const std::string &fileName) {
+            py::gil_scoped_release release;
+            NindDocNames::merge(shardFiles, fileName);
+        }, py::arg("shard_files"), py::arg("file_name"))
         .def("name", [](const NindDocNames &self, uint64_t docId) -> py::object {
             std::string name;
             if (!self.getName(docId, name)) return py::none();
@@ -771,6 +779,91 @@ PYBIND11_MODULE(_native, m) {
             return py::make_tuple(uint64Bytes(docIds), names);
         })
         .def("__len__", &NindDocNames::size);
+
+    // ---- NindSegmentedIndex -----------------------------------------------
+    // An index made of immutable segments, searched as one (see NindSegmentedIndex.h).
+    py::class_<NindSegmentedIndex::SegmentInfo>(m, "SegmentInfo")
+        .def_readonly("name", &NindSegmentedIndex::SegmentInfo::name)
+        .def_readonly("base", &NindSegmentedIndex::SegmentInfo::base)
+        .def_readonly("docs_nb", &NindSegmentedIndex::SegmentInfo::docsNb)
+        .def_readonly("deleted_nb", &NindSegmentedIndex::SegmentInfo::deletedNb);
+    py::class_<NindSegmentedIndex>(m, "SegmentedIndex")
+        .def(py::init([](const std::string &base, const NindSegmentedIndex *previous) {
+            py::gil_scoped_release release;
+            return new NindSegmentedIndex(base, previous);
+        }), py::arg("base"), py::arg("previous") = nullptr)
+        .def("search", [](const NindSegmentedIndex &self, const std::vector<std::string> &words, double k1, double b,
+                          long topK, bool prune, unsigned int threads) {
+            std::vector<std::list<std::string> > query;
+            for (size_t w = 0; w < words.size(); w++) query.push_back(std::list<std::string>(1, words[w]));
+            py::gil_scoped_release release;
+            return self.search(query, k1, b, topK, prune, threads);
+        }, py::arg("words"), py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1,
+           py::arg("prune") = false, py::arg("threads") = 1)
+        .def("document_frequency", [](const NindSegmentedIndex &self, const std::string &word) {
+            const std::list<std::string> components(1, word);
+            py::gil_scoped_release release;
+            return self.documentFrequency(components);
+        }, py::arg("word"))
+        .def("term_frequency", [](const NindSegmentedIndex &self, const std::string &word, uint64_t docId) {
+            const std::list<std::string> components(1, word);
+            py::gil_scoped_release release;
+            return self.termFrequency(components, docId);
+        }, py::arg("word"), py::arg("doc_id"))
+        .def("document_length", &NindSegmentedIndex::documentLength, py::arg("doc_id"))
+        .def("contains", &NindSegmentedIndex::contains, py::arg("doc_id"))
+        .def("name", [](const NindSegmentedIndex &self, uint64_t docId) -> py::object {
+            std::string name;
+            if (!self.getName(docId, name)) return py::none();
+            return py::str(name);
+        }, py::arg("doc_id"))
+        .def("doc_id", [](const NindSegmentedIndex &self, const std::string &name) -> py::object {
+            NindDocId docId = 0;
+            if (!self.getDocIdent(name, docId)) return py::none();
+            return py::int_((uint64_t)docId);
+        }, py::arg("name"))
+        .def("has_names", &NindSegmentedIndex::hasNames)
+        .def("max_doc_id", [](const NindSegmentedIndex &self) -> py::object {
+            NindDocId docId = 0;
+            if (!self.getMaxDocIdent(docId)) return py::none();
+            return py::int_((uint64_t)docId);
+        })
+        // (document ids as uint64 bytes, lengths as uint32 bytes), by increasing document
+        .def("documents", [](const NindSegmentedIndex &self) {
+            std::vector<NindDocId> docIds;
+            std::vector<uint32_t> lengths;
+            self.getDocuments(docIds, lengths);
+            return py::make_tuple(uint64Bytes(std::vector<uint64_t>(docIds.begin(), docIds.end())), uintBytes(lengths));
+        })
+        .def_property_readonly("docs_nb", &NindSegmentedIndex::docsNb)
+        .def_property_readonly("avg_doc_len", &NindSegmentedIndex::avgDocLength)
+        .def("segments", &NindSegmentedIndex::segments)
+        .def_static("read_manifest", &NindSegmentedIndex::readManifest, py::arg("base"))
+        .def_static("write_manifest", &NindSegmentedIndex::writeManifest, py::arg("base"), py::arg("segments"))
+        .def_static("segment_base", &NindSegmentedIndex::segmentBase, py::arg("base"), py::arg("segment"));
+
+    py::class_<NindSegmentedUpdate::Stats>(m, "SegmentedUpdateStats")
+        .def_readonly("added_docs_nb", &NindSegmentedUpdate::Stats::addedDocsNb)
+        .def_readonly("removed_docs_nb", &NindSegmentedUpdate::Stats::removedDocsNb)
+        .def_readonly("segments_nb", &NindSegmentedUpdate::Stats::segmentsNb)
+        .def_readonly("merges_nb", &NindSegmentedUpdate::Stats::mergesNb)
+        .def_readonly("merged_docs_nb", &NindSegmentedUpdate::Stats::mergedDocsNb);
+    py::class_<NindSegmentedUpdate>(m, "SegmentedUpdate")
+        .def(py::init([](const std::string &base, bool withLocalIndex, unsigned int mergeFactor) {
+            NindSegmentedUpdate::Options options;
+            options.withLocalIndex = withLocalIndex;
+            options.mergeFactor = mergeFactor;
+            return new NindSegmentedUpdate(base, options);
+        }), py::arg("base"), py::arg("with_local_index") = true, py::arg("merge_factor") = 10)
+        .def("add_document", &NindSegmentedUpdate::addDocument, py::arg("doc_id"), py::arg("words"), py::arg("name") = std::string())
+        .def("remove_document", &NindSegmentedUpdate::removeDocument, py::arg("doc_id"))
+        .def("commit", &NindSegmentedUpdate::commit, py::call_guard<py::gil_scoped_release>())
+        .def_static("force_merge", &NindSegmentedUpdate::forceMerge, py::arg("base"), py::call_guard<py::gil_scoped_release>())
+        .def_static("max_doc_id", [](const std::string &base) -> py::object {
+            NindDocId docId = 0;
+            if (!NindSegmentedUpdate::getMaxDocIdent(base, docId)) return py::none();
+            return py::int_((uint64_t)docId);
+        }, py::arg("base"));
 
     // ---- Bm25Scorer -------------------------------------------------------
     // Okapi BM25 search driven by the postings of the query terms (only the documents

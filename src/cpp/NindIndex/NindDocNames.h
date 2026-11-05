@@ -35,6 +35,7 @@ namespace latecon {
 * <premierIdent>   ::= <Entier8>    (64-bit NindDocId; <Entier4> in NINDDN01, still read)
 * <idents>         ::= { <Entier8> }    nombre idents, strictly increasing (<Entier4> in NINDDN01)
 * <offsets>        ::= { <Entier4> }    nombre + 1 offsets into <noms>, the first 0, increasing
+*                                       (magic NINDDN03: <Entier8>, only for names over 4 GiB)
 * <parNom>         ::= { <Entier4> }    the documents' ranks in increasing name order (byte order)
 * <noms>           ::= { <Octet> }      the names (UTF-8), in document order
 * Entier4: 4 bytes, little-endian. Names are unique; they may be empty. */
@@ -44,12 +45,26 @@ public:
     *\param fileName file name (must not exist)
     *\param docIdents document idents
     *\param names their names, in the same order (unique)
-    *\throws std::invalid_argument if the sizes differ, an ident or a name is repeated,
-    * or the names are too long together (4 GiB)
+    *\throws std::invalid_argument if the sizes differ or an ident or a name is repeated
     *\throws OpenFileException or WriteFileException on I/O errors (the file is then removed) */
     static void write(const std::string &fileName,
                       const std::vector<NindDocId> &docIdents,
                       const std::vector<std::string> &names);
+
+    /**\brief Merge the names files of shards into a new file, the same as write() with all their
+    * documents, without building the names in memory (shards' files are loaded, the result streamed)
+    *\param shardFiles the shards' files, in any order
+    *\param fileName the new file (must not exist; removed on failure)
+    *\throws std::invalid_argument if a document or a name is in several shards
+    *\throws OpenFileException, ReadFileException, FormatFileException, WriteFileException on I/O errors */
+    static void merge(const std::vector<std::string> &shardFiles,
+                      const std::string &fileName);
+
+    /**\brief merge() without some of the shards' documents
+    *\param deleted per shard, its documents to leave out, in increasing order (empty: none) */
+    static void merge(const std::vector<std::string> &shardFiles,
+                      const std::vector<std::vector<NindDocId> > &deleted,
+                      const std::string &fileName);
 
     /**\brief Read the names of an index
     *\param fileName file name
@@ -81,6 +96,7 @@ public:
 
 private:
     uint32_t read4(const size_t offset) const;
+    uint64_t readOffset(const size_t offset) const;
     NindDocId readIdent(const size_t offset) const;
     NindDocId docIdentAt(const size_t rank) const;
     //the name of the document of rank rank: (offset into m_bytes, length)
@@ -93,7 +109,8 @@ private:
     size_t m_size;
     bool m_hasIdents;
     NindDocId m_firstIdent;
-    size_t m_identWidth;            //4 (NINDDN01) or 8 (NINDDN02) bytes per ident
+    size_t m_identWidth;            //4 (NINDDN01) or 8 (NINDDN02, 03) bytes per ident
+    size_t m_offsetWidth;           //4 (NINDDN01, 02) or 8 (NINDDN03) bytes per offset
     size_t m_identsPos, m_offsetsPos, m_byNamePos, m_namesPos;
 };
 ////////////////////////////////////////////////////////////
