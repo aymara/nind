@@ -23,6 +23,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
+#include <functional>
+#include <future>
 #include <queue>
 #include <stdexcept>
 #include <thread>
@@ -499,20 +502,25 @@ private:
         std::vector<Found> found(slices);
         if (slices == 1) scanRange(termIndex, terms, first, last, topK, parameters, shared, found[0]);
         else {
-            std::vector<std::thread> workers;
-            std::vector<std::exception_ptr> errors(slices);
+            //the other ranges to the scorer's pool of threads, the last one here
+            std::vector<std::future<void> > done;
+            std::exception_ptr error;
             for (unsigned int s = 0; s < slices; s++) {
                 const NindDocId lo = first + span / slices * s + std::min<uint64_t>(s, span % slices);
                 const NindDocId hi = (s + 1 == slices) ? last : first + span / slices * (s + 1) + std::min<uint64_t>(s + 1, span % slices) - 1;
-                auto work = [&, s, lo, hi]() {
-                    try { scanRange(termIndex, terms, lo, hi, topK, parameters, shared, found[s]); }
-                    catch (...) { errors[s] = std::current_exception(); }
-                };
-                if (s + 1 == slices) work();        //(this thread does the last range)
-                else workers.push_back(std::thread(work));
+                auto work = [&, s, lo, hi]() { scanRange(termIndex, terms, lo, hi, topK, parameters, shared, found[s]); };
+                if (s + 1 < slices) done.push_back(m_threadPool.run(work, slices - 1));
+                else {
+                    try { work(); }
+                    catch (...) { error = std::current_exception(); }
+                }
             }
-            for (size_t w = 0; w < workers.size(); w++) workers[w].join();
-            for (unsigned int s = 0; s < slices; s++) if (errors[s]) std::rethrow_exception(errors[s]);
+            //(every range finished before anything they use goes)
+            for (size_t f = 0; f < done.size(); f++) {
+                try { done[f].get(); }
+                catch (...) { if (!error) error = std::current_exception(); }
+            }
+            if (error) std::rethrow_exception(error);
         }
         // the candidates that may be in the top k, scored exactly as the exhaustive search does
         double threshold = shared.load();
@@ -540,6 +548,54 @@ private:
         for (size_t i = 0; i < kept; i++) result[i] = std::make_pair(m_docIds[ranked[i].second], -ranked[i].first);
         return true;
     }
+
+    // The threads that search ranges of documents for the searches with threads > 1: started when
+    // first needed, as many as the most a search asked for (its own thread aside), kept until the
+    // scorer goes. Tasks of concurrent searches queue; a task never waits for another.
+    class Pool {
+    public:
+        Pool(): m_mutex(), m_wake(), m_tasks(), m_threads(), m_stop(false) {}
+        ~Pool() {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stop = true;
+            }
+            m_wake.notify_all();
+            for (size_t t = 0; t < m_threads.size(); t++) m_threads[t].join();
+        }
+        // runs work on a pool thread (at least threads of them); its future gives its end (or exception)
+        std::future<void> run(const std::function<void()> &work, const size_t threads) {
+            std::shared_ptr<std::packaged_task<void()> > task(new std::packaged_task<void()>(work));
+            std::future<void> done = task->get_future();
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                while (m_threads.size() < threads) m_threads.push_back(std::thread([this]() { loop(); }));
+                m_tasks.push([task]() { (*task)(); });
+            }
+            m_wake.notify_one();
+            return done;
+        }
+    private:
+        void loop() {
+            while (true) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    m_wake.wait(lock, [this]() { return m_stop || !m_tasks.empty(); });
+                    if (m_tasks.empty()) return;            //(m_stop)
+                    task = std::move(m_tasks.front());
+                    m_tasks.pop();
+                }
+                task();                     //(a packaged_task: its exception goes to its future)
+            }
+        }
+        std::mutex m_mutex;
+        std::condition_variable m_wake;
+        std::queue<std::function<void()> > m_tasks;
+        std::vector<std::thread> m_threads;
+        bool m_stop;
+    };
+    mutable Pool m_threadPool;
 
     uint32_t positionOf(const uint64_t docId) const {
         //ids 0..N-1 in order (an index NindIndexer built): the position is the id
