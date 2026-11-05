@@ -35,4 +35,4 @@ set_target_properties(NindIndex PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSION
 install(TARGETS NindIndex DESTINATION lib)
 
 ########### install files ###############
-install(FILES NindIndex.h NindLexiconIndex.h NindTermIndex.h NindLocalIndex.h NindIndexMerge.h NindTokenizer.h NindDocNames.h NindIndexVerify.h NindIndexUpdate.h NindBm25Scorer.h NindIndexBuilder.h DESTINATION include/NindIndex)
+install(FILES NindIndex.h NindLexiconIndex.h NindTermIndex.h NindLocalIndex.h NindDocIdMap.h NindIndexMerge.h NindTokenizer.h NindDocNames.h NindIndexVerify.h NindIndexUpdate.h NindBm25Scorer.h NindIndexBuilder.h DESTINATION include/NindIndex)

@@ -22,6 +22,7 @@
 #define NindLocalIndex_H
 ////////////////////////////////////////////////////////////
 #include "NindIndex.h"
+#include "NindDocIdMap.h"
 #include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
 #include "NindExceptions.h"
@@ -139,7 +140,7 @@ private:
    
     //map de traduction des identifiants externes vers les identifiants internes
     //(mutable : complejteje par les lecteurs, sous m_docIdMutex, lectures partagejes, mises ah jour exclusives)
-    mutable std::map<NindDocId, unsigned int> m_docIdTradExtInt;
+    mutable NindDocIdMap m_docIdTradExtInt;
     //max des identifiants internes, pour la numejrotation
     mutable unsigned int m_currIdent;
     mutable std::shared_timed_mutex m_docIdMutex;

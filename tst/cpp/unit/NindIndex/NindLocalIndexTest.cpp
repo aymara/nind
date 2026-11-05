@@ -2,11 +2,48 @@
 #include "NindExceptions.h"
 #include "TestTempDir.h"
 #include "doctest.h"
+#include <cstdint>
 #include <list>
+#include <map>
+#include <utility>
+#include <vector>
 #include <set>
 #include <string>
 using namespace latecon::nindex;
 using namespace std;
+////////////////////////////////////////////////////////////
+TEST_CASE("NindDocIdMap.BehavesLikeAMap") {
+    // the same operations on it and on a std::map, through its three forms: consecutive ids,
+    // increasing ids with gaps, ids out of order
+    NindDocIdMap compact;
+    map<NindDocId, unsigned int> reference;
+    uint64_t state = 42;
+    NindDocId next = 1000;
+    for (unsigned int i = 1; i <= 20000; i++) {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        const unsigned int r = (unsigned int)(state >> 33);
+        NindDocId ident = next;
+        if (i > 500 && r % 4 == 0) ident = 900 + r % 3000;          //already seen, or out of order
+        else next += (i > 200 && r % 8 == 1) ? 2 + r % 50 : 1;       //consecutive, later with gaps
+        if (i > 1000 && r % 16 == 3) {
+            compact.erase(ident);
+            reference.erase(ident);
+        }
+        else {
+            compact.set(ident, i);
+            reference[ident] = i;
+        }
+        CHECK_EQ(compact.size(), reference.size());
+    }
+    for (NindDocId ident = 0; ident < next + 10; ident++) {
+        const map<NindDocId, unsigned int>::const_iterator it = reference.find(ident);
+        REQUIRE_EQ(compact.find(ident), it == reference.end() ? 0u : it->second);
+    }
+    vector<pair<NindDocId, unsigned int> > visited;
+    compact.forEach([&visited](const NindDocId external, const unsigned int internal) {
+        visited.push_back(make_pair(external, internal)); });
+    CHECK(visited == vector<pair<NindDocId, unsigned int> >(reference.begin(), reference.end()));
+}
 ////////////////////////////////////////////////////////////
 namespace {
 typedef NindLocalIndex::Term Term;

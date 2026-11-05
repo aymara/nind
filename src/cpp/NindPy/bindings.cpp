@@ -743,6 +743,12 @@ PYBIND11_MODULE(_native, m) {
             py::gil_scoped_release release;
             NindDocNames::write(fileName, ids.values, names);
         }, py::arg("file_name"), py::arg("doc_ids"), py::arg("names"))
+        // the shards' files into a new file, without the names in Python; ValueError on documents
+        // overlapping between shards or a name in several of them
+        .def_static("merge", [](const std::vector<std::string> &shardFiles, const std::string &fileName) {
+            py::gil_scoped_release release;
+            NindDocNames::merge(shardFiles, fileName);
+        }, py::arg("shard_files"), py::arg("file_name"))
         .def("name", [](const NindDocNames &self, uint64_t docId) -> py::object {
             std::string name;
             if (!self.getName(docId, name)) return py::none();
