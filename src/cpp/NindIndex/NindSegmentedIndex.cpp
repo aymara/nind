@@ -144,8 +144,13 @@ bool NindDocLengths::readLast(const string &fileName,
         ok = idSize != 0;
         const uint64_t count = get4(header + 8);
         if (ok && count != 0) {
-            const off_t place = (off_t)(12 + idSize * (count - 1));
-            ok = fseeko(file, place, SEEK_SET) == 0 && fread(last, 1, idSize, file) == idSize;
+            const uint64_t place = 12 + idSize * (count - 1);
+#ifdef _WIN32
+            ok = _fseeki64(file, (__int64)place, SEEK_SET) == 0;
+#else
+            ok = fseeko(file, (off_t)place, SEEK_SET) == 0;
+#endif
+            ok = ok && fread(last, 1, idSize, file) == idSize;
             if (ok) {
                 docId = (idSize == 8) ? get8(last) : get4(last);
                 found = true;
