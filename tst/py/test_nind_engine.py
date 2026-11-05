@@ -103,6 +103,26 @@ def test_search_multi_term_query_excludes_non_matching_documents(engine):
     assert all(score > 0 for _, score in results)
 
 
+
+def same_results(got, expected, rel=1e-9):
+    """The native search's results against the Python formula's: the same documents, scores
+    equal to rounding (the native scorer computes the same formula, not the same operations);
+    documents whose scores tie to rounding may come in either order."""
+    if len(got) != len(expected):
+        return False
+    close = lambda a, b: abs(a - b) <= rel * max(1.0, abs(b))
+    if not all(close(g[1], e[1]) for g, e in zip(got, expected)):
+        return False
+    i = 0
+    while i < len(expected):
+        j = i + 1
+        while j < len(expected) and close(expected[j][1], expected[i][1]):
+            j += 1
+        if {d for d, _ in got[i:j]} != {d for d, _ in expected[i:j]}:
+            return False
+        i = j
+    return True
+
 def test_search_respects_top_k(engine):
     results = engine.search("dog", top_k=1)
     assert len(results) == 1
@@ -110,17 +130,17 @@ def test_search_respects_top_k(engine):
 
 def test_search_bm25_parameters(engine):
     # the defaults are those of bm25_score
-    assert engine.search("dog cat") == [(d, engine.bm25_score("dog cat", d)) for d, _ in engine.search("dog cat")]
+    assert same_results(engine.search("dog cat"), [(d, engine.bm25_score("dog cat", d)) for d, _ in engine.search("dog cat")])
     for k1, b in ((0.9, 0.4), (1.2, 0.0), (2.0, 1.0)):
         results = engine.search("dog cat", k1=k1, b=b)
-        assert results == [(d, engine.bm25_score("dog cat", d, k1=k1, b=b)) for d, _ in results]
+        assert same_results(results, [(d, engine.bm25_score("dog cat", d, k1=k1, b=b)) for d, _ in results])
         assert {d for d, _ in results} == {0, 1}
     # b = 0: no length normalization; k1 = 0: term frequency ignored, docs 0 and 1 tie on "dog"
-    assert [s for _, s in engine.search("dog", k1=0.0, b=0.0)] == [engine.bm25_score("dog", 0, k1=0.0, b=0.0)] * 2
+    assert [s for _, s in engine.search("dog", k1=0.0, b=0.0)] == pytest.approx([engine.bm25_score("dog", 0, k1=0.0, b=0.0)] * 2, rel=1e-9)
     # the per-document length normalization is cached for the last (k1, b): switching back and forth
     for k1, b in ((1.5, 0.75), (0.9, 0.4), (1.5, 0.75), (1.5, 0.4), (0.9, 0.4)) * 2:
         results = engine.search("dog cat bird", k1=k1, b=b)
-        assert results == [(d, engine.bm25_score("dog cat bird", d, k1=k1, b=b)) for d, _ in results], (k1, b)
+        assert same_results(results, [(d, engine.bm25_score("dog cat bird", d, k1=k1, b=b)) for d, _ in results]), (k1, b)
 
 
 def test_underlying_files_are_structurally_consistent(engine):
@@ -823,7 +843,7 @@ def test_search_from_postings_equals_the_full_scan(tmp_path):
     for query in queries:
         expected = full_scan_search(engine, query, None)
         for top_k in (10, 0, 1, 1000, None, -3):
-            assert engine.search(query, top_k=top_k) == expected[:top_k], (query, top_k)
+            assert same_results(engine.search(query, top_k=top_k), expected[:top_k]), (query, top_k)
 
 
 def test_search_with_several_categories_per_term(tmp_path):
@@ -878,7 +898,7 @@ def test_search_scales_with_the_postings_not_the_corpus(tmp_path):
     _, engine = build_with(tmp_path, "big", texts, workers=1)
     started = time.perf_counter()
     for _ in range(100):
-        assert engine.search("needle") == [(2345, engine.bm25_score("needle", 2345))]
+        assert same_results(engine.search("needle"), [(2345, engine.bm25_score("needle", 2345))])
     assert time.perf_counter() - started < 2
 
 
@@ -1107,6 +1127,7 @@ def test_engine_search_prunes_when_k_is_small_for_the_corpus(tmp_path, monkeypat
     for query, everything in zip(queries, exhaustive):
         for k in (1, 10, 100):
             assert engine.search(query, top_k=k) == everything[:k], (query, k)
+            assert engine.search(query, top_k=k, threads=4) == everything[:k], (query, k)
 
 
 # the texts of the format v1 indexes in tst/py/data/v1 (written by NindIndexer before format v2,

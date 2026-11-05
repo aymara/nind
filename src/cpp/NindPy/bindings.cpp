@@ -782,12 +782,13 @@ PYBIND11_MODULE(_native, m) {
                                       std::vector<uint32_t>(lens.data, lens.data + lens.size), avgDocLength);
         }), py::arg("doc_ids"), py::arg("lengths"), py::arg("avg_doc_len"))
         .def("search", [](const NindBm25Scorer &self, const NindTermIndex &termIndex,
-                          const std::vector<unsigned int> &termIds, double k1, double b, long topK, bool prune) {
+                          const std::vector<unsigned int> &termIds, double k1, double b, long topK, bool prune,
+                          unsigned int threads) {
             py::gil_scoped_release release;
-            return self.search(termIndex, termIds, k1, b, topK, prune);
+            return self.search(termIndex, termIds, k1, b, topK, prune, threads);
         }, py::arg("term_index"), py::arg("term_ids"),
              py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1,
-             py::arg("prune") = false)
+             py::arg("prune") = false, py::arg("threads") = 1)
         .def_property_readonly("docs_nb", &NindBm25Scorer::docsNb);
 
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")

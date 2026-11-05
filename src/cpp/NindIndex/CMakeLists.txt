@@ -26,10 +26,6 @@ SET(NindIndex_LIB_SRCS
   NindIndexBuilder.h
   NindIndexBuilder.cpp
 )
-# scores reproduced bit for bit (nind's Python NindEngine): no fused multiply-adds
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  set_source_files_properties(NindBm25Scorer.cpp PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
-endif()
 
 add_library(NindIndex SHARED ${NindIndex_LIB_SRCS})
 

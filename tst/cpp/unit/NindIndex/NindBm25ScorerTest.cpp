@@ -101,6 +101,9 @@ TEST_CASE("NindBm25Scorer.MaxScoreEqualsExhaustive") {
             vector<pair<NindDocId, double> > top(all.begin(), all.begin() + min((size_t)k, all.size()));
             CHECK(scorer.search(terms, termIds, 1.2, 0.75, k, true) == top);
             CHECK(scorer.search(terms, termIds, 1.2, 0.75, k, false) == top);
+            //threads searching ranges of the documents at once: the same results
+            for (const unsigned int threads : {2u, 3u, 8u})
+                CHECK(scorer.search(terms, termIds, 1.2, 0.75, k, true, threads) == top);
         }
         queries++;
     }
@@ -127,7 +130,7 @@ TEST_CASE("NindBm25Scorer.ConcurrentSearches") {
         threads.push_back(thread([&]() {
             for (unsigned int round = 0; round < 5; round++)
                 for (size_t q = 0; q < queries.size(); q++)
-                    if (scorer.search(terms, queries[q], 1.2, 0.75, 10, q % 2 == 0) != expected[q]) mismatches++;
+                    if (scorer.search(terms, queries[q], 1.2, 0.75, 10, q % 2 == 0, 1 + q % 3) != expected[q]) mismatches++;
         }));
     for (size_t t = 0; t < threads.size(); t++) threads[t].join();
     CHECK_EQ(0u, mismatches.load());
