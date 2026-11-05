@@ -23,6 +23,10 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
+#include <condition_variable>
+#include <functional>
+#include <future>
 #include <queue>
 #include <stdexcept>
 #include <thread>
@@ -223,7 +227,7 @@ private:
     static const size_t NO_BLOCK = (size_t)-1;
     // a query term, as every thread of a search sees it (read only)
     struct TermInfo {
-        NindTermIndex::TermDirectory directory;
+        std::shared_ptr<const NindTermIndex::TermDirectory> directory;     //(from the scorer's cache)
         unsigned int ident;
         double idf;
         unsigned int multiplicity;      //occurrences in the query
@@ -258,17 +262,17 @@ private:
         cursor.decoded = b;
         const TermInfo &info = *cursor.info;
         if (info.inlineList) {
-            cursor.docs = info.directory.categories[0].inlinePostings;
+            cursor.docs = info.directory->categories[0].inlinePostings;
             return;
         }
         if (b < cursor.rawBegin || b >= cursor.rawEnd) {
             cursor.rawBegin = b;
             cursor.rawEnd = std::min(b + RAW_READ_AHEAD, info.blocksNb);
             if (!cursor.raw) cursor.raw.reset(new NindReadBuffer());
-            termIndex.readTermBlocks(info.ident, info.directory, 0, cursor.rawBegin, cursor.rawEnd, *cursor.raw);
+            termIndex.readTermBlocks(info.ident, *info.directory, 0, cursor.rawBegin, cursor.rawEnd, *cursor.raw);
         }
         cursor.docs.clear();
-        termIndex.decodeTermBlock(info.ident, info.directory, 0, cursor.rawBegin, b, *cursor.raw, cursor.docs);
+        termIndex.decodeTermBlock(info.ident, *info.directory, 0, cursor.rawBegin, b, *cursor.raw, cursor.docs);
     }
     // what a thread found: its candidates (with their frequencies, termsNb each), its theta
     struct Found {
@@ -372,6 +376,10 @@ private:
                                 approximation += cursor.info->multiplicity *
                                                  contribution(cursor.info->idf, posting.frequency, length, parameters);
                             if (++cursor.pos >= cursor.docs.size()) continue;
+                            //the length of a document a few postings ahead, fetched early (a cache miss
+                            //otherwise: the documents' lengths are scattered)
+                            if (cursor.pos + PREFETCH_DISTANCE < cursor.docs.size())
+                                prefetchLength(cursor.docs[cursor.pos + PREFETCH_DISTANCE].ident);
                         }
                         const NindDocId current = cursor.docs[cursor.pos].ident;
                         if (current <= windowMax && (!anyNext || current < nextDoc)) { nextDoc = current; anyNext = true; }
@@ -447,9 +455,10 @@ private:
         for (size_t d = 0; d < distinctIds.size(); d++) {
             terms.push_back(TermInfo());
             TermInfo &term = terms.back();
-            if (!termIndex.getTermDirectory(distinctIds[d], term.directory, buffer)) { terms.pop_back(); continue; }
-            if (term.directory.categories.size() != 1) return false;
-            const NindTermIndex::TermDirectory::Category &category = term.directory.categories[0];
+            term.directory = directoryOf(termIndex, distinctIds[d], buffer);
+            if (!term.directory) { terms.pop_back(); continue; }
+            if (term.directory->categories.size() != 1) return false;
+            const NindTermIndex::TermDirectory::Category &category = term.directory->categories[0];
             term.ident = distinctIds[d];
             term.idf = idfOf(category.docsNb);
             if (!(term.idf > 0)) return false;
@@ -462,9 +471,15 @@ private:
                     const NindTermIndex::Block &block = category.blocks[i];
                     term.blockFirst.push_back(block.first);
                     term.blockLast.push_back(block.last);
-                    const double length = std::max((double)block.minLength, shortest);
-                    term.blockBounds.push_back(term.multiplicity *
-                                               contribution(term.idf, block.maxFrequency, length, parameters));
+                    double bound = 0.0;
+                    if (block.impactsNb != 0) {
+                        //the block's competitive (frequency, length) pairs: its exact largest contribution
+                        for (unsigned int j = 0; j < block.impactsNb; j++)
+                            bound = std::max(bound, contribution(term.idf, block.impacts[j].first,
+                                                                 std::max((double)block.impacts[j].second, shortest), parameters));
+                    }
+                    else bound = contribution(term.idf, block.maxFrequency, std::max((double)block.minLength, shortest), parameters);
+                    term.blockBounds.push_back(term.multiplicity * bound);
                 }
             }
             else {
@@ -499,20 +514,25 @@ private:
         std::vector<Found> found(slices);
         if (slices == 1) scanRange(termIndex, terms, first, last, topK, parameters, shared, found[0]);
         else {
-            std::vector<std::thread> workers;
-            std::vector<std::exception_ptr> errors(slices);
+            //the other ranges to the scorer's pool of threads, the last one here
+            std::vector<std::future<void> > done;
+            std::exception_ptr error;
             for (unsigned int s = 0; s < slices; s++) {
                 const NindDocId lo = first + span / slices * s + std::min<uint64_t>(s, span % slices);
                 const NindDocId hi = (s + 1 == slices) ? last : first + span / slices * (s + 1) + std::min<uint64_t>(s + 1, span % slices) - 1;
-                auto work = [&, s, lo, hi]() {
-                    try { scanRange(termIndex, terms, lo, hi, topK, parameters, shared, found[s]); }
-                    catch (...) { errors[s] = std::current_exception(); }
-                };
-                if (s + 1 == slices) work();        //(this thread does the last range)
-                else workers.push_back(std::thread(work));
+                auto work = [&, s, lo, hi]() { scanRange(termIndex, terms, lo, hi, topK, parameters, shared, found[s]); };
+                if (s + 1 < slices) done.push_back(m_threadPool.run(work, slices - 1));
+                else {
+                    try { work(); }
+                    catch (...) { error = std::current_exception(); }
+                }
             }
-            for (size_t w = 0; w < workers.size(); w++) workers[w].join();
-            for (unsigned int s = 0; s < slices; s++) if (errors[s]) std::rethrow_exception(errors[s]);
+            //(every range finished before anything they use goes)
+            for (size_t f = 0; f < done.size(); f++) {
+                try { done[f].get(); }
+                catch (...) { if (!error) error = std::current_exception(); }
+            }
+            if (error) std::rethrow_exception(error);
         }
         // the candidates that may be in the top k, scored exactly as the exhaustive search does
         double threshold = shared.load();
@@ -541,6 +561,90 @@ private:
         return true;
     }
 
+    // The threads that search ranges of documents for the searches with threads > 1: started when
+    // first needed, as many as the most a search asked for (its own thread aside), kept until the
+    // scorer goes. Tasks of concurrent searches queue; a task never waits for another.
+    class Pool {
+    public:
+        Pool(): m_mutex(), m_wake(), m_tasks(), m_threads(), m_stop(false) {}
+        ~Pool() {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stop = true;
+            }
+            m_wake.notify_all();
+            for (size_t t = 0; t < m_threads.size(); t++) m_threads[t].join();
+        }
+        // runs work on a pool thread (at least threads of them); its future gives its end (or exception)
+        std::future<void> run(const std::function<void()> &work, const size_t threads) {
+            std::shared_ptr<std::packaged_task<void()> > task(new std::packaged_task<void()>(work));
+            std::future<void> done = task->get_future();
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                while (m_threads.size() < threads) m_threads.push_back(std::thread([this]() { loop(); }));
+                m_tasks.push([task]() { (*task)(); });
+            }
+            m_wake.notify_one();
+            return done;
+        }
+    private:
+        void loop() {
+            while (true) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    m_wake.wait(lock, [this]() { return m_stop || !m_tasks.empty(); });
+                    if (m_tasks.empty()) return;            //(m_stop)
+                    task = std::move(m_tasks.front());
+                    m_tasks.pop();
+                }
+                task();                     //(a packaged_task: its exception goes to its future)
+            }
+        }
+        std::mutex m_mutex;
+        std::condition_variable m_wake;
+        std::queue<std::function<void()> > m_tasks;
+        std::vector<std::thread> m_threads;
+        bool m_stop;
+    };
+    mutable Pool m_threadPool;
+
+    // A term's parsed directory, from the cache (read and parsed once per term: the scorer serves
+    // one immutable index); null if the index hasn't the term. The cache is emptied when it holds
+    // more than DIRECTORY_CACHE_BYTES, and when the scorer is used with another term index.
+    static const size_t DIRECTORY_CACHE_BYTES = 256u << 20;
+    std::shared_ptr<const NindTermIndex::TermDirectory> directoryOf(const NindTermIndex &termIndex,
+                                                                    const unsigned int ident,
+                                                                    NindReadBuffer &buffer) const {
+        {
+            std::shared_lock<std::shared_timed_mutex> lock(m_cacheMutex);
+            if (m_cachedIndex == &termIndex) {
+                const auto it = m_directories.find(ident);
+                if (it != m_directories.end()) return it->second;
+            }
+        }
+        std::shared_ptr<NindTermIndex::TermDirectory> directory(new NindTermIndex::TermDirectory());
+        if (!termIndex.getTermDirectory(ident, *directory, buffer)) directory.reset();
+        size_t bytes = sizeof(NindTermIndex::TermDirectory) + 64;
+        if (directory)
+            for (size_t c = 0; c < directory->categories.size(); c++)
+                bytes += directory->categories[c].blocks.size() * sizeof(NindTermIndex::Block)
+                         + directory->categories[c].inlinePostings.size() * sizeof(NindTermIndex::Document);
+        std::unique_lock<std::shared_timed_mutex> lock(m_cacheMutex);
+        if (m_cachedIndex != &termIndex || m_cacheBytes + bytes > DIRECTORY_CACHE_BYTES) {
+            m_directories.clear();
+            m_cacheBytes = 0;
+            m_cachedIndex = &termIndex;
+        }
+        const auto inserted = m_directories.insert(std::make_pair(ident, std::shared_ptr<const NindTermIndex::TermDirectory>(directory)));
+        if (inserted.second) m_cacheBytes += bytes;
+        return inserted.first->second;
+    }
+    mutable std::shared_timed_mutex m_cacheMutex;
+    mutable std::unordered_map<unsigned int, std::shared_ptr<const NindTermIndex::TermDirectory> > m_directories;
+    mutable const NindTermIndex *m_cachedIndex = 0;
+    mutable size_t m_cacheBytes = 0;
+
     uint32_t positionOf(const uint64_t docId) const {
         //ids 0..N-1 in order (an index NindIndexer built): the position is the id
         if (m_identity) return docId < m_docsNb ? (uint32_t)docId : NO_POSITION;
@@ -555,6 +659,13 @@ private:
     std::vector<uint64_t> m_docIds;     //position -> document id
     std::vector<uint32_t> m_lengths;    //position -> length (or, all under 2^16:)
     std::vector<uint16_t> m_shortLengths;
+    static const size_t PREFETCH_DISTANCE = 8;
+    void prefetchLength(const NindDocId docId) const {
+        const uint32_t position = positionOf(docId);
+        if (position == NO_POSITION) return;
+        if (m_shortLengths.empty()) __builtin_prefetch(&m_lengths[position]);
+        else __builtin_prefetch(&m_shortLengths[position]);
+    }
     double lengthOf(const uint32_t position) const {
         return m_shortLengths.empty() ? (double)m_lengths[position] : (double)m_shortLengths[position];
     }

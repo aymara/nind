@@ -75,7 +75,18 @@ public:
         unsigned int maxFrequency;      //the largest frequency in it
         unsigned int minLength;         //the shortest document length in it, 0 = unknown
         uint64_t offset, length;        //in the definition
+        /**\brief at most MAX_IMPACTS: the block's competitive (frequency, length) pairs, by
+        * decreasing frequency and length: none of its documents has a higher frequency and a shorter
+        * length than all of them (a block of more pairs: the last one is the corner of the rest), so
+        * a contribution increasing with the frequency and decreasing with the length is at most its
+        * largest over them; 0 = unknown (the documents' lengths weren't known) */
+        unsigned int impactsNb;
+        std::pair<unsigned int, unsigned int> impacts[4];
+        Block(): first(0), last(0), docsNb(0), maxFrequency(0), minLength(0), offset(0), length(0),
+            impactsNb(0), impacts() {}
     };
+    /**\brief the most (frequency, length) pairs of a block's descriptor */
+    static const unsigned int MAX_IMPACTS = 4;
     /**\brief A term's directory: per category, its inline postings or its blocks' descriptors */
     struct TermDirectory {
         struct Category {
