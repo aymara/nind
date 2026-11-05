@@ -237,6 +237,7 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         NindTermIndex termIndex(targetName, true, identification, specificsNumber,
                                 m_options.termIndirectionBlocSize ? m_options.termIndirectionBlocSize : stats.wordsNb + 1);
         termIndex.setDocumentLengths(m_options.documentLengths);
+        vector<pair<NindDocId, unsigned int> >().swap(m_options.documentLengths);   //16 bytes per document: the writer has its copy
         termIndex.beginBulk();
         //une catejgorie grammaticale du terme fusionnej : ses documents, tous shards confondus, ah plat
         //(16 octets par document : un terme dans des centaines de millions de documents tient en mejmoire)

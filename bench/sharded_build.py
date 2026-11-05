@@ -5,12 +5,14 @@ Usage: sharded_build.py CORPUS.jsonl OUT_DIR [--shards 1,4,8,16] [--workers 8] [
                         [--no-local-index]
 
 For each shard count (1 = direct build), builds OUT_DIR/s<N> and prints one CSV row. Memory is the
-RSS summed over the process tree, sampled every 0.2 s: `peak` over the whole build, `merge` once
-the workers are gone (the parent alone: the merge). Every index built after the first one is
-compared with it on queries made from the corpus's own lines: their top 10 must be identical, and
-it must pass verify_index. Each index is removed after its row but the first one.
+PSS summed over the process tree, less what the script held before the build, sampled every 0.2 s:
+`peak` over the whole build, `merge` once the workers are gone (the parent alone: the merge). Every
+index built after the first one is compared with it on queries made from the corpus's own lines:
+their top 10 must be identical, and it must pass verify_index. Each index is removed after its row
+but the first one.
 """
 import argparse
+import gc
 import json
 import os
 import random
@@ -22,9 +24,13 @@ from nind import _native as native
 from nind.nind_engine import NindEngine, NindIndexer
 
 
-def rss_of(pid):
-    with open("/proc/%d/statm" % pid) as f:
-        return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+def memory_of(pid):
+    # PSS, not RSS: forked workers map this process's pages, which RSS counts once per worker
+    with open("/proc/%d/smaps_rollup" % pid) as f:
+        for line in f:
+            if line.startswith("Pss:"):
+                return int(line.split()[1]) * 1024
+    return 0
 
 
 def children_of(pid):
@@ -42,6 +48,7 @@ class MemorySampler(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.peak = self.parent_alone = 0
+        self.baseline = memory_of(os.getpid())      # what this script already holds
         self.stopping = threading.Event()
 
     def run(self):
@@ -52,13 +59,13 @@ class MemorySampler(threading.Thread):
                 pid = pending.pop()
                 seen += 1
                 try:
-                    total += rss_of(pid)
+                    total += memory_of(pid)
                 except OSError:
                     continue
                 pending.extend(children_of(pid))
-            self.peak = max(self.peak, total)
+            self.peak = max(self.peak, total - self.baseline)
             if seen == 1:
-                self.parent_alone = max(self.parent_alone, total)
+                self.parent_alone = max(self.parent_alone, total - self.baseline)
 
 
 def queries_from(path, count):
@@ -123,7 +130,8 @@ def main():
             shards, args.workers, seconds, sampler.peak / 2**30, sampler.parent_alone / 2**30,
             directory_size(index_dir) / 2**30, engine.total_docs, identical), flush=True)
         del engine
-        if shards != 1 and reference is not results:
+        gc.collect()
+        if reference is not results:
             shutil.rmtree(index_dir)
 
 

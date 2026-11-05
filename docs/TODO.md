@@ -55,8 +55,27 @@ of 3.0.0 (format v2).
   On the nind side, done in 3.1.1: `NindTermAmose::addDocsToTerm` appends in
   place (node-by-node indexing, no bulk mode: per call cost flat, 12.9 vs
   66.4 µs at 50k nodes).
-- **Build memory.** ~19 bytes per token (7.8 GB for MS MARCO 8.8M); sharded
-  builds would bound it per shard.
+- **Hundreds of millions of documents** (recorded design: shards merged into
+  one standard index). Done: `index_jsonl(shards=N)` and a merge without
+  lists, Python dicts or global sort (`bench/README.md` section 6: same time
+  as a direct build, 5.25 vs 9.81 GB at 8.8M, top 10 identical). Left:
+  - **Run it for real.** No real corpus above 8.8M documents has been indexed
+    yet. A synthetic term in 350M documents went through shards and merge (18.3
+    GB, 71 MB); its `verify_index` and search were stopped by the machine's
+    memory pressure before they ended (the list-based verify then read it twice;
+    it now reads flat), so reading it back is unverified.
+  - **Merge memory.** Postings vectors grow by doubling (18.3 GB there, ~12
+    possible with a reserve from the shards' directories); the merge is one
+    thread, and needs the shards and the merged index on disk together.
+  - **Opening an index.** 7.3 s at 8.8M (4 min at 300M, extrapolated): the
+    native reader's tables, the names read whole and validated. `mmap`?
+  - **Updates.** Each one copies the whole generation (Python's immutable
+    generations), hundreds of GB at this size: not usable. Rejected so far:
+    search across segments, which would fix it. To decide.
+  - **Search.** Latency extrapolates to ~50 ms top 10 on one thread at 300M
+    (2.5 ms at 8.8M, N^0.83): intra-query threads, to measure; an exhaustive
+    search takes 12 bytes per document of scratch per concurrent search.
+  - **Amose.** `NindAmoseMerge` needs its CLI (below).
 - **Concurrency benchmark.** Rerun `bench/retrieval/concurrency.py` on format
   v2.
 - **Top 100.** Measure top 100 in the comparison benchmark (only top 10 and

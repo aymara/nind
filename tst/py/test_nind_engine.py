@@ -1268,7 +1268,7 @@ def assert_blocks_hold_their_shortest_document(engine):
     engine.search("common")                 # (switches to the last published build)
     snapshot = engine._snapshot
     term_index = snapshot.term_index._native
-    lengths = snapshot._doc_lengths
+    lengths = dict(zip(snapshot.doc_ids, snapshot._lengths))
     blocks = 0
     for term_id in range(1, snapshot.lexicon._native.get_identification().lexicon_words_nb + 1):
         for category in term_index.get_term_directory(term_id) or ():

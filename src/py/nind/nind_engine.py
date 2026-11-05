@@ -34,6 +34,7 @@ import tempfile
 import threading
 import time
 from array import array
+from bisect import bisect_left
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from itertools import accumulate, compress
@@ -343,22 +344,23 @@ class _Snapshot:
         meta = _read_meta(base)
         # an index written before tokenizer options were stored: the original tokenizer
         self.tokenizer_options = meta["tokenizer"] if meta is not None else LEGACY_TOKENIZER
-        lengths = _read_doc_lengths(base)
-        if lengths is not None:
-            self.doc_ids = sorted(lengths)
+        # arrays by increasing id, as in the file: 12 bytes per document (a dict and a list: ~130)
+        self._legacy_lengths = None
+        arrays = _read_doc_length_arrays(base)
+        if arrays is not None:
+            doc_ids, lengths = array('Q', arrays[0]), arrays[1]
         else:
             # written before document lengths were stored apart: read from the local index
             if self.local_index is None:
                 raise FileNotFoundError("No document lengths nor local index for %s" % base)
-            self.doc_ids = [ext_id for ext_id, _ in self.local_index.donneidentifiantsExternes()]
-            lengths = {doc_id: sum(len(term.localisation) for term in self.local_index.donneListeTermes(doc_id))
-                       for doc_id in self.doc_ids}
-        self._doc_lengths = lengths
-        self.total_docs = len(self.doc_ids)
-        total_len = sum(lengths.values())
-        self.avg_doc_len = total_len / self.total_docs if self.total_docs else 0
-        self.scorer = native.Bm25Scorer(array('Q', self.doc_ids), array('I', (lengths[d] for d in self.doc_ids)),
-                                        self.avg_doc_len)
+            doc_ids = array('Q', (ext_id for ext_id, _ in self.local_index.donneidentifiantsExternes()))
+            self._legacy_lengths = {doc_id: sum(len(term.localisation) for term in self.local_index.donneListeTermes(doc_id))
+                                    for doc_id in doc_ids}
+            lengths = array('I', (self._legacy_lengths[doc_id] for doc_id in doc_ids))
+        self.doc_ids, self._lengths = doc_ids, lengths
+        self.total_docs = len(doc_ids)
+        self.avg_doc_len = sum(lengths) / self.total_docs if self.total_docs else 0
+        self.scorer = native.Bm25Scorer(doc_ids, lengths, self.avg_doc_len)
         self.doc_names = _read_doc_names(base)
 
     def search(self, terms, k1, b, top_k, threads=1):
@@ -388,7 +390,12 @@ class _Snapshot:
         return sum(len(term_cg.documents) for term_cg in self.term_defs(term))
 
     def doc_len(self, doc_id):
-        return self._doc_lengths.get(doc_id, 0)
+        if self._legacy_lengths is not None:
+            return self._legacy_lengths.get(doc_id, 0)
+        position = bisect_left(self.doc_ids, doc_id)
+        if position < len(self.doc_ids) and self.doc_ids[position] == doc_id:
+            return self._lengths[position]
+        return 0
 
 
 class NindEngine:
