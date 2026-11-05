@@ -296,7 +296,11 @@ PYBIND11_MODULE(_native, m) {
         .def_readonly("max_frequency", &NindTermIndex::Block::maxFrequency)
         .def_readonly("min_length", &NindTermIndex::Block::minLength)
         .def_readonly("offset", &NindTermIndex::Block::offset)
-        .def_readonly("length", &NindTermIndex::Block::length);
+        .def_readonly("length", &NindTermIndex::Block::length)
+        // the competitive (frequency, length) pairs (empty: unknown lengths)
+        .def_property_readonly("impacts", [](const NindTermIndex::Block &block) {
+            return std::vector<std::pair<unsigned int, unsigned int> >(block.impacts, block.impacts + block.impactsNb);
+        });
     py::class_<NindTermIndex::TermDirectory::Category>(m, "DirectoryCategory")
         .def_readonly("cg", &NindTermIndex::TermDirectory::Category::cg)
         .def_readonly("frequency", &NindTermIndex::TermDirectory::Category::frequency)

@@ -380,6 +380,15 @@ are unchanged.
 <frejquenceDoc>         ::= <EntierULat>
 ```
 
+- **Impacts** (category flag 69 instead of 67, nind 3.2): every block descriptor of the
+  category ends with `<nbreImpacts> { <frejquence> <longueur> }` (`Entier1` 1..4, then
+  `EntierULat` pairs), the block's competitive (frequency, length) pairs, by decreasing frequency
+  and length: the Pareto frontier of (frequency high, length short), whose largest BM25
+  contribution is the block's exact maximum for any k1, b and idf. A frontier of more than 4
+  pairs keeps 3, then the corner of the rest (their highest frequency, the block's shortest
+  length): never below. Written when every document's length is known (as `<longueurMin>`);
+  otherwise flag 67 and no impacts. MS MARCO 8.8M: term index +2.8%, MaxScore top 10 −9%.
+  nind ≤ 3.1 can't read flag 69.
 - **Bit-packing** (flag 73, nind 3.1): values are packed least significant
   bit first, bit after bit across bytes; a block's widths are those of its
   largest gap and frequency difference (0 bits: all equal, e.g. consecutive

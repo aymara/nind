@@ -123,6 +123,8 @@ const unsigned int NindTermIndex::BLOCK_SIZE;
 ////////////////////////////////////////////////////////////
 #define FLAG_DEJFINITION (isFormatV2() ? 23 : 17)
 #define FLAG_CG (isFormatV2() ? 67 : 61)
+//format v2: a category whose block descriptors end with their impacts
+#define FLAG_CG_IMPACTS 69
 //<flagDejfinition=17>(1) <identifiantTerme>(4) = 5
 #define OFFSET_LONGUEUR 5
 //<flagDejfinition=17>(1) <identifiantTerme>(4) <longueurDonnejes>(3) = 8
@@ -144,7 +146,7 @@ const unsigned int NindTermIndex::BLOCK_SIZE;
 #define TAILLE_TESTE_BLOC_MAXIMUM 18
 //<premierDocRelatif>(9) <dernierDocRelatif>(9) <nbreDocsBloc>(5) <frejquenceMax>(5) <longueurMin>(5)
 //<offsetBloc>(4) <longueurBloc>(4) = 41
-#define TAILLE_DESCRIPTEUR_MAXIMUM 41
+#define TAILLE_DESCRIPTEUR_MAXIMUM (41 + 1 + 4 * 10)
 ////////////////////////////////////////////////////////////
 //brief Creates NindTermIndex with a specified name associated with.
 //param fileNameExtensionLess absolute path file name without extension
@@ -355,7 +357,8 @@ void NindTermIndex::parseDirectoryV2(const unsigned int ident,
     in.setEndInBuffer(longueurDonnejes);
     while (!in.endOfInBuffer()) {
         //<flagCg=67> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
-        if (in.getInt1() != FLAG_CG)
+        const unsigned int flagCg = in.getInt1();
+        if (flagCg != FLAG_CG && flagCg != FLAG_CG_IMPACTS)
             throw NindTermIndexException("NindTermIndex::getTermDef C : " + m_fileName);
         directory.categories.push_back(TermDirectory::Category());
         TermDirectory::Category &category = directory.categories.back();
@@ -396,6 +399,21 @@ void NindTermIndex::parseDirectoryV2(const unsigned int ident,
             block.minLength = in.getUIntLat();
             block.offset = in.getInt4();
             block.length = in.getInt4();
+            if (flagCg == FLAG_CG_IMPACTS) {
+                //<nbreImpacts> { <frejquence> <longueur> }: 1..MAX_IMPACTS pairs, by decreasing
+                //frequency and length, within the block's largest frequency and shortest length
+                block.impactsNb = in.getInt1();
+                if (block.impactsNb == 0 || block.impactsNb > MAX_IMPACTS)
+                    throw NindTermIndexException("NindTermIndex::getTermDef L : " + m_fileName);
+                for (unsigned int i = 0; i < block.impactsNb; i++) {
+                    block.impacts[i].first = in.getUIntLat();
+                    block.impacts[i].second = in.getUIntLat();
+                    if (block.impacts[i].first > block.maxFrequency || block.impacts[i].second < block.minLength
+                        || (i > 0 && (block.impacts[i].first >= block.impacts[i - 1].first
+                                      || block.impacts[i].second >= block.impacts[i - 1].second)))
+                        throw NindTermIndexException("NindTermIndex::getTermDef L : " + m_fileName);
+                }
+            }
             //a block after the first starts after the previous one's last document
             if (block.docsNb == 0 || (b > 0 && firstRelative == 0))
                 throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
@@ -693,8 +711,18 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
         }
         const size_t docsNb = documents.size();
         const size_t blocksNb = (docsNb <= BLOCK_SIZE) ? 0 : (docsNb + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        //<flagCg=67> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
-        m_file.putInt1(FLAG_CG);
+        //the blocks' descriptors (impacts: the category's flag says whether every block has them)
+        vector<Block> blocks;
+        bool impacts = blocksNb != 0;
+        for (size_t b = 0; b < blocksNb; b++) {
+            const size_t begin = b * BLOCK_SIZE;
+            const size_t end = (begin + BLOCK_SIZE < docsNb) ? begin + BLOCK_SIZE : docsNb;
+            blocks.push_back(describeBlock(&documents[begin], end - begin));
+            impacts = impacts && blocks.back().impactsNb != 0;
+        }
+        if (!impacts) for (size_t b = 0; b < blocks.size(); b++) blocks[b].impactsNb = 0;
+        //<flagCg=67|69> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
+        m_file.putInt1(impacts ? FLAG_CG_IMPACTS : FLAG_CG);
         m_file.putInt1((*it1).cg);
         m_file.putUIntLat64((*it1).frequency);
         m_file.putUIntLat64(docsNb);
@@ -714,7 +742,7 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
         for (size_t b = 0; b < blocksNb; b++) {
             const size_t begin = b * BLOCK_SIZE;
             const size_t end = (begin + BLOCK_SIZE < docsNb) ? begin + BLOCK_SIZE : docsNb;
-            const Block block = describeBlock(&documents[begin], end - begin);
+            const Block &block = blocks[b];
             const unsigned int patch = putBlockDescriptor(block, previousLast);
             pending.push_back(Pending{categoryDocuments.size() - 1, (*it1).cg, begin, end, patch});
             previousLast = block.last;
@@ -763,6 +791,24 @@ NindTermIndex::Block NindTermIndex::describeBlock(const Document *documents,
     }
     block.offset = 0;
     block.length = 0;
+    //the impacts (every length known): the Pareto frontier of (frequency high, length short), by
+    //decreasing frequency: a pair is kept if shorter than every pair of a higher frequency
+    if (block.minLength != 0) {
+        pair<unsigned int, unsigned int> pairs[BLOCK_SIZE];
+        for (size_t d = 0; d < docsNb; d++)
+            pairs[d] = pair<unsigned int, unsigned int>(documents[d].frequency, documentLength(documents[d].ident));
+        sort(pairs, pairs + docsNb, [](const pair<unsigned int, unsigned int> &x, const pair<unsigned int, unsigned int> &y) {
+            return x.first != y.first ? x.first > y.first : x.second < y.second; });
+        pair<unsigned int, unsigned int> frontier[BLOCK_SIZE];
+        size_t frontierNb = 0;
+        for (size_t d = 0; d < docsNb; d++)
+            if (frontierNb == 0 || pairs[d].second < frontier[frontierNb - 1].second) frontier[frontierNb++] = pairs[d];
+        //more than MAX_IMPACTS: the last one kept is the corner of the rest (their highest frequency,
+        //the block's shortest length): never below any of them
+        block.impactsNb = (unsigned int)min(frontierNb, (size_t)MAX_IMPACTS);
+        for (unsigned int i = 0; i < block.impactsNb; i++) block.impacts[i] = frontier[i];
+        if (frontierNb > MAX_IMPACTS) block.impacts[MAX_IMPACTS - 1].second = frontier[frontierNb - 1].second;
+    }
     return block;
 }
 ////////////////////////////////////////////////////////////
@@ -779,6 +825,14 @@ unsigned int NindTermIndex::putBlockDescriptor(const Block &block,
     const unsigned int patch = m_file.getOutBufferSize();
     m_file.putInt4(block.offset);
     m_file.putInt4(block.length);
+    //(a category of flag FLAG_CG_IMPACTS: every block has impacts)
+    if (block.impactsNb != 0) {
+        m_file.putInt1(block.impactsNb);
+        for (unsigned int i = 0; i < block.impactsNb; i++) {
+            m_file.putUIntLat(block.impacts[i].first);
+            m_file.putUIntLat(block.impacts[i].second);
+        }
+    }
     return patch;
 }
 ////////////////////////////////////////////////////////////
@@ -1096,7 +1150,10 @@ bool NindTermIndex::appendInPlace(const unsigned int ident,
     m_file.putInt1(FLAG_DEJFINITION);
     m_file.putInt4(ident);
     putDefinitionField(0);
-    m_file.putInt1(FLAG_CG);
+    bool impacts = true;
+    for (size_t b = 0; b < blocks.size(); b++) impacts = impacts && blocks[b].impactsNb != 0;
+    if (!impacts) for (size_t b = 0; b < blocks.size(); b++) blocks[b].impactsNb = 0;
+    m_file.putInt1(impacts ? FLAG_CG_IMPACTS : FLAG_CG);
     m_file.putInt1(cg);
     m_file.putUIntLat64(category.frequency + addedFrequency);
     m_file.putUIntLat64(category.docsNb + added.size());

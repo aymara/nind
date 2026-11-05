@@ -1224,6 +1224,16 @@ def assert_blocks_hold_their_shortest_document(engine):
                 docs = [d for d in postings if block.first <= d <= block.last]
                 assert len(docs) == block.docs_nb
                 assert block.min_length == min(lengths[d] for d in docs), (term_id, block.first)
+                # the impacts: the (frequency, length) Pareto frontier, at most 4 (then a corner)
+                frequencies = {d.ident: d.frequency for d in term_index.get_term_def(term_id)[0].documents}
+                pairs = sorted({(frequencies[d], lengths[d]) for d in docs}, key=lambda p: (-p[0], p[1]))
+                frontier = []
+                for pair in pairs:
+                    if not frontier or pair[1] < frontier[-1][1]:
+                        frontier.append(pair)
+                if len(frontier) > 4:
+                    frontier = frontier[:3] + [(frontier[3][0], frontier[-1][1])]
+                assert block.impacts == frontier, (term_id, block.first)
                 blocks += 1
     assert native.verify_index(snapshot.base, cross_check=True).ok
     return blocks
