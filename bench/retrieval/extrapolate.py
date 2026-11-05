@@ -62,7 +62,7 @@ def main():
         with open(os.path.join(r["data_dir"], "stats.json")) as f:
             sizes[dataset] = json.load(f)["documents"]
     systems = sorted({s for (d, s, _) in results if d in sizes},
-                     key=lambda s: ["nind", "nind+local", "lucene", "lucene+pos", "bm25s", "tantivy"].index(s))
+                     key=lambda s: ["nind", "nind+local", "nind-4t", "lucene", "lucene+pos", "bm25s", "tantivy"].index(s))
 
     targets = ["%gM" % (n / 1e6) if n < 1e9 else "%gG" % (n / 1e9) for n in args.to]
     print("| system | metric | " + " | ".join("%.1fM" % (sizes[d] / 1e6) for d in args.datasets)

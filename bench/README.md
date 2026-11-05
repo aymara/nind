@@ -180,6 +180,11 @@ is the few very frequent terms in the sample, whose postings lists are long.
 
 ## 4. Comparison with other indexers (`bench/retrieval/`)
 
+**The current results, readable, are on the documentation site:
+[Benchmarks](https://aymara.github.io/nind/benchmarks.html)** (`docs/benchmarks.md`,
+written by `bench/retrieval/site.py`). This section documents the method and keeps the
+detailed history.
+
 nind is only the indexing layer of the search stack: text analysis is LIMA's
 job, search Amose's. So the comparison is between indexes, not search
 engines: every system gets **the same tokens** and scores with **the same
@@ -192,6 +197,7 @@ analysis (a stand-in for LIMA) isn't any system's own.
 |---|---|---|
 | `nind` | `NindIndexer.index_jsonl` / `NindEngine.search`, no local index | `NindIndexer.update()`, in place |
 | `nind+local` | the same, with the local index (terms and positions per document, read by Amose) | in place |
+| `nind-4t` | `nind`, each query searched with 4 threads (`NindEngine(search_threads=4)`): the same results, a lower latency per query; no counterpart for the others (Anserini's searcher doesn't split a query) | (as `nind`) |
 | `lucene` | Lucene 10.4 through Anserini (`IndexCollection -pretokenized`, `SimpleSearcher` with `WhitespaceAnalyzer`), frequencies only | `SimpleIndexer -append`, in place |
 | `lucene+pos` | the same with `-storePositions -storeDocvectors` (what nind's local index holds) | in place |
 | `bm25s` | bm25s, `lucene` BM25 variant: precomputed score matrix, in memory | none: full rebuild |
@@ -258,6 +264,15 @@ build does include its JVM start, about 0.5 s). Per dataset and system:
 
 Results go to `WORK/results.jsonl` (the last run of a dataset/system/phase
 wins), `WORK/report.md` and `WORK/report.csv`.
+
+The documentation site's page is written from the `report.csv` files (the latest run, plus an
+earlier one for the systems it didn't measure again), with its charts (SVG, light and dark;
+needs matplotlib):
+
+```bash
+python bench/retrieval/site.py --current WORK/report.csv \
+    --previous bench/retrieval/results/2026-11-04/report.csv --docs docs --date YYYY-MM-DD --version X.Y.Z
+```
 
 ### What to expect from the scores
 
