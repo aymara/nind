@@ -1,0 +1,263 @@
+diff --git a/bench/retrieval/driver.py b/bench/retrieval/driver.py
+index 5fdf392..4a134e5 100644
+--- a/bench/retrieval/driver.py
++++ b/bench/retrieval/driver.py
+@@ -5,7 +5,7 @@
+     driver.py --work WORK --report-only
+ 
+ Each phase runs in its own process (worker.py). Its peak memory is the peak,
+-sampled every 50 ms, of the PSS summed over its whole process tree (nind's
++sampled every 50 ms or more (a large process costs more to read), of the PSS summed over its whole process tree (nind's
+ indexing worker processes, Anserini's JVM...); "largest process" is wait4's
+ ru_maxrss, the peak RSS of the largest single process. Results are appended
+ to WORK/results.jsonl (the last result of a dataset/system/phase wins), the
+@@ -26,6 +26,8 @@ import subprocess
+ import sys
+ import time
+ 
++import psutil
++
+ HERE = os.path.dirname(os.path.abspath(__file__))
+ sys.path.insert(0, HERE)
+ from systems import SYSTEMS  # noqa: E402
+@@ -39,7 +41,7 @@ def run_phase(python, phase, system, data_dir, work_dir, args):
+                "--threads", str(args.threads), "--k1", str(args.k1), "--b", str(args.b)]
+     if args.max_queries:
+         command += ["--max-queries", str(args.max_queries)]
+-    command += ["--warmup", str(args.warmup)]
++    command += ["--warmup", str(args.warmup), "--repeats", str(args.repeats)]
+     os.makedirs(work_dir, exist_ok=True)
+     log_path = os.path.join(work_dir, phase + ".log")
+     out_path = os.path.join(work_dir, phase + ".out")
+@@ -51,8 +53,10 @@ def run_phase(python, phase, system, data_dir, work_dir, args):
+             pid, status, usage = os.wait4(process.pid, os.WNOHANG)
+             if pid:
+                 break
++            sampling = time.perf_counter()
+             peak = max(peak, tree_memory(process.pid))
+-            time.sleep(0.05)
++            # reading a large process's memory map slows it down: at most 5% of the time
++            time.sleep(max(0.05, 20 * (time.perf_counter() - sampling)))
+     wall = time.perf_counter() - start
+     result = None
+     with open(out_path) as f:
+@@ -69,7 +73,6 @@ def run_phase(python, phase, system, data_dir, work_dir, args):
+ 
+ def tree_memory(pid):
+     """Bytes of memory of process pid and its descendants (PSS: shared pages split between them)."""
+-    import psutil
+     try:
+         root = psutil.Process(pid)
+         processes = [root] + root.children(recursive=True)
+@@ -148,7 +151,7 @@ COLUMNS = [  # (header, key, digits)
+     ("build largest process MB", "build_rss", 0),
+     ("index MB", "index_mb", 1), ("N", "documents", 0), ("avgdl", "avgdl", 2), ("open s", "open_s", 3),
+     ("k10 p50 ms", "k10_p50", 3), ("k10 p99 ms", "k10_p99", 3), ("k10 QPS", "k10_qps", 0),
+-    ("k1000 p50 ms", "k1000_p50", 3), ("search peak MB", "search_mem", 0),
++    ("k100 p50 ms", "k100_p50", 3), ("k1000 p50 ms", "k1000_p50", 3), ("search peak MB", "search_mem", 0),
+     ("nDCG@10", "nDCG@10", 4), ("R@100", "R@100", 4), ("RR@10", "RR@10", 4), ("top10 = nind", "vs_nind", 3),
+     ("update s", "update_s", 3), ("added docs", "added_documents", 0), ("update", "update_mode", 0),
+     ("update peak MB", "update_mem", 0), ("update = build", "update_vs_build", 3),
+@@ -191,7 +194,8 @@ def report(work):
+                    "index_mb": build["index_bytes"] / 2 ** 20 if "index_bytes" in build else None,
+                    "documents": search.get("documents"), "avgdl": search.get("avgdl"), "open_s": search.get("open_s"),
+                    "k10_p50": search.get("k10", {}).get("p50_ms"), "k10_p99": search.get("k10", {}).get("p99_ms"),
+-                   "k10_qps": search.get("k10", {}).get("qps"), "k1000_p50": search.get("k1000", {}).get("p50_ms"),
++                   "k10_qps": search.get("k10", {}).get("qps"), "k100_p50": search.get("k100", {}).get("p50_ms"),
++                   "k1000_p50": search.get("k1000", {}).get("p50_ms"),
+                    "search_mem": search.get("peak_mb"),
+                    "update_s": update.get("update_s"), "added_documents": update.get("added_documents"),
+                    "update_mode": update.get("update_mode"), "update_mem": update.get("peak_mb"),
+@@ -237,6 +241,7 @@ def main():
+     parser.add_argument("--b", type=float, default=0.75)
+     parser.add_argument("--max-queries", type=int, default=None, help="only the first N queries")
+     parser.add_argument("--warmup", type=int, default=200, help="queries of the warm-up pass")
++    parser.add_argument("--repeats", type=int, default=1, help="passes over the queries per k, in one search process")
+     parser.add_argument("--python", default=sys.executable, help="interpreter running worker.py")
+     parser.add_argument("--report-only", action="store_true")
+     args = parser.parse_args()
+diff --git a/bench/retrieval/systems.py b/bench/retrieval/systems.py
+index 6d843b9..6a71ce6 100644
+--- a/bench/retrieval/systems.py
++++ b/bench/retrieval/systems.py
+@@ -40,7 +40,7 @@ def dir_size(path):
+ 
+ 
+ class System:
+-    #: how the last update() went: "in place", or how it rebuilt the index
++    #: how the last update() went: "in place", "new segment", or how it rebuilt the index
+     update_mode = "in place"
+ 
+     def __init__(self, threads, k1, b):
+@@ -53,6 +53,10 @@ class System:
+         """What index size is measured on."""
+         return index_dir
+ 
++    def search_index(self, index_dir):
++        """The index a search of this system opens."""
++        return index_dir
++
+ 
+ # -- nind ---------------------------------------------------------------------
+ 
+@@ -60,6 +64,9 @@ class Nind(System):
+     """nind through its Python frontend (NindIndexer / NindEngine)."""
+     local_index = False
+     prefix = "corpus"
++    update_mode = "new segment"
++    #: what the last update did, for the results: segments, merges, documents merged
++    update_stats = None
+ 
+     def build(self, corpus, index_dir):
+         from nind.nind_engine import NindIndexer
+@@ -83,6 +90,9 @@ class Nind(System):
+         # a tier of segments merged in this update: record it
+         if update.stats is not None and update.stats.merges_nb:
+             self.update_mode = "merged %d documents" % update.stats.merged_docs_nb
++        if update.stats is not None:
++            self.update_stats = {"segments": update.stats.segments_nb, "merges": update.stats.merges_nb,
++                                 "merged_documents": update.stats.merged_docs_nb}
+ 
+     def index_path(self, index_dir):
+         with open(os.path.join(index_dir, self.prefix + ".CURRENT")) as f:
+@@ -94,20 +104,44 @@ class NindLocal(Nind):
+     local_index = True
+ 
+ 
++class NindSegments(Nind):
++    """nind built in shards left as segments (index_jsonl(shards=N)), searched as one index."""
++    shards = 8
++
++    def build(self, corpus, index_dir):
++        from nind.nind_engine import NindIndexer
++        from prepare import TOKENIZER
++        os.makedirs(index_dir, exist_ok=True)
++        NindIndexer(index_dir, self.prefix, tokenizer=TOKENIZER, local_index=self.local_index) \
++            .index_jsonl(corpus, workers=self.threads, shards=self.shards)
++
++
+ class NindThreads(Nind):
+     """nind searching each query with 4 threads (NindEngine(search_threads=4)): the same index and
+     results as nind, a lower latency per query on idle cores. Not comparable with the others'
+     single-thread latencies: Lucene can also split a query across threads, Anserini doesn't here."""
+     search_threads = 4
++    #: the system whose index this one searches
++    shared = "nind"
++
++    def search_index(self, index_dir):
++        # the shared system's own index (WORK/dataset/<shared>/index), not a copy built for this system:
++        # the same files, so that both are searched with the same page cache
++        shared = os.path.join(os.path.dirname(os.path.dirname(index_dir)), self.shared, os.path.basename(index_dir))
++        return shared if os.path.exists(os.path.join(shared, self.prefix + ".CURRENT")) else index_dir
+ 
+     def open(self, index_dir):
+-        # nind's own index (WORK/dataset/nind/index), not a copy built for this system: the same
+-        # files, so that both are searched with the same page cache
+         from nind.nind_engine import NindEngine
+-        shared = os.path.join(os.path.dirname(os.path.dirname(index_dir)), "nind", os.path.basename(index_dir))
+-        if os.path.exists(os.path.join(shared, self.prefix + ".CURRENT")):
+-            index_dir = shared
+-        return _NindSearcher(NindEngine(index_dir, self.prefix, search_threads=self.search_threads), self.k1, self.b)
++        return _NindSearcher(NindEngine(self.search_index(index_dir), self.prefix, search_threads=self.search_threads),
++                             self.k1, self.b)
++
++
++def _segments(shards):
++    return type("NindSegments%d" % shards, (NindSegments,), {"shards": shards})
++
++
++def _threads(threads, shared="nind"):
++    return type("NindThreads%d" % threads, (NindThreads,), {"search_threads": threads, "shared": shared})
+ 
+ 
+ class _NindSearcher:
+@@ -350,4 +384,6 @@ class _TantivySearcher:
+ 
+ 
+ SYSTEMS = {"nind": Nind, "nind+local": NindLocal, "nind-4t": NindThreads, "lucene": Lucene, "lucene+pos": LucenePositions,
+-           "bm25s": Bm25s, "tantivy": Tantivy}
++           "bm25s": Bm25s, "tantivy": Tantivy,
++           "nind-8s": _segments(8), "nind-32s": _segments(32),
++           "nind-8t": _threads(8), "nind-8s-8t": _threads(8, "nind-8s"), "nind-32s-8t": _threads(8, "nind-32s")}
+diff --git a/bench/retrieval/worker.py b/bench/retrieval/worker.py
+index f7fb029..16757e0 100644
+--- a/bench/retrieval/worker.py
++++ b/bench/retrieval/worker.py
+@@ -51,6 +51,37 @@ def latencies(searcher, queries, k):
+     return stats, results
+ 
+ 
++def repeated(searcher, queries, k, repeats):
++    """The queries asked repeats times: the median over the passes of each statistic, every pass's
++    too, and the results of the last pass."""
++    passes = []
++    for _ in range(repeats):
++        stats, results = latencies(searcher, queries, k)
++        passes.append(stats)
++    stats = {key: statistics.median(p[key] for p in passes) for key in passes[0]}
++    stats["passes"] = passes
++    return stats, results
++
++
++def set_page_cache(index, data_dir):
++    """Every search starts alike, whatever ran before: the index in the page cache, the corpus out of
++    it (left there, it fills this NUMA node and pushes the index's pages to the other one).
++    Returns the seconds spent reading the index."""
++    for name in ("corpus.jsonl", "base.jsonl", "add.jsonl"):
++        path = os.path.join(data_dir, name)
++        if os.path.exists(path):
++            descriptor = os.open(path, os.O_RDONLY)
++            os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
++            os.close(descriptor)
++    start = time.perf_counter()
++    for root, _, files in os.walk(index):
++        for name in files:
++            with open(os.path.join(root, name), "rb", buffering=0) as f:
++                while f.read(1 << 24):
++                    pass
++    return time.perf_counter() - start
++
++
+ def timed(function, *args):
+     start = time.perf_counter()
+     value = function(*args)
+@@ -69,6 +100,7 @@ def main():
+     parser.add_argument("--depth", type=int, default=1000, help="hits per query in the run file")
+     parser.add_argument("--max-queries", type=int, default=None, help="only the first N queries")
+     parser.add_argument("--warmup", type=int, default=200, help="queries of the warm-up pass")
++    parser.add_argument("--repeats", type=int, default=1, help="passes over the queries per k")
+     args = parser.parse_args()
+ 
+     system = SYSTEMS[args.system](args.threads, args.k1, args.b)
+@@ -84,13 +116,15 @@ def main():
+         out["index_bytes"] = dir_size(system.index_path(full_index))
+ 
+     elif args.phase == "search":
++        out["index_read_s"] = set_page_cache(system.search_index(full_index), args.data_dir)
+         out["open_s"], searcher = timed(system.open, full_index)
+         out.update(searcher.stats())
+         queries = read_queries(args.data_dir, args.max_queries)
+         out["queries"] = len(queries)
+         latencies(searcher, queries[:args.warmup], 10)       # warm-up (JIT, page cache)
+-        out["k10"], _ = latencies(searcher, queries, 10)
+-        out["k%d" % args.depth], results = latencies(searcher, queries, args.depth)
++        out["k10"], _ = repeated(searcher, queries, 10, args.repeats)
++        out["k100"], _ = repeated(searcher, queries, 100, args.repeats)
++        out["k%d" % args.depth], results = repeated(searcher, queries, args.depth, args.repeats)
+         write_run(os.path.join(args.work_dir, "run.txt"), args.system, results)
+ 
+     else:
+@@ -102,11 +136,12 @@ def main():
+             out["added_documents"] = sum(1 for line in f if line.strip())
+         out["update_s"], _ = timed(system.update, index, add, corpus)
+         out["update_mode"] = system.update_mode
++        out["update_stats"] = getattr(system, "update_stats", None)
+         out["index_bytes"] = dir_size(system.index_path(index))
+         searcher = system.open(index)
+         out.update(searcher.stats())
+         # the updated index must answer like the one built at once (see driver.py's report)
+-        _, results = latencies(searcher, read_queries(args.data_dir, args.max_queries), 10)
++        out["k10_updated"], results = latencies(searcher, read_queries(args.data_dir, args.max_queries), 10)
+         write_run(os.path.join(args.work_dir, "run-update.txt"), args.system, results)
+         del searcher
+         shutil.rmtree(index, ignore_errors=True)

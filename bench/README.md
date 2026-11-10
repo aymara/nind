@@ -195,9 +195,11 @@ analysis (a stand-in for LIMA) isn't any system's own.
 
 | system | what | update |
 |---|---|---|
-| `nind` | `NindIndexer.index_jsonl` / `NindEngine.search`, no local index | `NindIndexer.update()`, in place |
-| `nind+local` | the same, with the local index (terms and positions per document, read by Amose) | in place |
-| `nind-4t` | `nind`, each query searched with 4 threads (`NindEngine(search_threads=4)`): the same results, a lower latency per query; no counterpart for the others (Anserini's searcher doesn't split a query) | (as `nind`) |
+| `nind` | `NindIndexer.index_jsonl` / `NindEngine.search`, no local index | `NindIndexer.update()`: a new segment (in place before segments) |
+| `nind+local` | the same, with the local index (terms and positions per document, read by Amose) | a new segment |
+| `nind-8s`, `nind-32s` | `index_jsonl(shards=8 or 32)`: the shards kept as segments, searched as one | a new segment, tiered merges |
+| `nind-4t`, `nind-8t` | `nind`'s index, each query searched with 4 or 8 threads (`NindEngine(search_threads=t)`): the same results, a lower latency per query; no counterpart for the others (Anserini's searcher doesn't split a query) | (as `nind`) |
+| `nind-8s-8t`, `nind-32s-8t` | `nind-8s`'s or `nind-32s`'s index, 8 threads per query | (as theirs) |
 | `lucene` | Lucene 10.4 through Anserini (`IndexCollection -pretokenized`, `SimpleSearcher` with `WhitespaceAnalyzer`), frequencies only | `SimpleIndexer -append`, in place |
 | `lucene+pos` | the same with `-storePositions -storeDocvectors` (what nind's local index holds) | in place |
 | `bm25s` | bm25s, `lucene` BM25 variant: precomputed score matrix, in memory | none: full rebuild |
@@ -253,9 +255,11 @@ build does include its JVM start, about 0.5 s). Per dataset and system:
 - **build**: index the whole corpus with `--threads` threads (Anserini
   parallelizes over input files: the corpus is split into one part per
   thread; bm25s is single-threaded); index size on disk.
-- **search**: open time, N and avgdl as the index sees them (they must be
-  equal for all), single-thread latency per query (p50, p99, QPS) at k=10 and
-  k=1000 after a warm-up pass, and a run file (k=1000) scored with
+- **search**: the corpus evicted from the page cache (`posix_fadvise`) and the
+  index files read once (`index_read_s`), then open time, N and avgdl as the
+  index sees them (they must be equal for all), single-thread latency per query
+  (p50, p99, QPS) at k=10, 100 and 1000 after a warm-up (`--warmup` queries),
+  the median of `--repeats` passes (each pass kept in `passes`), and a run file (k=1000) scored with
   ir_measures; `top10 = nind` is the mean overlap of the system's top 10 with
   nind's.
 - **update**: build the corpus minus the update, add the update (in place, or
@@ -265,13 +269,17 @@ build does include its JVM start, about 0.5 s). Per dataset and system:
 Results go to `WORK/results.jsonl` (the last run of a dataset/system/phase
 wins), `WORK/report.md` and `WORK/report.csv`.
 
-The documentation site's page is written from the `report.csv` files (the latest run, plus an
-earlier one for the systems it didn't measure again), with its charts (SVG, light and dark;
-needs matplotlib):
+The documentation site's page is written from the server's `report.csv` files and thread runs
+(section 7), and keeps the laptop's (`--laptop`, oldest first: later files override what they
+measured again), with its charts (SVG, light and dark; needs matplotlib):
 
 ```bash
-python bench/retrieval/site.py --current WORK/report.csv \
-    --previous bench/retrieval/results/2026-11-04/report.csv --docs docs --date YYYY-MM-DD --version X.Y.Z
+R=bench/retrieval/results
+python bench/retrieval/site.py --docs docs --date YYYY-MM-DD --version X.Y.Z \
+    --server $R/2026-11-10-server/v1-report.csv $R/2026-11-10-server/v2-report.csv \
+    --threads $R/2026-11-10-server \
+    --laptop $R/2026-11-04/report.csv $R/2026-11-05/report.csv \
+    --laptop-date 2026-11-05 --laptop-previous-date 2026-11-04
 ```
 
 ### What to expect from the scores
@@ -521,7 +529,8 @@ Single-thread throughput is unchanged; 16 threads give 5.4x on FiQA and 3.3x
 on MS MARCO 1M, where each concurrent search scores into its own array of
 1M documents (memory bandwidth); the tail latency drops from hundreds of
 milliseconds (calls queuing behind the lock) to a few. Raw results:
-`bench/retrieval/results/2026-11-04/concurrency.jsonl`.
+`bench/retrieval/results/2026-11-04/concurrency.jsonl`. Format v2, up to 48
+threads and 138M documents: section 7.
 
 ## 6. Sharded builds (`bench/sharded_build.py`, `bench/worst_case_term.py`)
 
@@ -563,6 +572,72 @@ an 8-shard build takes 25 s (46 s direct), +88k documents 2.6 s, top 10 identica
 The merged term file takes 71 MB. The run was stopped under system memory pressure
 during `verify_index` (possibly a contributor: it read such a term twice as lists at
 the time; it reads flat now), so the read back and the search weren't measured: rerun it.
+
+## 7. Server runs: 138M documents, 48 threads (2026-11-05 to 2026-11-10)
+
+Section 4's comparison on a larger machine, to the size where it had predicted
+Lucene would overtake nind (~12M documents), and with the threads it couldn't
+test. The readable results are on the site's page; raw results, the scripts and
+the environment: `bench/retrieval/results/2026-11-10-server/` (its README).
+
+**Machine.** 2 × Xeon Gold 5317 (12 cores, 24 hardware threads, one NUMA node
+each), 251 GB, SATA SSDs; nind 3.2.0 (commit `a8716f6` plus this harness),
+Anserini 2.3.0 (Lucene 10.4) on Java 21, tantivy-py 0.27.0, bm25s 0.3.16.
+Everything comparable runs on socket 0's 12 physical cores with its memory
+(`numactl --physcpubind=0-11 --preferred=0`); a watchdog stops a run when free
+memory drops under 15 GB (it never did). No root: the page cache is evicted per
+file (`posix_fadvise`), not dropped.
+
+**Data.** MS MARCO v1 (8.84M passages, its 6,980 dev queries, all of them) and
+MS MARCO v2 (`msmarco-passage-v2/dev1`: 138,364,196 passages, 3,903 queries; 4.77G
+tokens without stopwords, 6.72G with them). v2 is tokenized in parallel by
+`scripts/prepare_v2.py` (the same `prepare.analyse`; its first 200k documents
+checked identical to `prepare.py`'s), prefixes of 1M to 64M by `subset.py`.
+
+**Stages.** 1: every system on v1 and BEIR, 3 passes per k, builds and updates
+three times (their spread: a few percent). 2: v2 prefixes 1M–138M (a whole pass
+of warm-up, then one pass; two at 138M), the 16M and 138M updates, stopwords
+kept at 16M and 138M, `verify_index` on every segment of the one-index and 8-segment builds at 138M. 3: threads per query,
+throughput, build threads. About 14 h, 24 h and 9 h.
+
+### Findings
+
+- **No crossover.** nind's single-thread top 10 stays at or below Lucene's up to
+  138M (16M: 3.53 vs 4.54 ms; 64M: 10.2 vs 13.2; 138M: 20.5 vs 20.6 ms). The
+  growth exponents between 16M and 138M are 0.81 for nind and 0.71 for Lucene
+  (tantivy 1.0): extrapolating 8.8M's exponents predicted the crossover too early.
+  The tail is Lucene's: p99 365 vs 237 ms at 138M.
+- **Segments are what makes threads pay.** One index searched with 4 threads
+  is 2.6× faster at 138M (8.08 ms) and stops there; 8 segments with 8–12 threads
+  are 7× faster (2.84 ms), 32 segments with 16 threads 2.49 ms. Every layout
+  returns the same top 10 (overlap 1.000).
+- **Stopwords kept stays nind's weak case.** At 138M: 138 ms vs 36 ms for Lucene
+  on one thread (16M: 15.5 vs 6.1 ms), 17.2 ms with 8 segments and 8 threads.
+- **Throughput scales with cores, not hardware threads.** One shared
+  `NindEngine`: 11.5× on 12 cores, 20.6× on 24 at 8.8M (3,947 queries/s), 18.7×
+  at 138M (392/s); 48 hardware threads add 0–21%. One index gives the most
+  throughput: segments and threads per query cost total work.
+- **Builds.** One index has one writer: 1,426 s and 102 GB of memory at 138M
+  (~22 bytes per token), its threads only tokenize (best at 8). 32 segments build
+  in parallel: 507 s and 30 GB with 8 threads, 230 s (106 GB) with 48, against
+  883 s and 26 GB for Lucene (1,241 s with 48 unpinned threads: Lucene and
+  tantivy get slower across both sockets). At 8.8M, 32 segments take 12.4 s on
+  48 threads (168 s on 1).
+- **Updates.** +1% (1.38M documents) at 138M: a new segment, 59.6 s for one
+  index, 77–84 s for 8 or 32 segments, against 11.6 s for Lucene and 16.6 s for
+  tantivy. The first update of a 32-segment build merges a tier: 96 s at 8.8M,
+  239 s at 16M (14.5M documents); at 138M the segments are too large to merge.
+- **The format holds at 138M.** `verify_index` read back every definition of
+  every segment of the one-index and 8-segment builds: 4.0G postings without
+  stopwords, 5.2G with them (at most 560 s and 6.7 GB per index or segment).
+- **Parity.** nDCG@10 0.0790 (nind), 0.0808 (Lucene), 0.0791 (tantivy) at 138M;
+  top-10 overlap with nind 0.993 and 0.980 (one-byte lengths, ties).
+- **Crossing sockets costs.** Threads per query past 12 (both sockets) are slower
+  for almost every layout; so are Lucene's and tantivy's builds.
+- **Separate processes vary.** The same search loop, in a new process each time,
+  runs at 2.12 or 2.67 ms (8.8M, one thread; most runs 2.67). Transparent huge pages,
+  the memory sampler and document names were ruled out; passes inside one process
+  agree within 1%. Stage 3's thread runs show 2.10 ms where stage 1 has 2.66.
 
 ## Notes
 

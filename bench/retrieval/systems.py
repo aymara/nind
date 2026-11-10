@@ -40,7 +40,7 @@ def dir_size(path):
 
 
 class System:
-    #: how the last update() went: "in place", or how it rebuilt the index
+    #: how the last update() went: "in place", "new segment", or how it rebuilt the index
     update_mode = "in place"
 
     def __init__(self, threads, k1, b):
@@ -53,6 +53,10 @@ class System:
         """What index size is measured on."""
         return index_dir
 
+    def search_index(self, index_dir):
+        """The index a search of this system opens."""
+        return index_dir
+
 
 # -- nind ---------------------------------------------------------------------
 
@@ -60,6 +64,9 @@ class Nind(System):
     """nind through its Python frontend (NindIndexer / NindEngine)."""
     local_index = False
     prefix = "corpus"
+    update_mode = "new segment"
+    #: what the last update did, for the results: segments, merges, documents merged
+    update_stats = None
 
     def build(self, corpus, index_dir):
         from nind.nind_engine import NindIndexer
@@ -83,6 +90,9 @@ class Nind(System):
         # a tier of segments merged in this update: record it
         if update.stats is not None and update.stats.merges_nb:
             self.update_mode = "merged %d documents" % update.stats.merged_docs_nb
+        if update.stats is not None:
+            self.update_stats = {"segments": update.stats.segments_nb, "merges": update.stats.merges_nb,
+                                 "merged_documents": update.stats.merged_docs_nb}
 
     def index_path(self, index_dir):
         with open(os.path.join(index_dir, self.prefix + ".CURRENT")) as f:
@@ -94,20 +104,44 @@ class NindLocal(Nind):
     local_index = True
 
 
+class NindSegments(Nind):
+    """nind built in shards left as segments (index_jsonl(shards=N)), searched as one index."""
+    shards = 8
+
+    def build(self, corpus, index_dir):
+        from nind.nind_engine import NindIndexer
+        from prepare import TOKENIZER
+        os.makedirs(index_dir, exist_ok=True)
+        NindIndexer(index_dir, self.prefix, tokenizer=TOKENIZER, local_index=self.local_index) \
+            .index_jsonl(corpus, workers=self.threads, shards=self.shards)
+
+
 class NindThreads(Nind):
     """nind searching each query with 4 threads (NindEngine(search_threads=4)): the same index and
     results as nind, a lower latency per query on idle cores. Not comparable with the others'
     single-thread latencies: Lucene can also split a query across threads, Anserini doesn't here."""
     search_threads = 4
+    #: the system whose index this one searches
+    shared = "nind"
+
+    def search_index(self, index_dir):
+        # the shared system's own index (WORK/dataset/<shared>/index), not a copy built for this system:
+        # the same files, so that both are searched with the same page cache
+        shared = os.path.join(os.path.dirname(os.path.dirname(index_dir)), self.shared, os.path.basename(index_dir))
+        return shared if os.path.exists(os.path.join(shared, self.prefix + ".CURRENT")) else index_dir
 
     def open(self, index_dir):
-        # nind's own index (WORK/dataset/nind/index), not a copy built for this system: the same
-        # files, so that both are searched with the same page cache
         from nind.nind_engine import NindEngine
-        shared = os.path.join(os.path.dirname(os.path.dirname(index_dir)), "nind", os.path.basename(index_dir))
-        if os.path.exists(os.path.join(shared, self.prefix + ".CURRENT")):
-            index_dir = shared
-        return _NindSearcher(NindEngine(index_dir, self.prefix, search_threads=self.search_threads), self.k1, self.b)
+        return _NindSearcher(NindEngine(self.search_index(index_dir), self.prefix, search_threads=self.search_threads),
+                             self.k1, self.b)
+
+
+def _segments(shards):
+    return type("NindSegments%d" % shards, (NindSegments,), {"shards": shards})
+
+
+def _threads(threads, shared="nind"):
+    return type("NindThreads%d" % threads, (NindThreads,), {"search_threads": threads, "shared": shared})
 
 
 class _NindSearcher:
@@ -350,4 +384,6 @@ class _TantivySearcher:
 
 
 SYSTEMS = {"nind": Nind, "nind+local": NindLocal, "nind-4t": NindThreads, "lucene": Lucene, "lucene+pos": LucenePositions,
-           "bm25s": Bm25s, "tantivy": Tantivy}
+           "bm25s": Bm25s, "tantivy": Tantivy,
+           "nind-8s": _segments(8), "nind-32s": _segments(32),
+           "nind-8t": _threads(8), "nind-8s-8t": _threads(8, "nind-8s"), "nind-32s-8t": _threads(8, "nind-32s")}
