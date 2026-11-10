@@ -1,0 +1,16 @@
+Thu Nov  5 07:44:08 PM CET 2026
+a8716f69e7db44d7f4d4416d0193471238733095
+ M bench/retrieval/driver.py
+ M bench/retrieval/systems.py
+ M bench/retrieval/worker.py
+CPU(s):                                  48
+Model name:                              Intel(R) Xeon(R) Gold 5317 CPU @ 3.00GHz
+5.14.0-687.58.1.el9_8.x86_64
+openjdk version "21.0.13" 2026-10-20 LTS
+nind 3.2.0
+tantivy 0.27.0
+bm25s 0.3.16
+pyserini 2.4.0
+numpy 2.5.4
+g++ (GCC) 11.5.0 20240719 (Red Hat 11.5.0-14)
+[always] madvise never

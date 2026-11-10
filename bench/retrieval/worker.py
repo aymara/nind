@@ -51,6 +51,37 @@ def latencies(searcher, queries, k):
     return stats, results
 
 
+def repeated(searcher, queries, k, repeats):
+    """The queries asked repeats times: the median over the passes of each statistic, every pass's
+    too, and the results of the last pass."""
+    passes = []
+    for _ in range(repeats):
+        stats, results = latencies(searcher, queries, k)
+        passes.append(stats)
+    stats = {key: statistics.median(p[key] for p in passes) for key in passes[0]}
+    stats["passes"] = passes
+    return stats, results
+
+
+def set_page_cache(index, data_dir):
+    """Every search starts alike, whatever ran before: the index in the page cache, the corpus out of
+    it (left there, it fills this NUMA node and pushes the index's pages to the other one).
+    Returns the seconds spent reading the index."""
+    for name in ("corpus.jsonl", "base.jsonl", "add.jsonl"):
+        path = os.path.join(data_dir, name)
+        if os.path.exists(path):
+            descriptor = os.open(path, os.O_RDONLY)
+            os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.close(descriptor)
+    start = time.perf_counter()
+    for root, _, files in os.walk(index):
+        for name in files:
+            with open(os.path.join(root, name), "rb", buffering=0) as f:
+                while f.read(1 << 24):
+                    pass
+    return time.perf_counter() - start
+
+
 def timed(function, *args):
     start = time.perf_counter()
     value = function(*args)
@@ -69,6 +100,7 @@ def main():
     parser.add_argument("--depth", type=int, default=1000, help="hits per query in the run file")
     parser.add_argument("--max-queries", type=int, default=None, help="only the first N queries")
     parser.add_argument("--warmup", type=int, default=200, help="queries of the warm-up pass")
+    parser.add_argument("--repeats", type=int, default=1, help="passes over the queries per k")
     args = parser.parse_args()
 
     system = SYSTEMS[args.system](args.threads, args.k1, args.b)
@@ -84,13 +116,15 @@ def main():
         out["index_bytes"] = dir_size(system.index_path(full_index))
 
     elif args.phase == "search":
+        out["index_read_s"] = set_page_cache(system.search_index(full_index), args.data_dir)
         out["open_s"], searcher = timed(system.open, full_index)
         out.update(searcher.stats())
         queries = read_queries(args.data_dir, args.max_queries)
         out["queries"] = len(queries)
         latencies(searcher, queries[:args.warmup], 10)       # warm-up (JIT, page cache)
-        out["k10"], _ = latencies(searcher, queries, 10)
-        out["k%d" % args.depth], results = latencies(searcher, queries, args.depth)
+        out["k10"], _ = repeated(searcher, queries, 10, args.repeats)
+        out["k100"], _ = repeated(searcher, queries, 100, args.repeats)
+        out["k%d" % args.depth], results = repeated(searcher, queries, args.depth, args.repeats)
         write_run(os.path.join(args.work_dir, "run.txt"), args.system, results)
 
     else:
@@ -102,11 +136,12 @@ def main():
             out["added_documents"] = sum(1 for line in f if line.strip())
         out["update_s"], _ = timed(system.update, index, add, corpus)
         out["update_mode"] = system.update_mode
+        out["update_stats"] = getattr(system, "update_stats", None)
         out["index_bytes"] = dir_size(system.index_path(index))
         searcher = system.open(index)
         out.update(searcher.stats())
         # the updated index must answer like the one built at once (see driver.py's report)
-        _, results = latencies(searcher, read_queries(args.data_dir, args.max_queries), 10)
+        out["k10_updated"], results = latencies(searcher, read_queries(args.data_dir, args.max_queries), 10)
         write_run(os.path.join(args.work_dir, "run-update.txt"), args.system, results)
         del searcher
         shutil.rmtree(index, ignore_errors=True)

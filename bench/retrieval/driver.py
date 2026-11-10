@@ -5,7 +5,7 @@
     driver.py --work WORK --report-only
 
 Each phase runs in its own process (worker.py). Its peak memory is the peak,
-sampled every 50 ms, of the PSS summed over its whole process tree (nind's
+sampled every 50 ms or more (a large process costs more to read), of the PSS summed over its whole process tree (nind's
 indexing worker processes, Anserini's JVM...); "largest process" is wait4's
 ru_maxrss, the peak RSS of the largest single process. Results are appended
 to WORK/results.jsonl (the last result of a dataset/system/phase wins), the
@@ -26,6 +26,8 @@ import subprocess
 import sys
 import time
 
+import psutil
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from systems import SYSTEMS  # noqa: E402
@@ -39,7 +41,7 @@ def run_phase(python, phase, system, data_dir, work_dir, args):
                "--threads", str(args.threads), "--k1", str(args.k1), "--b", str(args.b)]
     if args.max_queries:
         command += ["--max-queries", str(args.max_queries)]
-    command += ["--warmup", str(args.warmup)]
+    command += ["--warmup", str(args.warmup), "--repeats", str(args.repeats)]
     os.makedirs(work_dir, exist_ok=True)
     log_path = os.path.join(work_dir, phase + ".log")
     out_path = os.path.join(work_dir, phase + ".out")
@@ -51,8 +53,10 @@ def run_phase(python, phase, system, data_dir, work_dir, args):
             pid, status, usage = os.wait4(process.pid, os.WNOHANG)
             if pid:
                 break
+            sampling = time.perf_counter()
             peak = max(peak, tree_memory(process.pid))
-            time.sleep(0.05)
+            # reading a large process's memory map slows it down: at most 5% of the time
+            time.sleep(max(0.05, 20 * (time.perf_counter() - sampling)))
     wall = time.perf_counter() - start
     result = None
     with open(out_path) as f:
@@ -69,7 +73,6 @@ def run_phase(python, phase, system, data_dir, work_dir, args):
 
 def tree_memory(pid):
     """Bytes of memory of process pid and its descendants (PSS: shared pages split between them)."""
-    import psutil
     try:
         root = psutil.Process(pid)
         processes = [root] + root.children(recursive=True)
@@ -148,7 +151,7 @@ COLUMNS = [  # (header, key, digits)
     ("build largest process MB", "build_rss", 0),
     ("index MB", "index_mb", 1), ("N", "documents", 0), ("avgdl", "avgdl", 2), ("open s", "open_s", 3),
     ("k10 p50 ms", "k10_p50", 3), ("k10 p99 ms", "k10_p99", 3), ("k10 QPS", "k10_qps", 0),
-    ("k1000 p50 ms", "k1000_p50", 3), ("search peak MB", "search_mem", 0),
+    ("k100 p50 ms", "k100_p50", 3), ("k1000 p50 ms", "k1000_p50", 3), ("search peak MB", "search_mem", 0),
     ("nDCG@10", "nDCG@10", 4), ("R@100", "R@100", 4), ("RR@10", "RR@10", 4), ("top10 = nind", "vs_nind", 3),
     ("update s", "update_s", 3), ("added docs", "added_documents", 0), ("update", "update_mode", 0),
     ("update peak MB", "update_mem", 0), ("update = build", "update_vs_build", 3),
@@ -191,7 +194,8 @@ def report(work):
                    "index_mb": build["index_bytes"] / 2 ** 20 if "index_bytes" in build else None,
                    "documents": search.get("documents"), "avgdl": search.get("avgdl"), "open_s": search.get("open_s"),
                    "k10_p50": search.get("k10", {}).get("p50_ms"), "k10_p99": search.get("k10", {}).get("p99_ms"),
-                   "k10_qps": search.get("k10", {}).get("qps"), "k1000_p50": search.get("k1000", {}).get("p50_ms"),
+                   "k10_qps": search.get("k10", {}).get("qps"), "k100_p50": search.get("k100", {}).get("p50_ms"),
+                   "k1000_p50": search.get("k1000", {}).get("p50_ms"),
                    "search_mem": search.get("peak_mb"),
                    "update_s": update.get("update_s"), "added_documents": update.get("added_documents"),
                    "update_mode": update.get("update_mode"), "update_mem": update.get("peak_mb"),
@@ -237,6 +241,7 @@ def main():
     parser.add_argument("--b", type=float, default=0.75)
     parser.add_argument("--max-queries", type=int, default=None, help="only the first N queries")
     parser.add_argument("--warmup", type=int, default=200, help="queries of the warm-up pass")
+    parser.add_argument("--repeats", type=int, default=1, help="passes over the queries per k, in one search process")
     parser.add_argument("--python", default=sys.executable, help="interpreter running worker.py")
     parser.add_argument("--report-only", action="store_true")
     args = parser.parse_args()

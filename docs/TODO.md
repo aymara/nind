@@ -58,12 +58,15 @@ of 3.0.0 (format v2).
   `index_jsonl(shards=N)`, a merge without lists, Python dicts or global sort,
   search across segments, updates that cost what they change, tiered merges
   (+88k documents in 2.6 s at 8.8M, build 25 s vs 46 s, identical top 10). Left:
-  - **Run it for real.** No real corpus above 8.8M documents has been indexed
-    yet. A synthetic term in 350M documents went through shards and merge (18.3
-    GB, 71 MB); the run was stopped under system memory pressure during
-    `verify_index` (it then read such a term twice as lists, possibly a
+  - [x] **Run it for real.** MS MARCO v2, 138M passages (`bench/README.md`
+    section 7): builds direct and in 8 or 32 segments, updates, search with
+    threads, `verify_index` on every segment (4.0G and 5.2G postings), the same
+    top 10 for every layout.
+  - **Worst-case term.** A synthetic term in 350M documents went through shards
+    and merge (18.3 GB, 71 MB); the run was stopped under system memory pressure
+    during `verify_index` (it then read such a term twice as lists, possibly a
     contributor; it reads flat now), so reading it back is unverified:
-    `bench/worst_case_term.py` to rerun.
+    `bench/worst_case_term.py` to rerun (the server has the room).
   - **Merge memory.** Postings vectors grow by doubling (18.3 GB there, ~12
     possible with a reserve from the shards' directories); the merge is one
     thread, and needs the shards and the merged index on disk together.
@@ -78,16 +81,26 @@ of 3.0.0 (format v2).
   - **Writer memory.** An update needing a lookup (removal, replacement, name)
     opens the whole index, ~40 bytes per document (~12 GB at 300M): lookups in
     the files instead? The scorer's 256 MB directory cache is per segment.
-  - **Search.** Measure at 100M+ with threads; an exhaustive search takes 12
-    bytes per document of scratch per concurrent search (per segment, so at
-    most its own size at a time).
+  - [x] **Search at 100M+ with threads** (section 7): one index stops gaining at
+    4 threads (2.6×), 8 segments reach 7× on 8–12. An exhaustive search takes 12
+    bytes per document of scratch per concurrent search (per segment, so at most
+    its own size at a time).
+  - **Direct builds at 138M**: 102 GB of memory and 1,426 s (one writer); 32
+    segments: 30 GB, 507 s. Make segments the documented way past ~10M?
+  - **Updates at 138M**: +1% in 60–84 s (a new segment) against 12 s for Lucene
+    and 17 s for tantivy: where does it go?
   - **Amose.** Adapt it to `NindSegmentedIndex`/`NindSegmentedUpdate` (compound
     words on updates, term specifics: see the proposal); `NindAmoseMerge` needs
     its CLI (below). This doesn't constrain nind's design any more.
-- **Concurrency benchmark.** Rerun `bench/retrieval/concurrency.py` on format
-  v2.
-- **Top 100.** Measure top 100 in the comparison benchmark (only top 10 and
-  top 1000 are timed).
+- [x] **Concurrency benchmark** on format v2, up to 48 threads and 138M
+  (section 7): 20.6× on 24 cores.
+- [x] **Top 100** in the comparison benchmark.
+- **Stopwords kept at scale.** MS MARCO v2 138M, top 10 on one thread: 138 ms vs
+  36 ms for Lucene (16M: 15.5 vs 6.1 ms); the gap grows with the corpus.
+- **Latency varies between processes.** The same search, one process per run:
+  2.12 or 2.67 ms (8.8M, one thread). Not huge pages, the memory sampler or
+  names; NUMA placement of the page cache or of the scorer's arrays?
+- **Index larger than memory** (the benchmarks' stage 5): not run yet.
 - **Search, what's left** (done in 3.1.2–3.2: windowed block-max MaxScore,
   intra-query threads with a persistent pool, impacts, a directory cache,
   length prefetching; MS MARCO 8.8M top 10: 2.4–2.5 ms on one thread, about
