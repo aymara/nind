@@ -65,6 +65,9 @@ public:
     /**\brief Return the effective size of buffer */
     inline unsigned int getInBufferSize() const { return (unsigned int)(m_end - m_buffer); }
 
+    /**\brief The bytes not read yet, up to the logical end */
+    inline size_t getUnreadSize() const { return (m_ptr < m_end) ? (size_t)(m_end - m_ptr) : 0; }
+
     /**\brief Test if effective buffer was entirely read */
     inline bool endOfInBuffer() const { return (m_ptr >= m_end); }
 

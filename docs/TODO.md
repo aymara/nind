@@ -199,9 +199,13 @@ of 3.0.0 (format v2).
   138M mean is 6% lower (34.8 -> 32.8 ms), 8.8M unchanged; and each query also
   rebuilds its terms' block bounds from their directories (4–5%). Tried: the
   least recently used evicted instead of everything, at 256 MB: no gain at 138M,
-  -2–4% at 8.8M (the working set doesn't fit, whatever goes). Left: cache only
-  what MaxScore reads (first, last, a bound: ~24 bytes a block, 360 MB for those
-  terms), or a larger cache for large indexes (memory per process).
+  -2–4% at 8.8M (the working set doesn't fit, whatever goes). Done: the blocks'
+  bounds without the idf cached with their directory for the parameters last
+  asked (a bound: multiplicity * (idf * tf), the same value), the blocks read in
+  the directory instead of copied each query, parsing reserving its blocks:
+  138M mean -3.5%, 8.8M -2–4%, medians -2–4%, identical results. Left: a
+  smaller cached block (its impacts dropped once its bounds are known: exact
+  only while the parameters stay), or a larger cache for large indexes.
 - [x] **A search process's own memory**, 138M: nind 1.06 GB, Lucene 0.83 (its JVM),
   tantivy 0.04 (both map their index). `NindEngine(map_lengths=True)` reads the
   documents' lengths in their mapped files (none of the process's memory: 0.33

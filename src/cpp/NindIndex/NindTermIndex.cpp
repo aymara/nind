@@ -398,7 +398,10 @@ void NindTermIndex::parseDirectoryV2(const unsigned int ident,
             }
             continue;
         }
-        //{ <descripteurBloc> }: nbreBlocs comes from the file: no reserve either
+        //{ <descripteurBloc> }: nbreBlocs comes from the file, reserved within what the bytes left can
+        //hold (a descriptor takes at least 13: five varints, two Entier4): a large directory's blocks
+        //aren't copied as they grow (3% of a search on a 138M index, its directories parsed again)
+        category.blocks.reserve(std::min<size_t>(nbreBlocs, in.getUnreadSize() / 13));
         NindDocId previousLast = 0;
         uint64_t total = 0;
         for (unsigned int b = 0; b != nbreBlocs; b++) {

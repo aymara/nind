@@ -312,11 +312,16 @@ private:
         unsigned int multiplicity;      //occurrences in the query
         bool inlineList;                //a short list: one pseudo-block, its inline postings
         size_t blocksNb;
-        std::vector<NindDocId> blockFirst, blockLast;
-        std::vector<double> blockBounds;
-        double bound;                   //the largest of blockBounds
-        TermInfo(): directory(), ident(0), idf(0), multiplicity(0), inlineList(false), blocksNb(0),
-            blockFirst(), blockLast(), blockBounds(), bound(0) {}
+        const NindTermIndex::Block *blocks;     //the directory's blocks, or ownBlock (an inline list)
+        NindTermIndex::Block ownBlock;
+        std::shared_ptr<const std::vector<double> > tf;     //per block, its bound without the idf
+        TermInfo(): directory(), ident(0), idf(0), multiplicity(0), inlineList(false), blocksNb(0), blocks(0),
+            ownBlock(), tf() {}
+        NindDocId first(const size_t block) const { return blocks[block].first; }
+        NindDocId last(const size_t block) const { return blocks[block].last; }
+        //a block's bound: (its contribution's largest) * multiplicity, the same value as
+        //multiplicity * contribution(idf, ...) (a product with a positive number keeps the order)
+        double boundAt(const size_t block) const { return multiplicity * (idf * (*tf)[block]); }
     };
     // a thread's cursor on a term's postings, read lazily: blocks' bytes RAW_READ_AHEAD at a time,
     // one block decoded only when a window needs it
@@ -334,6 +339,16 @@ private:
         Cursor(): info(0), block(0), raw(), rawBegin(0), rawEnd(0), docs(), decoded(NO_BLOCK), pos(0),
             matchedDoc(0), matchedFrequency(0), matched(false) {}
     };
+    // the first block of a term whose last document is at least lo
+    static size_t firstBlockEndingFrom(const TermInfo &term, const NindDocId lo) {
+        size_t low = 0, high = term.blocksNb;
+        while (low < high) {
+            const size_t middle = low + (high - low) / 2;
+            if (term.blocks[middle].last < lo) low = middle + 1;
+            else high = middle;
+        }
+        return low;
+    }
     // the postings of block b of a term in docs (decoded once), the cursor at its first document
     void decode(const NindTermIndex &termIndex, Cursor &cursor, const size_t b) const {
         if (cursor.decoded == b) return;
@@ -377,8 +392,7 @@ private:
         for (size_t t = 0; t < termsNb; t++) {
             cursors[t].info = &terms[t];
             //(the first block that may hold documents >= lo: a binary search, not a walk from 0)
-            cursors[t].block = std::lower_bound(terms[t].blockLast.begin(), terms[t].blockLast.end(), lo)
-                               - terms[t].blockLast.begin();
+            cursors[t].block = firstBlockEndingFrom(terms[t], lo);
         }
         std::priority_queue<double, std::vector<double>, std::greater<double> > best;  //the k best approximations
         double threshold = 0.0;                 //theta minus the margin
@@ -387,7 +401,7 @@ private:
         std::vector<double> windowBound(termsNb), prefix(termsNb);
         order.reserve(termsNb);
         NindDocId windowMin = ~(NindDocId)0;
-        for (size_t t = 0; t < termsNb; t++) windowMin = std::min(windowMin, terms[t].blockFirst[0]);
+        for (size_t t = 0; t < termsNb; t++) windowMin = std::min(windowMin, terms[t].first(0));
         windowMin = std::max(windowMin, lo);
         while (windowMin <= hi) {
             threshold = std::max(threshold, shared.load(std::memory_order_relaxed));
@@ -397,10 +411,10 @@ private:
             for (size_t t = 0; t < termsNb; t++) {
                 Cursor &cursor = cursors[t];
                 const TermInfo &term = terms[t];
-                while (cursor.block < term.blocksNb && term.blockLast[cursor.block] < windowMin) cursor.block++;
+                while (cursor.block < term.blocksNb && term.last(cursor.block) < windowMin) cursor.block++;
                 if (cursor.block == term.blocksNb) continue;
-                if (term.blockFirst[cursor.block] > windowMin) windowMax = std::min(windowMax, term.blockFirst[cursor.block] - 1);
-                else windowMax = std::min(windowMax, term.blockLast[cursor.block]);
+                if (term.first(cursor.block) > windowMin) windowMax = std::min(windowMax, term.first(cursor.block) - 1);
+                else windowMax = std::min(windowMax, term.last(cursor.block));
                 order.push_back(t);
             }
             if (order.empty()) break;
@@ -409,7 +423,7 @@ private:
             for (size_t i = 0; i < order.size(); i++) {
                 const size_t t = order[i];
                 const TermInfo &term = terms[t];
-                windowBound[t] = (term.blockFirst[cursors[t].block] <= windowMax) ? term.blockBounds[cursors[t].block] : 0.0;
+                windowBound[t] = (term.first(cursors[t].block) <= windowMax) ? term.boundAt(cursors[t].block) : 0.0;
                 if (windowBound[t] > 0) order[present++] = t;
             }
             order.resize(present);
@@ -521,8 +535,7 @@ private:
         for (size_t t = 0; t < termsNb; t++) {
             cursors[t].info = &terms[t];
             //(the first block that may hold documents >= lo: a binary search, not a walk from 0)
-            cursors[t].block = std::lower_bound(terms[t].blockLast.begin(), terms[t].blockLast.end(), lo)
-                               - terms[t].blockLast.begin();
+            cursors[t].block = firstBlockEndingFrom(terms[t], lo);
         }
         std::priority_queue<double, std::vector<double>, std::greater<double> > best;  //the k best approximations
         double threshold = 0.0;                 //theta minus the margin
@@ -540,7 +553,7 @@ private:
         std::vector<bool> essentialTerm(termsNb, false);
         std::vector<std::vector<std::pair<NindDocId, uint32_t> > > windowPostings(termsNb);   //an essential term's, in the window
         NindDocId windowMin = ~(NindDocId)0;
-        for (size_t t = 0; t < termsNb; t++) windowMin = std::min(windowMin, terms[t].blockFirst[0]);
+        for (size_t t = 0; t < termsNb; t++) windowMin = std::min(windowMin, terms[t].first(0));
         windowMin = std::max(windowMin, lo);
         while (windowMin <= hi) {
             threshold = std::max(threshold, shared.load(std::memory_order_relaxed));
@@ -551,10 +564,10 @@ private:
             for (size_t t = 0; t < termsNb; t++) {
                 Cursor &cursor = cursors[t];
                 const TermInfo &term = terms[t];
-                while (cursor.block < term.blocksNb && term.blockLast[cursor.block] < windowMin) cursor.block++;
+                while (cursor.block < term.blocksNb && term.last(cursor.block) < windowMin) cursor.block++;
                 if (cursor.block == term.blocksNb) continue;
-                if (term.blockFirst[cursor.block] > windowMin) windowMax = std::min(windowMax, term.blockFirst[cursor.block] - 1);
-                else windowMax = std::min(windowMax, term.blockLast[cursor.block]);
+                if (term.first(cursor.block) > windowMin) windowMax = std::min(windowMax, term.first(cursor.block) - 1);
+                else windowMax = std::min(windowMax, term.last(cursor.block));
                 anyLeft = true;
             }
             if (!anyLeft) break;
@@ -565,8 +578,8 @@ private:
             for (size_t t = 0; t < termsNb; t++) {
                 const TermInfo &term = terms[t];
                 double bound = 0.0;
-                for (size_t b = cursors[t].block; b < term.blocksNb && term.blockFirst[b] <= windowMax; b++)
-                    bound = std::max(bound, term.blockBounds[b]);
+                for (size_t b = cursors[t].block; b < term.blocksNb && term.first(b) <= windowMax; b++)
+                    bound = std::max(bound, term.boundAt(b));
                 windowBound[t] = bound;
             }
             for (size_t i = 1; i < termsNb; i++)
@@ -591,7 +604,7 @@ private:
                     std::vector<std::pair<NindDocId, uint32_t> > &own = windowPostings[t];
                     own.clear();
                     const double idf = term.idf, multiplicity = term.multiplicity;
-                    for (size_t b = cursor.block; b < term.blocksNb && term.blockFirst[b] <= windowMax; b++) {
+                    for (size_t b = cursor.block; b < term.blocksNb && term.first(b) <= windowMax; b++) {
                         cursor.block = b;
                         decode(termIndex, cursor, b);
                         while (cursor.pos < cursor.docs.size() && cursor.docs[cursor.pos].ident < windowMin) cursor.pos++;
@@ -608,7 +621,7 @@ private:
                             const double length = (position != NO_POSITION) ? lengthOf(position) : 0.0;
                             windowScores[offset] += multiplicity * contribution(idf, posting.frequency, length, parameters);
                         }
-                        if (term.blockLast[b] > windowMax) break;     //(its rest: the next windows')
+                        if (term.last(b) > windowMax) break;     //(its rest: the next windows')
                     }
                 }
                 bool flagged = false;           //essentialTerm set for this window (at its first candidate)
@@ -630,8 +643,8 @@ private:
                             if (approximation + prefix[i] < threshold) { rejected = true; break; }
                             Cursor &cursor = cursors[order[i]];
                             const TermInfo &term = terms[order[i]];
-                            while (cursor.block < term.blocksNb && term.blockLast[cursor.block] < thisDoc) cursor.block++;
-                            if (cursor.block == term.blocksNb || term.blockFirst[cursor.block] > thisDoc) continue;
+                            while (cursor.block < term.blocksNb && term.last(cursor.block) < thisDoc) cursor.block++;
+                            if (cursor.block == term.blocksNb || term.first(cursor.block) > thisDoc) continue;
                             decode(termIndex, cursor, cursor.block);
                             while (cursor.pos < cursor.docs.size() && cursor.docs[cursor.pos].ident < thisDoc) cursor.pos++;
                             if (cursor.pos == cursor.docs.size() || cursor.docs[cursor.pos].ident != thisDoc) continue;
@@ -724,46 +737,34 @@ private:
             for (size_t o = 0; o < occurrences.size(); o++) if (occurrences[o] == d) term.multiplicity++;
             if (!category.blocks.empty()) {
                 term.blocksNb = category.blocks.size();
-                for (size_t i = 0; i < category.blocks.size(); i++) {
-                    const NindTermIndex::Block &block = category.blocks[i];
-                    term.blockFirst.push_back(block.first);
-                    term.blockLast.push_back(block.last);
-                    double bound = 0.0;
-                    if (block.impactsNb != 0) {
-                        //the block's competitive (frequency, length) pairs: its exact largest contribution
-                        for (unsigned int j = 0; j < block.impactsNb; j++)
-                            bound = std::max(bound, contribution(term.idf, block.impacts[j].first,
-                                                                 std::max((double)block.impacts[j].second, shortest), parameters));
-                    }
-                    else bound = contribution(term.idf, block.maxFrequency, std::max((double)block.minLength, shortest), parameters);
-                    term.blockBounds.push_back(term.multiplicity * bound);
-                }
+                term.blocks = category.blocks.data();
+                term.tf = blockBounds(termIndex, term.ident, term.directory, parameters, shortest);
             }
             else {
                 if (category.inlinePostings.empty()) { terms.pop_back(); continue; }
                 term.inlineList = true;
                 term.blocksNb = 1;
-                term.blockFirst.push_back(category.inlinePostings.front().ident);
-                term.blockLast.push_back(category.inlinePostings.back().ident);
+                term.ownBlock.first = category.inlinePostings.front().ident;
+                term.ownBlock.last = category.inlinePostings.back().ident;
                 double bound = 0.0;
                 for (size_t i = 0; i < category.inlinePostings.size(); i++) {
                     const NindTermIndex::Document &posting = category.inlinePostings[i];
                     const uint32_t position = positionOf(posting.ident);
                     if (position == NO_POSITION || posting.frequency == 0) continue;
-                    bound = std::max(bound, contribution(term.idf, posting.frequency, lengthOf(position), parameters));
+                    bound = std::max(bound, contribution(1.0, posting.frequency, lengthOf(position), parameters));
                 }
-                term.blockBounds.push_back(term.multiplicity * bound);
+                term.tf = std::make_shared<const std::vector<double> >(1, bound);
             }
-            term.bound = *std::max_element(term.blockBounds.begin(), term.blockBounds.end());
             termOf[d] = terms.size() - 1;
         }
         const size_t termsNb = terms.size();
         if (termsNb == 0) { result.clear(); return true; }
+        for (size_t t = 0; t < termsNb; t++) if (terms[t].inlineList) terms[t].blocks = &terms[t].ownBlock;
         // the documents [first, last], cut into ranges, one per thread
         NindDocId first = ~(NindDocId)0, last = 0;
         for (size_t t = 0; t < termsNb; t++) {
-            first = std::min(first, terms[t].blockFirst.front());
-            last = std::max(last, terms[t].blockLast.back());
+            first = std::min(first, terms[t].first(0));
+            last = std::max(last, terms[t].last(terms[t].blocksNb - 1));
         }
         const uint64_t span = last - first;
         const unsigned int slices = (unsigned int)std::max<uint64_t>(1, std::min<uint64_t>(threads, span / 4096 + 1));
@@ -830,9 +831,18 @@ private:
     // one immutable index); null if the index hasn't the term. The cache is emptied when it holds
     // more than DIRECTORY_CACHE_BYTES, and when the scorer is used with another term index.
     static const size_t DIRECTORY_CACHE_BYTES = 256u << 20;
-    std::shared_ptr<const NindTermIndex::TermDirectory> directoryOf(const NindTermIndex &termIndex,
-                                                                    const unsigned int ident,
-                                                                    NindReadBuffer &buffer) const {
+    // a cached directory, and its blocks' bounds without the idf for the last parameters asked
+    struct CachedTerm {
+        std::shared_ptr<const NindTermIndex::TermDirectory> directory;
+        std::mutex mutex;
+        double k1Plus1, base, perLength, shortest;
+        std::shared_ptr<const std::vector<double> > tf;
+        explicit CachedTerm(const std::shared_ptr<const NindTermIndex::TermDirectory> &d):
+            directory(d), mutex(), k1Plus1(0), base(0), perLength(0), shortest(0), tf() {}
+    };
+    std::shared_ptr<CachedTerm> cachedTerm(const NindTermIndex &termIndex,
+                                           const unsigned int ident,
+                                           NindReadBuffer &buffer) const {
         {
             std::shared_lock<std::shared_timed_mutex> lock(m_cacheMutex);
             if (m_cachedIndex == &termIndex) {
@@ -845,20 +855,69 @@ private:
         size_t bytes = sizeof(NindTermIndex::TermDirectory) + 64;
         if (directory)
             for (size_t c = 0; c < directory->categories.size(); c++)
-                bytes += directory->categories[c].blocks.size() * sizeof(NindTermIndex::Block)
+                bytes += directory->categories[c].blocks.size() * (sizeof(NindTermIndex::Block) + sizeof(double))
                          + directory->categories[c].inlinePostings.size() * sizeof(NindTermIndex::Document);
+        std::shared_ptr<CachedTerm> entry(new CachedTerm(directory));
         std::unique_lock<std::shared_timed_mutex> lock(m_cacheMutex);
         if (m_cachedIndex != &termIndex || m_cacheBytes + bytes > DIRECTORY_CACHE_BYTES) {
             m_directories.clear();
             m_cacheBytes = 0;
             m_cachedIndex = &termIndex;
         }
-        const auto inserted = m_directories.insert(std::make_pair(ident, std::shared_ptr<const NindTermIndex::TermDirectory>(directory)));
+        const auto inserted = m_directories.insert(std::make_pair(ident, entry));
         if (inserted.second) m_cacheBytes += bytes;
         return inserted.first->second;
     }
+    std::shared_ptr<const NindTermIndex::TermDirectory> directoryOf(const NindTermIndex &termIndex,
+                                                                    const unsigned int ident,
+                                                                    NindReadBuffer &buffer) const {
+        return cachedTerm(termIndex, ident, buffer)->directory;
+    }
+    // a term's blocks' bounds without the idf (its first category's), computed once for the same
+    // parameters (each search computed them again: 5% of a search at 138M, a frequent term's
+    // hundreds of thousands of blocks)
+    std::shared_ptr<const std::vector<double> > blockBounds(const NindTermIndex &termIndex, const unsigned int ident,
+                                                           const std::shared_ptr<const NindTermIndex::TermDirectory> &directory,
+                                                           const Params &parameters, const double shortest) const {
+        std::shared_ptr<CachedTerm> entry;
+        {
+            std::shared_lock<std::shared_timed_mutex> lock(m_cacheMutex);
+            if (m_cachedIndex == &termIndex) {
+                const auto it = m_directories.find(ident);
+                if (it != m_directories.end() && it->second->directory == directory) entry = it->second;
+            }
+        }
+        if (entry) {
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            if (entry->tf && entry->k1Plus1 == parameters.k1Plus1 && entry->base == parameters.base &&
+                entry->perLength == parameters.perLength && entry->shortest == shortest) return entry->tf;
+        }
+        const std::vector<NindTermIndex::Block> &blocks = directory->categories[0].blocks;
+        std::shared_ptr<std::vector<double> > tf(new std::vector<double>(blocks.size()));
+        for (size_t i = 0; i < blocks.size(); i++) {
+            const NindTermIndex::Block &block = blocks[i];
+            double bound = 0.0;
+            if (block.impactsNb != 0) {
+                //the block's competitive (frequency, length) pairs: its exact largest contribution
+                for (unsigned int j = 0; j < block.impactsNb; j++)
+                    bound = std::max(bound, contribution(1.0, block.impacts[j].first,
+                                                         std::max((double)block.impacts[j].second, shortest), parameters));
+            }
+            else bound = contribution(1.0, block.maxFrequency, std::max((double)block.minLength, shortest), parameters);
+            (*tf)[i] = bound;
+        }
+        if (entry) {
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            entry->tf = tf;
+            entry->k1Plus1 = parameters.k1Plus1;
+            entry->base = parameters.base;
+            entry->perLength = parameters.perLength;
+            entry->shortest = shortest;
+        }
+        return tf;
+    }
     mutable std::shared_timed_mutex m_cacheMutex;
-    mutable std::unordered_map<unsigned int, std::shared_ptr<const NindTermIndex::TermDirectory> > m_directories;
+    mutable std::unordered_map<unsigned int, std::shared_ptr<CachedTerm> > m_directories;
     mutable const NindTermIndex *m_cachedIndex = 0;
     mutable size_t m_cacheBytes = 0;
 
