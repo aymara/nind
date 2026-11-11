@@ -749,10 +749,6 @@ def test_plan_jsonl_memory(tmp_path, monkeypatch):
     assert plan(8, 100, 6) == (100, 2)
     with pytest.raises(ValueError):
         plan(1, 1, 2.5)
-    # the names checked after the shards (1 MiB for each of the 400 documents here) don't fit
-    monkeypatch.setattr(NindIndexer, "NAMES_CHECK_BYTES_PER_DOCUMENT", 1 << 20)
-    with pytest.raises(ValueError, match="names"):
-        plan(4, 1, 30)
     monkeypatch.undo()
 
 

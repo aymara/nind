@@ -752,6 +752,11 @@ PYBIND11_MODULE(_native, m) {
             py::gil_scoped_release release;
             NindDocNames::merge(shardFiles, fileName);
         }, py::arg("shard_files"), py::arg("file_name"))
+        // ValueError if a name is in several of these files; nothing written, nothing per document
+        .def_static("check_unique", [](const std::vector<std::string> &files) {
+            py::gil_scoped_release release;
+            NindDocNames::checkUnique(files);
+        }, py::arg("files"))
         .def("name", [](const NindDocNames &self, uint64_t docId) -> py::object {
             std::string name;
             if (!self.getName(docId, name)) return py::none();

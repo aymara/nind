@@ -1108,10 +1108,7 @@ class NindIndexer:
             estimated from the tokens, documents and vocabulary of a few samples
             of the file (``BUILD_BYTES_PER_*``, ``HEAPS_EXPONENT``). Fewer
             workers if each wouldn't get twice ``BUILD_BYTES_PER_PROCESS``; fewer workers also mean fewer
-            shards, i.e. faster searches on one thread. Shards can't divide what
-            the end of the build needs, checking that the names are unique:
-            ``NAMES_CHECK_BYTES_PER_DOCUMENT`` (MS MARCO v2's 138M passages:
-            about 3.9 GiB, 2.6 measured); a smaller budget raises ``ValueError``.
+            shards, i.e. faster searches on one thread.
         :return: the ``id_field`` value of every indexed record: element
             ``n`` is the identifier of document ``n``. With ``shards > 1``, a
             read-only sequence of them as strings, read from the index files
@@ -1162,9 +1159,6 @@ class NindIndexer:
     BUILD_BYTES_PER_TERM = 1000
     BUILD_BYTES_PER_PROCESS = 300 << 20
     HEAPS_EXPONENT = 0.7
-    #: After a sharded build, checking that the documents' names are unique takes this many bytes
-    #: per document (the names themselves are mapped: page cache, not the process's memory).
-    NAMES_CHECK_BYTES_PER_DOCUMENT = 28
     #: ``index_jsonl(memory_gb=...)`` counts the tokens, documents and distinct terms of this many
     #: pieces of the file, of this many bytes each, spread over it (the whole file when smaller).
     JSONL_SAMPLE_PIECES = 8
@@ -1189,10 +1183,6 @@ class NindIndexer:
                     + self.BUILD_BYTES_PER_TERM * terms + process)
         if shards <= 1 and build(1) <= budget:
             return 1, workers
-        names_check = process + self.NAMES_CHECK_BYTES_PER_DOCUMENT * sample.documents
-        if names_check > budget:
-            raise ValueError("memory_gb: checking the names of %d documents after building the shards needs "
-                             "about %.1f" % (sample.documents, names_check / 2 ** 30))
         workers = max(1, min(workers, int((budget - process) // (2 * process))))
 
         def fits(parts):
@@ -1260,7 +1250,7 @@ class NindIndexer:
                 if merge:
                     self._merge_shards(shard_bases, base, with_names=True)
                 else:
-                    self._check_names_unique(shard_bases, shard_dir)
+                    self._check_names_unique(shard_bases)
                     native.SegmentedIndex.write_manifest(base, segments)
             finally:
                 shutil.rmtree(shard_dir, ignore_errors=True)
@@ -1499,18 +1489,15 @@ class NindIndexer:
                 self._merge_shards(shard_bases, base, with_names=doc_names is not None)
             else:
                 if doc_names is not None:
-                    self._check_names_unique(shard_bases, shard_dir)
+                    self._check_names_unique(shard_bases)
                 native.SegmentedIndex.write_manifest(base, segments)
         finally:
             shutil.rmtree(shard_dir, ignore_errors=True)
 
     @staticmethod
-    def _check_names_unique(shard_bases, directory):
-        # a name in two segments would make name -> document ambiguous (ValueError): their names
-        # merged, the result dropped
-        merged = os.path.join(directory, "names-check")
-        native.NindDocNames.merge([shard_base + DOC_NAMES_EXTENSION for shard_base in shard_bases], merged)
-        os.remove(merged)
+    def _check_names_unique(shard_bases):
+        # a name in two segments would make name -> document ambiguous (ValueError)
+        native.NindDocNames.check_unique([shard_base + DOC_NAMES_EXTENSION for shard_base in shard_bases])
 
     @staticmethod
     def _merge_shards(shard_bases, base, with_names=False):

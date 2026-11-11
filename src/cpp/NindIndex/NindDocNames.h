@@ -67,6 +67,13 @@ public:
     static void merge(const std::vector<std::string> &shardFiles,
                       const std::string &fileName);
 
+    /**\brief Check that no name is in two of these files (each checked whole: see check()), without
+    * merging them: memory and time for the shards, nothing per document (a merge to a file then
+    * removed held 20 bytes a document, 2.6 GB for 138M)
+    *\throws std::invalid_argument if a name is in several files
+    *\throws OpenFileException, ReadFileException, FormatFileException if a file is invalid */
+    static void checkUnique(const std::vector<std::string> &files);
+
     /**\brief merge() without some of the shards' documents
     *\param deleted per shard, its documents to leave out, in increasing order (empty: none) */
     static void merge(const std::vector<std::string> &shardFiles,

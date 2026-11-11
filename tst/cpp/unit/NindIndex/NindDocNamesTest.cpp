@@ -214,3 +214,16 @@ TEST_CASE("NindDocNamesTest.OpeningChecksTheHeaderAndCheckTheWholeFile") {
     NindDocNames(file).check();
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.CheckUniqueAcrossFiles") {
+    TestTempDir tmp;
+    NindDocNames::write(tmp.file("a"), {1, 2, 3}, {"x", "b", "m"});
+    NindDocNames::write(tmp.file("b"), {4, 5}, {"a", "z"});
+    NindDocNames::write(tmp.file("c"), {6, 7}, {"y", "m"});
+    NindDocNames::write(tmp.file("empty"), {}, {});
+    NindDocNames::checkUnique({tmp.file("a"), tmp.file("b"), tmp.file("empty")});
+    NindDocNames::checkUnique({});
+    CHECK_THROWS_AS(NindDocNames::checkUnique({tmp.file("a"), tmp.file("b"), tmp.file("c")}), invalid_argument);
+    CHECK_THROWS_AS(NindDocNames::checkUnique({tmp.file("c"), tmp.file("a")}), invalid_argument);
+    CHECK_THROWS_AS(NindDocNames::checkUnique({tmp.file("a"), tmp.file("missing")}), FileException);
+}
+////////////////////////////////////////////////////////////

@@ -131,11 +131,12 @@ of 3.0.0 (format v2).
       costs ~950 bytes per distinct term in a build (each chunk's own word list,
       the union, `term_to_id`, the lexicon writer's input), 2.2 GiB for 2.5M
       terms. The union and the id maps in C++ (chunk vocabularies as one buffer)?
-    - **The names check after a sharded build** (`NindDocNames::merge` to a
-      file then removed) takes 20 bytes per document, the names now mapped: 2.6
-      GiB at 138M (7.2 when it read them), which no number of shards divides, so
-      `memory_gb` can't go below ~3.9 GiB there. Shards in document order need
-      neither its sort nor most of its arrays; only the names' order is to check.
+    - [x] **The names check after a sharded build** merged the shards' names to
+      a file then removed (5 GB written, 20 bytes per document: 2.6 GiB at 138M,
+      which no number of shards divided: `memory_gb` couldn't go below ~3.9 GiB).
+      `NindDocNames::checkUnique`: each shard's `check()`, their name orders
+      merged through a heap; 138M: 0.01 GiB, 13.9 s instead of 19-27, nothing
+      written.
     - **The model is fitted on MS MARCO v2** (shards of 1M to 14M passages; up
       to 50% over for small shards, which costs segments). Check it on another
       kind of corpus (long documents, code); `merge=True`'s memory isn't in the

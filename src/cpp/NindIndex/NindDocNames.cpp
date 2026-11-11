@@ -124,6 +124,53 @@ void NindDocNames::merge(const vector<string> &shardFiles,
     merge(shardFiles, vector<vector<NindDocId> >(), fileName);
 }
 ////////////////////////////////////////////////////////////
+//brief Check that no name is in two of these files
+void NindDocNames::checkUnique(const vector<string> &files)
+{
+    vector<unique_ptr<NindDocNames> > shards;
+    for (size_t s = 0; s < files.size(); s++) {
+        shards.push_back(unique_ptr<NindDocNames>(new NindDocNames(files[s])));
+        shards.back()->check();         //its names: strictly increasing in name order, so unique
+    }
+    //the shards' name orders merged: a heap of (shard, place in its name order), the smallest name on
+    //top; a name equal to the one before it (another shard's) is in two of them
+    const auto nameOf = [&shards](const pair<uint32_t, uint32_t> &cursor) {
+        const NindDocNames &shard = *shards[cursor.first];
+        return shard.nameAt(shard.rankByName(cursor.second));
+    };
+    const auto compare = [&shards, &nameOf](const pair<uint32_t, uint32_t> &a, const pair<uint32_t, uint32_t> &b) {
+        const pair<size_t, size_t> nameA = nameOf(a), nameB = nameOf(b);
+        const int cmp = memcmp(shards[a.first]->m_bytes + nameA.first, shards[b.first]->m_bytes + nameB.first,
+                               min(nameA.second, nameB.second));
+        return cmp != 0 ? cmp : (nameA.second < nameB.second ? -1 : (nameA.second > nameB.second ? 1 : 0));
+    };
+    const auto greater = [&compare](const pair<uint32_t, uint32_t> &a, const pair<uint32_t, uint32_t> &b) {
+        return compare(a, b) > 0;
+    };
+    vector<pair<uint32_t, uint32_t> > heap;
+    for (uint32_t s = 0; s < shards.size(); s++)
+        if (shards[s]->size() != 0) heap.push_back(make_pair(s, 0u));
+    make_heap(heap.begin(), heap.end(), greater);
+    bool hasPrevious = false;
+    pair<uint32_t, uint32_t> previous(0, 0);
+    while (!heap.empty()) {
+        pop_heap(heap.begin(), heap.end(), greater);
+        pair<uint32_t, uint32_t> cursor = heap.back();
+        if (hasPrevious && compare(cursor, previous) == 0) {
+            const pair<size_t, size_t> name = nameOf(cursor);
+            throw invalid_argument("NindDocNames::checkUnique: duplicate document name: "
+                                   + string((const char *)shards[cursor.first]->m_bytes + name.first, name.second));
+        }
+        previous = cursor;
+        hasPrevious = true;
+        if (++cursor.second < shards[cursor.first]->size()) {
+            heap.back() = cursor;
+            push_heap(heap.begin(), heap.end(), greater);
+        }
+        else heap.pop_back();
+    }
+}
+////////////////////////////////////////////////////////////
 //brief Merge the names files of shards into a new file, without some of their documents
 void NindDocNames::merge(const vector<string> &shardFiles,
                          const vector<vector<NindDocId> > &deleted,
