@@ -666,7 +666,11 @@ and 6 h.
   with 12, nind ahead past them (4,303 queries/s with 48 against 2,574); 48
   Lucene processes reach 4,906 with 56 GB of JVMs. 138M: Lucene ahead at every
   load, 1.6× with 48 callers: nind's slow queries are slower (p99 353 against
-  247 ms). Results: `bench/retrieval/results/2026-11-11-server`.
+  247 ms). Results: `bench/retrieval/results/2026-11-11-server`. Then MaxScore
+  scanned queries of 5 terms or more in windows, term at a time (`docs/TODO.md`,
+  "Throughput at 138M"), and nind ran again (`scripts/stage6b.sh`): first at
+  every load at 8.8M (48 threads 4,847 queries/s), first up to 4 threads at
+  138M, Lucene ahead from 8 (48 threads: 519, 8 segments 673, Lucene 786).
 - **Updates after stage 6.** The harness's nind update uses `IndexUpdate.add_jsonl`
   (batches, tokenized in worker processes) instead of `add_tokens` per document:
   +1% at 138M in 12.4 s (60-84 s before; Lucene 11.6 s), at 16M in 1.6 s

@@ -8,6 +8,9 @@ exhaustive searches (see `docs/TODO.md`).
   `scripts/stage6.sh`): nind, nind-8s, Lucene, tantivy; threads sharing one searcher or processes
   each opening the index; 1-48 callers (`pin`: their CPUs); MS MARCO v1 8.8M (4,000 queries
   after 1,000) and v2 138M (2,000 after 300), stopwords removed, top 10.
+- `concurrency-callers-nind2.jsonl`: nind and nind-8s again (`scripts/stage6b.sh`), after
+  MaxScore scanned queries of 5 terms or more in windows, term at a time (`docs/TODO.md`,
+  "Throughput at 138M"); the page shows these for nind.
 - `anonymous-138M.jsonl`: each system's memory per process at 138M (`anonymous_gb`: not a file's;
   one and four processes, 400 queries after 100).
 - `updates.txt`: updates of 1% (MS MARCO v2 16M and 138M) through `IndexUpdate.add_jsonl`.

@@ -110,6 +110,33 @@ TEST_CASE("NindBm25Scorer.MaxScoreEqualsExhaustive") {
     CHECK_EQ(300u, queries);
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindBm25Scorer.MaxScoreEqualsExhaustiveForLongQueries") {
+    // 5 to 18 terms: windows over several blocks of a term, term at a time (scanRangeByWindow); ids up
+    // to ~60,000: windows at their largest span too
+    TestTempDir tmp;
+    const string base = tmp.file("zipf");
+    const Corpus corpus = buildCorpus(base, 20000, 17);
+    NindLexiconIndex lexicon(base, false);
+    NindTermIndex terms(base, false, lexicon.getIdentification(), 0);
+    NindBm25Scorer scorer(corpus.docIds, corpus.lengths, corpus.avgLength);
+    uint64_t state = 7;
+    for (unsigned int q = 0; q < 60; q++) {
+        vector<unsigned int> termIds;
+        const unsigned int length = 5 + next(state) % 14;
+        for (unsigned int i = 0; i < length; i++) {
+            const unsigned int rank = (unsigned int)(next(state) % 1000);
+            termIds.push_back(lexicon.getWordId(list<string>(1, corpus.vocabulary[rank * rank / 2500])));
+        }
+        const vector<pair<NindDocId, double> > all = scorer.search(terms, termIds, 1.2, 0.75, -1, false);
+        for (const long k : {1L, 10L, 100L}) {
+            INFO("query " << q << ", k " << k);
+            vector<pair<NindDocId, double> > top(all.begin(), all.begin() + min((size_t)k, all.size()));
+            CHECK(scorer.search(terms, termIds, 1.2, 0.75, k, true) == top);
+            CHECK(scorer.search(terms, termIds, 1.2, 0.75, k, true, 4) == top);
+        }
+    }
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindBm25Scorer.ConcurrentSearches") {
     // one scorer, one reader, many threads: the answers of a single thread
     TestTempDir tmp;

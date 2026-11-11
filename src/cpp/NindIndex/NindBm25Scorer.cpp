@@ -281,6 +281,9 @@ private:
     static constexpr double PRUNING_MARGIN = 1e-9;
     static const size_t RAW_READ_AHEAD = 64;            //blocks whose bytes are read at once
     static const size_t NO_BLOCK = (size_t)-1;
+    static const size_t WINDOW_SPAN = 16384;            //a window's largest span of document ids (a multiple of 64)
+    static const size_t MIN_WINDOW_SPAN = 4096;         //scanRangeByWindow's windows: at least this many
+    static const size_t WINDOWED_TERMS = 5;             //from this many terms, scanRangeByWindow
     // a query term, as every thread of a search sees it (read only)
     struct TermInfo {
         std::shared_ptr<const NindTermIndex::TermDirectory> directory;     //(from the scorer's cache)
@@ -343,8 +346,9 @@ private:
         double current = shared.load(std::memory_order_relaxed);
         while (value > current && !shared.compare_exchange_weak(current, value, std::memory_order_relaxed)) {}
     }
-    // Block-max MaxScore over windows, on the documents [lo, hi] (see searchMaxScore)
-    void scanRange(const NindTermIndex &termIndex, const std::vector<TermInfo> &terms, const NindDocId lo,
+    // Block-max MaxScore over windows, on the documents [lo, hi], document at a time (see
+    // searchMaxScore): a query of few terms
+    void scanRangeByDocument(const NindTermIndex &termIndex, const std::vector<TermInfo> &terms, const NindDocId lo,
                    const NindDocId hi, const size_t topK, const Params &parameters, const Corpus &corpus,
                    std::atomic<double> &shared, Found &found) const
     {
@@ -482,6 +486,181 @@ private:
         }
         found.threshold = threshold;
     }
+    // Block-max MaxScore over windows, on the documents [lo, hi], term at a time in each window (see
+    // searchMaxScore): a query of many terms. Windows of at least MIN_WINDOW_SPAN documents (a term
+    // may have several blocks there: its bound, the largest of theirs), the essential terms' postings
+    // added term after term into a dense array, the documents they touch then completed in order.
+    // Against scanRangeByDocument, MS MARCO v2 138M, top 10: 9 terms and more 300 -> 141 ms, 5 terms
+    // even, 2 terms 3.5 -> 8.3 ms (the window's machinery for few documents): hence WINDOWED_TERMS.
+    void scanRangeByWindow(const NindTermIndex &termIndex, const std::vector<TermInfo> &terms, const NindDocId lo,
+                   const NindDocId hi, const size_t topK, const Params &parameters, const Corpus &corpus,
+                   std::atomic<double> &shared, Found &found) const
+    {
+        const size_t termsNb = terms.size();
+        std::vector<Cursor> cursors(termsNb);
+        for (size_t t = 0; t < termsNb; t++) {
+            cursors[t].info = &terms[t];
+            //(the first block that may hold documents >= lo: a binary search, not a walk from 0)
+            cursors[t].block = std::lower_bound(terms[t].blockLast.begin(), terms[t].blockLast.end(), lo)
+                               - terms[t].blockLast.begin();
+        }
+        std::priority_queue<double, std::vector<double>, std::greater<double> > best;  //the k best approximations
+        double threshold = 0.0;                 //theta minus the margin
+        // per window: the terms in it (by increasing bound), their bounds, the bounds' prefix sums;
+        // sorted: every term by its bound in the last window (from one window to the next, usually
+        // one term changes block: an insertion sort from it is linear, from scratch quadratic, a
+        // quarter of a long query's time)
+        std::vector<size_t> order, sorted(termsNb);
+        std::vector<double> windowBound(termsNb, 0.0), prefix(termsNb);
+        order.reserve(termsNb);
+        for (size_t t = 0; t < termsNb; t++) sorted[t] = t;
+        // a window's approximations, by document, and the documents touched (at most WINDOW_SPAN)
+        std::vector<double> windowScores(WINDOW_SPAN, 0.0);
+        std::vector<uint64_t> touched(WINDOW_SPAN / 64, 0);
+        std::vector<bool> essentialTerm(termsNb, false);
+        std::vector<std::vector<std::pair<NindDocId, uint32_t> > > windowPostings(termsNb);   //an essential term's, in the window
+        NindDocId windowMin = ~(NindDocId)0;
+        for (size_t t = 0; t < termsNb; t++) windowMin = std::min(windowMin, terms[t].blockFirst[0]);
+        windowMin = std::max(windowMin, lo);
+        while (windowMin <= hi) {
+            threshold = std::max(threshold, shared.load(std::memory_order_relaxed));
+            // each term's block at or after windowMin; the window: up to the next block boundary, at
+            // most WINDOW_SPAN documents (a shorter window keeps the same bounds)
+            NindDocId windowMax = std::min<NindDocId>(hi, windowMin + (WINDOW_SPAN - 1));
+            bool anyLeft = false;
+            for (size_t t = 0; t < termsNb; t++) {
+                Cursor &cursor = cursors[t];
+                const TermInfo &term = terms[t];
+                while (cursor.block < term.blocksNb && term.blockLast[cursor.block] < windowMin) cursor.block++;
+                if (cursor.block == term.blocksNb) continue;
+                if (term.blockFirst[cursor.block] > windowMin) windowMax = std::min(windowMax, term.blockFirst[cursor.block] - 1);
+                else windowMax = std::min(windowMax, term.blockLast[cursor.block]);
+                anyLeft = true;
+            }
+            if (!anyLeft) break;
+            //at least MIN_WINDOW_SPAN documents: a term may then have several blocks in the window, its
+            //bound there the largest of theirs (fewer windows, each with looser bounds)
+            windowMax = std::max(windowMax, std::min<NindDocId>(hi, windowMin + (MIN_WINDOW_SPAN - 1)));
+            // the terms with a block in the window, by increasing bound (the others: 0, first, left out)
+            for (size_t t = 0; t < termsNb; t++) {
+                const TermInfo &term = terms[t];
+                double bound = 0.0;
+                for (size_t b = cursors[t].block; b < term.blocksNb && term.blockFirst[b] <= windowMax; b++)
+                    bound = std::max(bound, term.blockBounds[b]);
+                windowBound[t] = bound;
+            }
+            for (size_t i = 1; i < termsNb; i++)
+                for (size_t j = i; j > 0 && windowBound[sorted[j]] < windowBound[sorted[j - 1]]; j--)
+                    std::swap(sorted[j], sorted[j - 1]);
+            size_t absent = 0;
+            while (absent < termsNb && !(windowBound[sorted[absent]] > 0)) absent++;
+            order.assign(sorted.begin() + absent, sorted.end());
+            double sum = 0.0;
+            for (size_t i = 0; i < order.size(); i++) prefix[i] = (sum += windowBound[order[i]]);
+            // the non-essential prefix: order[0..essential)
+            size_t essential = 0;
+            while (essential < order.size() && prefix[essential] < threshold) essential++;
+            if (essential < order.size()) {
+                // the essential terms' postings in the window, term after term (in the order of the
+                // bounds, as a document-at-a-time sum would add them): their approximations in a
+                // dense array, the documents they touch in a bitset
+                for (size_t i = essential; i < order.size(); i++) {
+                    const size_t t = order[i];
+                    Cursor &cursor = cursors[t];
+                    const TermInfo &term = terms[t];
+                    std::vector<std::pair<NindDocId, uint32_t> > &own = windowPostings[t];
+                    own.clear();
+                    const double idf = term.idf, multiplicity = term.multiplicity;
+                    for (size_t b = cursor.block; b < term.blocksNb && term.blockFirst[b] <= windowMax; b++) {
+                        cursor.block = b;
+                        decode(termIndex, cursor, b);
+                        while (cursor.pos < cursor.docs.size() && cursor.docs[cursor.pos].ident < windowMin) cursor.pos++;
+                        for (; cursor.pos < cursor.docs.size() && cursor.docs[cursor.pos].ident <= windowMax; cursor.pos++) {
+                            const NindTermIndex::Document &posting = cursor.docs[cursor.pos];
+                            const size_t offset = (size_t)(posting.ident - windowMin);
+                            touched[offset / 64] |= (uint64_t)1 << (offset % 64);
+                            own.push_back(std::make_pair(posting.ident, posting.frequency));
+                            //the length of a document a few postings ahead, fetched early (scattered: a cache miss)
+                            if (cursor.pos + PREFETCH_DISTANCE < cursor.docs.size())
+                                prefetchLength(cursor.docs[cursor.pos + PREFETCH_DISTANCE].ident);
+                            if (posting.frequency == 0) continue;
+                            const uint32_t position = positionOf(posting.ident);
+                            const double length = (position != NO_POSITION) ? lengthOf(position) : 0.0;
+                            windowScores[offset] += multiplicity * contribution(idf, posting.frequency, length, parameters);
+                        }
+                        if (term.blockLast[b] > windowMax) break;     //(its rest: the next windows')
+                    }
+                }
+                bool flagged = false;           //essentialTerm set for this window (at its first candidate)
+                // the touched documents, in order
+                const size_t words = (size_t)(windowMax - windowMin) / 64 + 1;
+                for (size_t w = 0; w < words; w++) {
+                    for (uint64_t bits = touched[w]; bits != 0; bits &= bits - 1) {
+                        const size_t offset = w * 64 + (size_t)__builtin_ctzll(bits);
+                        const NindDocId thisDoc = windowMin + offset;
+                        double approximation = windowScores[offset];
+                        windowScores[offset] = 0.0;
+                        const uint32_t position = positionOf(thisDoc);
+                        //(a deleted document never reaches theta, nor the candidates)
+                        if (position == NO_POSITION || corpus.isDeleted(position)) continue;
+                        const double length = lengthOf(position);
+                        // the non-essential terms, by decreasing bound, while the document may reach theta
+                        bool rejected = false;
+                        for (size_t i = essential; i-- > 0; ) {
+                            if (approximation + prefix[i] < threshold) { rejected = true; break; }
+                            Cursor &cursor = cursors[order[i]];
+                            const TermInfo &term = terms[order[i]];
+                            while (cursor.block < term.blocksNb && term.blockLast[cursor.block] < thisDoc) cursor.block++;
+                            if (cursor.block == term.blocksNb || term.blockFirst[cursor.block] > thisDoc) continue;
+                            decode(termIndex, cursor, cursor.block);
+                            while (cursor.pos < cursor.docs.size() && cursor.docs[cursor.pos].ident < thisDoc) cursor.pos++;
+                            if (cursor.pos == cursor.docs.size() || cursor.docs[cursor.pos].ident != thisDoc) continue;
+                            const uint32_t frequency = cursor.docs[cursor.pos].frequency;
+                            cursor.matchedDoc = thisDoc;
+                            cursor.matchedFrequency = frequency;
+                            cursor.matched = true;
+                            if (frequency != 0)
+                                approximation += cursor.info->multiplicity * contribution(cursor.info->idf, frequency, length, parameters);
+                        }
+                        if (rejected || !(approximation > 0) || approximation < threshold) continue;
+                        found.candidates.push_back(std::make_pair(position, approximation));
+                        // its frequencies: the essential terms' from their postings in the window (a
+                        // binary search: candidates are few), the others' from their probes
+                        if (!flagged) {
+                            for (size_t t = 0; t < termsNb; t++) essentialTerm[t] = false;
+                            for (size_t i = essential; i < order.size(); i++) essentialTerm[order[i]] = true;
+                            flagged = true;
+                        }
+                        for (size_t t = 0; t < termsNb; t++) {
+                            uint32_t frequency = 0;
+                            if (essentialTerm[t]) {
+                                const std::vector<std::pair<NindDocId, uint32_t> > &own = windowPostings[t];
+                                const std::vector<std::pair<NindDocId, uint32_t> >::const_iterator it = std::lower_bound(
+                                    own.begin(), own.end(), std::make_pair(thisDoc, (uint32_t)0));
+                                if (it != own.end() && it->first == thisDoc) frequency = it->second;
+                            }
+                            else if (cursors[t].matched && cursors[t].matchedDoc == thisDoc) frequency = cursors[t].matchedFrequency;
+                            found.frequencies.push_back(frequency);
+                        }
+                        if (best.size() < topK) best.push(approximation);
+                        else if (approximation > best.top()) { best.pop(); best.push(approximation); }
+                        if (best.size() == topK) {
+                            const double mine = best.top() * (1 - PRUNING_MARGIN);
+                            if (mine > threshold) {
+                                threshold = mine;
+                                raise(shared, mine);
+                            }
+                        }
+                        //(a higher theta: fewer non-essential terms needed from the next document on)
+                    }
+                    touched[w] = 0;
+                }
+            }
+            if (windowMax >= hi) break;
+            windowMin = windowMax + 1;
+        }
+        found.threshold = threshold;
+    }
     // Block-max MaxScore over windows, exact. The documents are taken window by window, a window
     // ending at the next block boundary of any term, so that every term has at most one block in
     // it: a document's score there is at most the sum of those blocks' bounds. In each window, the
@@ -571,7 +750,12 @@ private:
         std::atomic<double> ownThreshold(0.0);
         std::atomic<double> &shared = corpus.threshold ? *corpus.threshold : ownThreshold;
         std::vector<Found> found(slices);
-        if (slices == 1) scanRange(termIndex, terms, first, last, topK, parameters, corpus, shared, found[0]);
+        const bool byWindow = termsNb >= WINDOWED_TERMS;
+        const auto scan = [&](const NindDocId lo, const NindDocId hi, Found &into) {
+            if (byWindow) scanRangeByWindow(termIndex, terms, lo, hi, topK, parameters, corpus, shared, into);
+            else scanRangeByDocument(termIndex, terms, lo, hi, topK, parameters, corpus, shared, into);
+        };
+        if (slices == 1) scan(first, last, found[0]);
         else {
             //the other ranges to the scorer's pool of threads, the last one here
             std::vector<std::future<void> > done;
@@ -579,7 +763,7 @@ private:
             for (unsigned int s = 0; s < slices; s++) {
                 const NindDocId lo = first + span / slices * s + std::min<uint64_t>(s, span % slices);
                 const NindDocId hi = (s + 1 == slices) ? last : first + span / slices * (s + 1) + std::min<uint64_t>(s + 1, span % slices) - 1;
-                auto work = [&, s, lo, hi]() { scanRange(termIndex, terms, lo, hi, topK, parameters, corpus, shared, found[s]); };
+                auto work = [&, s, lo, hi]() { scan(lo, hi, found[s]); };
                 if (s + 1 < slices) done.push_back(m_threadPool.run(work, slices - 1));
                 else {
                     try { work(); }

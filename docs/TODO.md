@@ -173,11 +173,26 @@ of 3.0.0 (format v2).
   2,574). 138M: **Lucene serves more at every load**, 1.6× with 48 callers.
   - Optional: queries arriving at a fixed rate (50% and 80% of each system's
     maximum) for tail latency, closer to a service.
-- **Throughput at 138M.** The medians tie with Lucene's, but nind's slow queries
-  are slower (99th percentile 353 ms against 247 with one caller), and throughput
-  follows the mean: which queries, and why (the window scan below, long lists of
-  frequent terms)? nind also gains little from hardware threads beyond the cores
-  (425 -> 477 queries/s from 24 to 48 callers, Lucene 599 -> 786).
+- [x] **Throughput at 138M.** The medians tied with Lucene's, but nind's slow
+  queries were slower (99th percentile 353 ms against 247 with one caller):
+  queries of many terms (8+: 231 ms against 136), most of their time in the
+  window scan, a million windows a query, each sorting its terms from scratch
+  (a quarter of the time), each scoring a few documents. From 5 terms, MaxScore
+  now scans windows of at least 4096 documents, a term's bound there the largest
+  of its blocks', the essential terms' postings added term at a time into a dense
+  array, the terms' order kept from one window to the next (`scanRangeByWindow`;
+  fewer terms stay document at a time: 2 terms 3.5 -> 8.3 ms the other way). 138M
+  one thread: mean 37.7 -> 29.8 ms (Lucene 35.9), median 17.0 -> 16.6 (18.6), p99
+  271 -> 192 (188); 8.8M mean -17%. Identical results. Under load (stage 6
+  again for nind, `stage6b.sh`): 8.8M, nind first at every load (48 threads
+  4,303 -> 4,847 queries/s, Lucene 2,574); 138M, nind first up to 4 threads
+  (24 processes), Lucene from 8 (48 threads: nind 477 -> 519, 8 segments 673,
+  Lucene 786).
+- **Many threads on a large index.** At 138M nind's threads scale less than
+  Lucene's past 8 (24 -> 48 callers: 474 -> 519 queries/s, Lucene 599 -> 786;
+  8 segments 673): memory bandwidth (each search reads its blocks into its own
+  buffers, lengths scattered), the scorer's shared structures (the directory
+  cache's lock, the scratch pool's mutex)? perf with 48 threads.
 - **A search process's own memory**, 138M: nind 1.06 GB, Lucene 0.83 (its JVM),
   tantivy 0.04 (both map their index). nind's: the lengths (2 bytes a document,
   0.26 GB; Lucene maps its norms), the 256 MB directory cache per segment, the
@@ -205,11 +220,13 @@ of 3.0.0 (format v2).
   - lengths on one byte (Lucene's norms, 8.8 MB instead of 17.7): no gain
     (2.63 vs 2.58 ms), so scores weren't changed for it.
   So the cost isn't the lengths' memory: ~70 ns (~250 cycles) per scored
-  document goes to instructions spread over windows and probes. What's left
-  is deeper: score windows in batches as Lucene's MaxScoreBulkScorer does
-  (fixed windows of documents, arrays and bitsets, fewer per-document
-  branches), compare documents scored per query with Lucene's, SIMD
-  decoding. Several categories (Amose) aren't pruned yet.
+  document goes to instructions spread over windows and probes. Done since:
+  windows of documents scored term at a time into an array and a bitset, as
+  Lucene's MaxScoreBulkScorer, for queries of 5 terms or more (see "Throughput
+  at 138M"; the re-sorting above pays there: a million windows a query). Left:
+  the same for fewer terms without the cost it has there (2 terms: 2.4× slower
+  at 138M; fixed costs per window), compare documents scored per query with
+  Lucene's, SIMD decoding. Several categories (Amose) aren't pruned yet.
 - **Large k on small corpora.** The v2 exhaustive path is ~25% slower than v1
   at top 1000 on 1–2M documents (block decoding); not a target size.
 - **Original author's to-do.** `NindLexiconIndex::addWord` doesn't check that

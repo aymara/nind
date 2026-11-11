@@ -17,11 +17,10 @@ showed before are kept at the end.
   tantivy 10.0 ms), **0.510 ms** with 8 segments and 8 threads.
 - **Stopwords kept** is nind's weak case: very long postings lists. At 138M, 138 ms on one thread
   against 36.1 ms for Lucene; 17.2 ms with 8 segments and 8 threads.
-- **Many callers at once**, every system: at 8.8M Lucene serves a little more with few callers, they
-  tie with 12 (2,055 and 2,065 queries/s), and nind keeps scaling past them
-  (4,303 with 48, Lucene's threads 2,574). At 138M Lucene serves more at every load
-  (786 queries/s with 48 callers, nind 477): the medians tie, but nind's slowest
-  queries are slower.
+- **Many callers at once**, every system: at 8.8M nind serves the most at every load (2,567
+  queries/s with 12 callers, Lucene 2,065; 4,847 with 48, Lucene's threads
+  2,574). At 138M nind leads with few callers and Lucene with many (786 queries/s
+  with 48 callers, nind 519).
 - **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 stays at
   19.8 ms (it reads about 1 MB per query); Lucene's goes from 20.1 to 103 ms.
   But nind holds 6.98 GB of its own (document names and lengths, read whole at open), Lucene
@@ -180,79 +179,80 @@ own segments, sharing the top 10's threshold. Crossing to the second socket cost
 one returns (`bench/retrieval/concurrency.py`), top 10, stopwords removed; queries per second, the best
 of each row in bold. Threads share one searcher (nind, Lucene through pyjnius and tantivy-py release
 Python's GIL while they search); processes each open the index, as separate servers would. Pinned as
-above. Measured 2026-11-11 with nind 4.1.0's development version (document names mapped: `docs/TODO.md`).
+above. Measured 2026-11-11 with nind 4.1.0's development version (document names mapped, MaxScore by windows for 5 terms or more: `docs/TODO.md`).
 
 MS MARCO 8.8M, threads:
 
 | callers | nind | nind, 8 segments | Lucene (Anserini) | tantivy |
 |---:|---:|---:|---:|---:|
-| 1 | 174 | 149 | **208** | 76 |
-| 2 | 350 | 338 | **415** | 150 |
-| 4 | 741 | 598 | **808** | 304 |
-| 8 | 1,441 | 1,194 | **1,590** | 603 |
-| 12 | 2,055 | 1,758 | **2,065** | 928 |
-| 24 | **3,680** | 3,169 | 3,144 | 1,762 |
-| 48 | **4,303** | 3,907 | 2,574 | 1,857 |
+| 1 | **218** | 182 | 208 | 76 |
+| 2 | **436** | 360 | 415 | 150 |
+| 4 | **870** | 718 | 808 | 304 |
+| 8 | **1,727** | 1,428 | 1,590 | 603 |
+| 12 | **2,567** | 2,105 | 2,065 | 928 |
+| 24 | **4,350** | 3,939 | 3,144 | 1,762 |
+| 48 | **4,847** | 4,371 | 2,574 | 1,857 |
 
 MS MARCO v2 138M, threads:
 
 | callers | nind | nind, 8 segments | Lucene (Anserini) | tantivy |
 |---:|---:|---:|---:|---:|
-| 1 | 19 | 19 | **22** | 5 |
-| 2 | 39 | 38 | **43** | 10 |
-| 4 | 77 | 77 | **86** | 20 |
-| 8 | 148 | 150 | **205** | 41 |
-| 12 | 218 | 219 | **284** | 60 |
-| 24 | 425 | 403 | **599** | 120 |
-| 48 | 477 | 503 | **786** | 132 |
+| 1 | **24** | 24 | 22 | 5 |
+| 2 | **48** | 48 | 43 | 10 |
+| 4 | 94 | **96** | 86 | 20 |
+| 8 | 183 | 187 | **205** | 41 |
+| 12 | 263 | 276 | **284** | 60 |
+| 24 | 474 | 483 | **599** | 120 |
+| 48 | 519 | 673 | **786** | 132 |
 
 Processes, 8.8M:
 
 | callers | nind | nind, 8 segments | Lucene (Anserini) | tantivy |
 |---:|---:|---:|---:|---:|
-| 1 | 175 | 149 | **212** | 75 |
-| 2 | 345 | 295 | **414** | 151 |
-| 4 | 651 | 562 | **781** | 304 |
-| 8 | 1,269 | 1,080 | **1,457** | 600 |
-| 12 | 1,782 | 1,578 | **1,887** | 895 |
-| 24 | **3,181** | 3,044 | 3,068 | 1,602 |
-| 48 | 4,267 | 3,959 | **4,906** | 1,819 |
+| 1 | **217** | 181 | 212 | 75 |
+| 2 | **423** | 356 | 414 | 151 |
+| 4 | **815** | 678 | 781 | 304 |
+| 8 | **1,621** | 1,336 | 1,457 | 600 |
+| 12 | **2,433** | 1,935 | 1,887 | 895 |
+| 24 | **4,588** | 3,467 | 3,068 | 1,602 |
+| 48 | **5,666** | 4,371 | 4,906 | 1,819 |
 
 Processes, 138M:
 
 | callers | nind | nind, 8 segments | Lucene (Anserini) | tantivy |
 |---:|---:|---:|---:|---:|
-| 1 | 20 | 19 | **25** | 5 |
-| 2 | 39 | 38 | **42** | 10 |
-| 4 | 74 | 73 | **79** | 20 |
-| 8 | 132 | 130 | **145** | 38 |
-| 12 | **195** | 191 | 162 | 55 |
-| 24 | 359 | 350 | **359** | 117 |
-| 48 | 448 | 396 | **627** | 102 |
+| 1 | 24 | 24 | **25** | 5 |
+| 2 | **48** | 47 | 42 | 10 |
+| 4 | **89** | 86 | 79 | 20 |
+| 8 | 163 | **165** | 145 | 38 |
+| 12 | 237 | **240** | 162 | 55 |
+| 24 | 384 | **444** | 359 | 117 |
+| 48 | 498 | 554 | **627** | 102 |
 
 99th percentile at 138M, threads, ms:
 
 | callers | nind | nind, 8 segments | Lucene (Anserini) | tantivy |
 |---:|---:|---:|---:|---:|
-| 1 | 353 | 365 | **247** | 725 |
-| 2 | 370 | 372 | **242** | 744 |
-| 4 | 381 | 368 | **242** | 745 |
-| 8 | 368 | 370 | **223** | 741 |
-| 12 | 378 | 397 | **226** | 754 |
-| 24 | 369 | 376 | **218** | 749 |
-| 48 | 601 | 578 | **316** | 1,500 |
+| 1 | 263 | 259 | **247** | 725 |
+| 2 | 268 | 261 | **242** | 744 |
+| 4 | 271 | 258 | **242** | 745 |
+| 8 | 274 | 267 | **223** | 741 |
+| 12 | 273 | 266 | **226** | 754 |
+| 24 | 314 | 301 | **218** | 749 |
+| 48 | 580 | 407 | **316** | 1,500 |
 
-- **8.8M**: Lucene serves up to 19% more with few callers, they tie with 12 (one socket's
-  cores), and past them nind's threads keep scaling (4,303 queries/s with 48 callers) while
-  Lucene's lose (3,144 with 24, 2,574 with 48); 48 Lucene processes serve the most
-  (4,906), each with its own JVM.
-- **138M: Lucene serves more at every load**, 1.6× nind's with 48 callers. Their medians tie
-  (above), but throughput follows the mean, and nind's slow queries are slower: its 99th percentile is
-  353 ms with one caller, Lucene's 247 ms. nind gains little from hardware
-  threads beyond the cores (425 to 477 queries/s from 24 to 48 callers, Lucene
-  599 to 786). Faster slow queries are "Search, what's left" in `docs/TODO.md`.
-- **Segments** don't add throughput (each query does the same work); they lower latency with threads
-  per query (above).
+- **8.8M: nind serves the most at every load**, threads or processes: 2,567 queries/s with 12
+  callers (one socket's cores; Lucene 2,065), 4,847 with 48 threads (Lucene's lose past the
+  cores: 2,574), 5,666 with 48 processes (Lucene 4,906, each with its own JVM).
+- **138M: nind leads with few callers, Lucene with many**: 24 against 22 queries/s
+  alone, 519 (8 segments: 673) against 786 with 48 threads. nind gains less from
+  more threads on the large index (474 to 519 from 24 to 48 callers, Lucene
+  599 to 786); `docs/TODO.md`. 99th percentile alone: 263 ms, Lucene's
+  247 ms. (Before MaxScore scanned queries of 5 terms or more in windows, term at a time,
+  nind served 477 with 48 threads at 138M and 4,303 at 8.8M.)
+- **Segments** serve about as many queries as one index up to 24 callers (each query does the same
+  work; they lower latency with threads per query, above), more with 48 threads at 138M
+  (673 against 519).
 - **Processes** each run their share of the queries after their own warm-up: with many of them, few
   queries each (Lucene's JVMs warm up apart), so those rows vary more.
 - **Memory of its own per process** (anonymous memory, 138M): nind 1.06 GB; nind, 8 segments 1.05 GB; Lucene (Anserini) 0.83 GB; tantivy 0.04 GB. A system that maps its
