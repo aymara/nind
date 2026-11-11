@@ -859,6 +859,17 @@ PYBIND11_MODULE(_native, m) {
         }), py::arg("base"), py::arg("with_local_index") = true, py::arg("merge_factor") = 10,
            py::arg("max_merged_docs") = 5000000)
         .def("add_document", &NindSegmentedUpdate::addDocument, py::arg("doc_id"), py::arg("words"), py::arg("name") = std::string())
+        // a tokenizer's batch (Tokenizer.tokenize_batch's vocabulary, term ids and ends) at once
+        .def("add_documents", [](NindSegmentedUpdate &self, const py::buffer &docIds, const py::buffer &ends,
+                                 const py::buffer &termIds, const std::vector<std::string> &vocabulary,
+                                 const std::vector<std::string> &names) {
+            const DocIdsView ids = docIdsView(docIds, "doc_ids");
+            const UIntView documentEnds = uintView(ends, "ends");
+            const UIntView localIds = uintView(termIds, "term_ids");
+            if (documentEnds.size != ids.values.size()) throw py::value_error("doc_ids and ends: as many expected");
+            py::gil_scoped_release release;
+            self.addDocuments(ids.values, documentEnds.data, localIds.data, localIds.size, vocabulary, names);
+        }, py::arg("doc_ids"), py::arg("ends"), py::arg("term_ids"), py::arg("vocabulary"), py::arg("names"))
         .def("remove_document", &NindSegmentedUpdate::removeDocument, py::arg("doc_id"))
         .def("commit", &NindSegmentedUpdate::commit, py::call_guard<py::gil_scoped_release>())
         .def_static("force_merge", &NindSegmentedUpdate::forceMerge, py::arg("base"), py::call_guard<py::gil_scoped_release>())

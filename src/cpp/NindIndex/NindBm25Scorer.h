@@ -56,6 +56,11 @@ public:
     NindBm25Scorer(const std::vector<NindDocId> &docIds,
                    const std::vector<uint32_t> &lengths,
                    const double avgDocLength);
+    /**\brief The corpus of documents firstId, firstId + 1... (in that order), without their ids
+    *\throws std::invalid_argument if there are too many documents */
+    NindBm25Scorer(const NindDocId firstId,
+                   const std::vector<uint32_t> &lengths,
+                   const double avgDocLength);
     ~NindBm25Scorer();
 
     /**\brief The documents with a positive score for the query terms, by decreasing score

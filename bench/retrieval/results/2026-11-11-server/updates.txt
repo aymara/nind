@@ -1,0 +1,10 @@
+Updates of 1% through IndexUpdate.add_jsonl (8 workers, numactl --physcpubind=0-11 --preferred=0),
+on a base built from base.jsonl, add.jsonl added (new names: a new segment). Before this version:
+the benchmark's update (one add_tokens per document) took 7.8 s at 16M and 60-84 s at 138M.
+
+MS MARCO v2 16M, +160,000 passages: 1.6 s (Lucene 3.5 s, tantivy 2.2 s in 2026-11-10-server)
+MS MARCO v2 138M (137.0M + 1.38M passages): 12.3 s, 12.6 s (Lucene 11.6 s, tantivy 16.6 s)
+
+Steps at 138M before the term index's dense lengths table (add_jsonl 3.7 s, commit 17.0 s):
+words used, sorted 0.73 s; lexicon 0.79 s; builder adds 0.40 s; term index 12.10 s; local index,
+lengths 0.04 s; names 0.67 s. With it: commit 8.7-8.9 s.

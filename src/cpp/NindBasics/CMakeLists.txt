@@ -7,6 +7,8 @@ SET(NindBasics_LIB_SRCS
   NindFile.cpp
   NindReadBuffer.h
   NindReadBuffer.cpp
+  NindMappedFile.h
+  NindMappedFile.cpp
   NindBytes.h
   NindPadFile.h
   NindPadFile.cpp
@@ -22,4 +24,4 @@ set_target_properties(NindBasics PROPERTIES VERSION ${NIND_LIB_VERSION} SOVERSIO
 install(TARGETS NindBasics DESTINATION lib)
 
 ########### install files ###############
-install(FILES NindFile.h NindPadFile.h NindSignalCatcher.h NindReadBuffer.h NindDocId.h DESTINATION include/NindBasics)
+install(FILES NindFile.h NindPadFile.h NindSignalCatcher.h NindReadBuffer.h NindMappedFile.h NindDocId.h DESTINATION include/NindBasics)

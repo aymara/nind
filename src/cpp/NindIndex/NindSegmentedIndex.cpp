@@ -22,6 +22,7 @@
 #include "NindTermIndex.h"
 #include "NindThreadPool.h"
 #include "NindBasics/NindReadBuffer.h"
+#include "NindBasics/NindMappedFile.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -42,6 +43,13 @@ const char *MANIFEST_EXTENSION = ".nindsegments";
 const char *MANIFEST_HEADER = "nindsegments 1";
 
 //the whole file; false if there is none
+bool fileExists(const string &fileName)
+{
+    FILE *file = fopen(fileName.c_str(), "rb");
+    if (file == 0) return false;
+    fclose(file);
+    return true;
+}
 bool readWholeFile(const string &fileName, vector<unsigned char> &bytes)
 {
     FILE *file = fopen(fileName.c_str(), "rb");
@@ -112,23 +120,43 @@ bool NindDocLengths::read(const string &fileName,
                           vector<NindDocId> &docIds,
                           vector<uint32_t> &lengths)
 {
-    vector<unsigned char> bytes;
-    if (!readWholeFile(fileName, bytes)) return false;
-    if (bytes.size() < 12) throw FormatFileException(fileName);
+    NindDocId firstId;
+    if (!readCompact(fileName, firstId, docIds, lengths)) return false;
+    if (docIds.empty())
+        for (size_t i = 0; i < lengths.size(); i++) docIds.push_back(firstId + i);
+    return true;
+}
+////////////////////////////////////////////////////////////
+bool NindDocLengths::readCompact(const string &fileName,
+                                 NindDocId &firstId,
+                                 vector<NindDocId> &docIds,
+                                 vector<uint32_t> &lengths)
+{
+    docIds.clear();
+    lengths.clear();
+    if (!fileExists(fileName)) return false;
+    //mapped: nothing but the lengths in memory
+    const NindMappedFile file(fileName);
+    const unsigned char *bytes = file.data();
+    if (file.size() < 12) throw FormatFileException(fileName);
     size_t idSize;
-    if (memcmp(bytes.data(), LENGTHS_MAGIC_V2, 8) == 0) idSize = 8;
-    else if (memcmp(bytes.data(), LENGTHS_MAGIC_V1, 8) == 0) idSize = 4;
+    if (memcmp(bytes, LENGTHS_MAGIC_V2, 8) == 0) idSize = 8;
+    else if (memcmp(bytes, LENGTHS_MAGIC_V1, 8) == 0) idSize = 4;
     else throw FormatFileException(fileName);
-    const uint64_t count = get4(bytes.data() + 8);
-    if (bytes.size() != 12 + (idSize + 4) * count) throw FormatFileException(fileName);
-    docIds.resize((size_t)count);
-    lengths.resize((size_t)count);
-    const unsigned char *ids = bytes.data() + 12;
+    const uint64_t count = get4(bytes + 8);
+    if (file.size() != 12 + (idSize + 4) * count) throw FormatFileException(fileName);
+    const unsigned char *ids = bytes + 12;
     const unsigned char *values = ids + idSize * count;
-    for (size_t i = 0; i < count; i++) {
-        docIds[i] = (idSize == 8) ? get8(ids + 8 * i) : get4(ids + 4 * i);
-        lengths[i] = get4(values + 4 * i);
+    const auto idAt = [&](const size_t i) -> NindDocId { return (idSize == 8) ? get8(ids + 8 * i) : get4(ids + 4 * i); };
+    firstId = (count == 0) ? 0 : idAt(0);
+    bool consecutive = true;
+    for (size_t i = 1; i < count && consecutive; i++) consecutive = idAt(i) == firstId + i;
+    if (!consecutive) {
+        docIds.resize((size_t)count);
+        for (size_t i = 0; i < count; i++) docIds[i] = idAt(i);
     }
+    lengths.resize((size_t)count);
+    for (size_t i = 0; i < count; i++) lengths[i] = get4(values + 4 * i);
     return true;
 }
 ////////////////////////////////////////////////////////////
@@ -265,9 +293,10 @@ public:
         {
             lexicon.reset(new NindLexiconIndex(base, false));
             terms.reset(new NindTermIndex(base, false, lexicon->getIdentification(), 0));
-            vector<NindDocId> docIds;
+            NindDocId firstId = 0;
+            vector<NindDocId> docIds;           //(empty: firstId, firstId + 1...)
             vector<uint32_t> lengths;
-            if (!NindDocLengths::read(base + ".ninddoclengths", docIds, lengths)) {
+            if (!NindDocLengths::readCompact(base + ".ninddoclengths", firstId, docIds, lengths)) {
                 //written before document lengths were stored apart: from the local index
                 NindLocalIndex local(base, false, lexicon->getIdentification());
                 local.getDocIdents(docIds);
@@ -280,7 +309,9 @@ public:
                 }
             }
             for (size_t d = 0; d < lengths.size(); d++) totalLength += lengths[d];
-            scorer.reset(new NindBm25Scorer(docIds, lengths, docIds.empty() ? 0.0 : (double)totalLength / docIds.size()));
+            const double avgLength = lengths.empty() ? 0.0 : (double)totalLength / lengths.size();
+            if (docIds.empty()) scorer.reset(new NindBm25Scorer(firstId, lengths, avgLength));
+            else scorer.reset(new NindBm25Scorer(docIds, lengths, avgLength));
             FILE *namesFile = fopen((base + ".ninddocnames").c_str(), "rb");
             if (namesFile != 0) {
                 fclose(namesFile);

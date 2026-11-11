@@ -714,14 +714,12 @@ def test_jsonl_sample_counts_or_estimates(tmp_path, monkeypatch):
     path = write_jsonl(tmp_path / "corpus.jsonl", records)
     indexer = NindIndexer(str(tmp_path))
     end = os.path.getsize(path)
-    names = sum(len("d%d" % i) for i in range(400))
-    assert indexer._jsonl_sample(path, end, "id", "contents") == (4000, 400, names, 4000, 1)  # small: counted
-    assert indexer._jsonl_sample(path, 0, "id", "contents") == (0, 0, 0, 0, 0)
+    assert indexer._jsonl_sample(path, end, "id", "contents") == (4000, 400, 4000, 1)     # small: counted
+    assert indexer._jsonl_sample(path, 0, "id", "contents") == (0, 0, 0, 0)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_PIECES", 4)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_BYTES", 300)
     sample = indexer._jsonl_sample(path, end, "id", "contents")
     assert sample.tokens == pytest.approx(4000, rel=0.05) and sample.documents == pytest.approx(400, rel=0.05)
-    assert sample.names == pytest.approx(names, rel=0.1)
     assert sample.sampled_tokens < 4000 and sample.sampled_terms == 1
 
 
@@ -751,7 +749,7 @@ def test_plan_jsonl_memory(tmp_path, monkeypatch):
     assert plan(8, 100, 6) == (100, 2)
     with pytest.raises(ValueError):
         plan(1, 1, 2.5)
-    # the names checked after the shards (400 documents of 1 MiB each here) don't fit
+    # the names checked after the shards (1 MiB for each of the 400 documents here) don't fit
     monkeypatch.setattr(NindIndexer, "NAMES_CHECK_BYTES_PER_DOCUMENT", 1 << 20)
     with pytest.raises(ValueError, match="names"):
         plan(4, 1, 30)
@@ -1150,6 +1148,58 @@ def test_updates_keep_document_names(tmp_path):
     with NindIndexer(str(tmp_path / "unnamed"), prefix="corpus").update() as update:
         update.add_text("eel", name="x")
     assert unnamed.doc_name(2) == "x" and unnamed.doc_name(0) is None
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_update_add_jsonl_equals_adding_texts_one_by_one(tmp_path, monkeypatch, workers):
+    # new records, records replacing documents by name, one emptying a document, non-ASCII words
+    monkeypatch.setattr(NindIndexer, "JSONL_PARALLEL_MIN_BYTES", 0)
+    base = write_jsonl(tmp_path / "base.jsonl", [{"id": "d%d" % i, "contents": "common tag%s %s" % (
+        "abcde"[i % 5], "pad " * (i % 7))} for i in range(60)])
+    records = [{"id": "d%d" % i, "contents": "fresh common tag%s caf\u00e9 %s" % ("fghij"[i % 5], "pad " * (i % 3))}
+               for i in range(55, 100)]
+    records += [{"id": "d3", "contents": "replaced common"}, {"id": "d20", "contents": ""}]
+    add = write_jsonl(tmp_path / "add.jsonl", records)
+    engines = []
+    for way in ("batch", "texts"):
+        (tmp_path / way).mkdir()
+        indexer = NindIndexer(str(tmp_path / way))
+        indexer.index_jsonl(base)
+        with indexer.update() as update:
+            if way == "batch":
+                ids = update.add_jsonl(add, workers=workers)
+            else:
+                ids_by_text = [update.add_text(r["contents"], name=r["id"]) for r in records]
+        engines.append(NindEngine(str(tmp_path / way)))
+    assert ids == ids_by_text and ids[-2:] == [3, 20] and ids[0] == 55
+    batch, texts = engines
+    assert batch.total_docs == texts.total_docs == 99          # d20 emptied: removed
+    assert batch.doc_id("d20") is None and batch.doc_name(99) == "d99"
+    for term in ("common", "fresh", "tagf", "taga", "caf\u00e9", "replaced", "pad"):
+        assert batch.get_df(term) == texts.get_df(term)
+    for query in ("fresh pad", "replaced", "taga common"):
+        assert batch.search(query, doc_names=True) == texts.search(query, doc_names=True)
+
+
+def test_update_add_jsonl_then_changes_of_its_documents(tmp_path):
+    index_dir = tmp_path / "jsonl"
+    index_dir.mkdir()
+    indexer = NindIndexer(str(index_dir))
+    indexer.index_jsonl(write_jsonl(tmp_path / "base.jsonl", [{"id": "a", "contents": "cat"},
+                                                              {"id": "b", "contents": "dog"}]))
+    add = write_jsonl(tmp_path / "add.jsonl", [{"id": "c", "contents": "eel"}, {"id": "d", "contents": "owl"},
+                                               {"id": "b", "contents": "bird"}, {"id": "e", "contents": "yak"}])
+    with indexer.update() as update:
+        ids = update.add_jsonl(add, workers=1)
+        assert ids == [2, 3, 1, 4] and update.doc_id("c") == 2
+        assert update.remove(3)                                 # a batch's new document: not written
+        assert update.add_text("zebra", name="e") == 4          # a batch's document, replaced
+        assert update.remove(1)                                 # a batch's replacement, removed
+    engine = NindEngine(str(index_dir))
+    assert engine.total_docs == 3
+    assert [engine.doc_name(i) for i in range(5)] == ["a", None, "c", None, "e"]
+    assert engine.get_df("owl") == engine.get_df("yak") == engine.get_df("bird") == engine.get_df("dog") == 0
+    assert engine.get_tf("zebra", 4) == 1 and engine.get_tf("eel", 2) == 1
 
 
 def test_document_names_are_stored_compactly(tmp_path):

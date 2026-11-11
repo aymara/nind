@@ -84,9 +84,10 @@ class Nind(System):
 
     def update(self, index_dir, add, corpus):
         from nind import nind_engine
+        # the batch API (as Lucene's update takes the raw JSON lines): parsed and tokenized in
+        # worker processes; the corpus's tokens are words without spaces, as split() gives them
         with nind_engine.NindIndexer(index_dir, self.prefix).update() as update:
-            for doc in read_jsonl(add):
-                update.add_tokens(doc["contents"].split(), name=doc["id"])
+            update.add_jsonl(add, workers=self.threads)
         # a tier of segments merged in this update: record it
         if update.stats is not None and update.stats.merges_nb:
             self.update_mode = "merged %d documents" % update.stats.merged_docs_nb

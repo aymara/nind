@@ -31,6 +31,8 @@ commit_message = "Bump version {old_version} -> {new_version}"
 commit = true
 tag = true
 push = true
+# uv lock, uv.lock added to the version's commit
+pre_commit_hook = "cicd/bumpver-pre-commit.sh"
 
 [tool.bumpver.file_patterns]
 "pyproject.toml" = [

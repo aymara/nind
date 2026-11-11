@@ -164,16 +164,26 @@ TEST_CASE("NindDocNamesRobustness.EveryTruncationAndCorruptionIsRejectedOrHarmle
                 bytes[i] = value;
                 writeFileBytes(corrupt, bytes);
                 try {
+                    // opened (only its header checked): every lookup stays within the file (ASan),
+                    // throwing a FileException or missing on what it finds wrong
                     const NindDocNames read(corrupt);
-                    // accepted: every lookup stays within the file
+                    bool checked = true;
+                    try { read.check(); } catch (FileException &) { checked = false; }
                     vector<NindDocId> entryIdents;
                     vector<string> entryNames;
                     read.getEntries(entryIdents, entryNames);
                     for (size_t k = 0; k < entryNames.size(); k++) {
                         string name;
                         NindDocId ident;
-                        CHECK(read.getName(entryIdents[k], name));
-                        CHECK(read.getDocIdent(entryNames[k], ident));
+                        try {
+                            const bool named = read.getName(entryIdents[k], name);
+                            const bool found = read.getDocIdent(entryNames[k], ident);
+                            // a file check() accepts: every lookup right
+                            if (checked) CHECK((named && found));
+                        }
+                        catch (FileException &) {
+                            CHECK_FALSE(checked);
+                        }
                     }
                 }
                 catch (FileException &) {
@@ -181,5 +191,26 @@ TEST_CASE("NindDocNamesRobustness.EveryTruncationAndCorruptionIsRejectedOrHarmle
             }
         }
     }
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.OpeningChecksTheHeaderAndCheckTheWholeFile") {
+    // names out of order: opened (the header is right), refused by check()
+    TestTempDir tmp;
+    const string file = tmp.file("names");
+    NindDocNames::write(file, {5, 6}, {"a", "b"});
+    vector<unsigned char> bytes = readFileBytes(file);
+    // <parNom> (ranks in name order: 0, 1) just before the 2 names' bytes
+    const size_t byName = bytes.size() - 2 - 8;
+    REQUIRE_EQ(0u, bytes[byName]);
+    REQUIRE_EQ(1u, bytes[byName + 4]);
+    swap(bytes[byName], bytes[byName + 4]);
+    const string swapped = tmp.file("swapped");
+    writeFileBytes(swapped, bytes);
+    const NindDocNames read(swapped);
+    CHECK_THROWS_AS(read.check(), FormatFileException);
+    string name;
+    CHECK(read.getName(6, name));
+    CHECK_EQ("b", name);
+    NindDocNames(file).check();
 }
 ////////////////////////////////////////////////////////////

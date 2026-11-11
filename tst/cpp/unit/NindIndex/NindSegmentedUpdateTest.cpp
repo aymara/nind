@@ -8,6 +8,7 @@
 #include "NindIndex/NindIndexVerify.h"
 #include "NindExceptions.h"
 #include "TestTempDir.h"
+#include "TestFileBytes.h"
 #include "doctest.h"
 #include <cmath>
 #include <cstdint>
@@ -315,5 +316,67 @@ TEST_CASE("NindSegmentedUpdate.NameInTwoDocumentsIsRefused") {
     update.addDocument(1, vector<string>{"a"}, "same");
     update.addDocument(2, vector<string>{"b"}, "same");
     CHECK_THROWS_AS(update.commit(), std::invalid_argument);
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindSegmentedUpdate.BatchesWriteWhatOneByOneWrites") {
+    // the same documents, one by one and as tokenizer batches (a word looked up once per batch),
+    // a batch's document replaced afterwards: the same segment files
+    TestTempDir tmp;
+    uint64_t state = 11;
+    Documents documents;
+    for (NindDocId d = 0; d < 300; d++) documents[d] = randomDocument(state);
+    const vector<string> replacement{"w1", "fresh"};
+    const string oneByOne = tmp.file("one"), batches = tmp.file("batch");
+    {
+        NindSegmentedUpdate update(oneByOne);
+        for (Documents::const_iterator d = documents.begin(); d != documents.end(); d++)
+            update.addDocument(d->first, d->second, nameOf(d->first));
+        update.addDocument(7, replacement, nameOf(7));
+        update.commit();
+    }
+    {
+        NindSegmentedUpdate update(batches);
+        for (NindDocId first = 0; first < 300; first += 100) {
+            //a batch: its own vocabulary, local ids, ends
+            vector<string> vocabulary;
+            map<string, uint32_t> local;
+            vector<uint32_t> localIds, ends;
+            vector<NindDocId> idents;
+            vector<string> names;
+            for (NindDocId d = first; d < first + 100; d++) {
+                for (size_t i = 0; i < documents[d].size(); i++) {
+                    const pair<map<string, uint32_t>::iterator, bool> found =
+                        local.insert(make_pair(documents[d][i], (uint32_t)vocabulary.size()));
+                    if (found.second) vocabulary.push_back(documents[d][i]);
+                    localIds.push_back(found.first->second);
+                }
+                ends.push_back((uint32_t)localIds.size());
+                idents.push_back(d);
+                names.push_back(nameOf(d));
+            }
+            update.addDocuments(idents, ends.data(), localIds.data(), localIds.size(), vocabulary, names);
+        }
+        update.addDocument(7, replacement, nameOf(7));
+        // bad batches
+        const uint32_t badEnds[] = {2, 1}, ids[] = {0, 0}, beyond[] = {5};
+        CHECK_THROWS_AS(update.addDocuments({1000, 1001}, badEnds, ids, 2, {"x"}, {"", ""}), std::invalid_argument);
+        CHECK_THROWS_AS(update.addDocuments({1000}, badEnds + 1, beyond, 1, {"x"}, {""}), std::invalid_argument);
+        CHECK_THROWS_AS(update.addDocuments({1000}, badEnds + 1, ids, 1, {"x"}, {"", ""}), std::invalid_argument);
+        update.commit();
+    }
+    const vector<string> segments = NindSegmentedIndex::readManifest(oneByOne);
+    REQUIRE_EQ(1u, segments.size());
+    const string a = NindSegmentedIndex::segmentBase(oneByOne, segments[0]);
+    const string b = NindSegmentedIndex::segmentBase(batches, NindSegmentedIndex::readManifest(batches)[0]);
+    for (const char *extension : {".ninddoclengths", ".ninddocnames"})
+        CHECK(readFileBytes(a + extension) == readFileBytes(b + extension));
+    const NindSegmentedIndex one(oneByOne), batch(batches);
+    CHECK_EQ(one.docsNb(), batch.docsNb());
+    for (const string word : {"w0", "w1", "w9", "w99", "fresh"}) {
+        const vector<list<string> > query(1, list<string>(1, word));
+        CHECK_EQ(one.documentFrequency(query[0]), batch.documentFrequency(query[0]));
+        CHECK(one.search(query, 1.2, 0.75, 20, false) == batch.search(query, 1.2, 0.75, 20, false));
+    }
+    CHECK(NindIndexVerify::verify(batches, true).ok());
 }
 ////////////////////////////////////////////////////////////

@@ -316,7 +316,9 @@ private:
 
     unsigned int m_specificsNumber;
 
-    //the documents' lengths (setDocumentLengths): by id (dense) or (id, length) by id (sparse)
+    //the documents' lengths (setDocumentLengths): by id from m_denseFirst (dense) or (id, length) by
+    //id (sparse)
+    NindDocId m_denseFirst;
     std::vector<unsigned int> m_denseLengths;
     std::vector<std::pair<NindDocId, unsigned int> > m_sparseLengths;
     //a compact block's packed bytes (reused)

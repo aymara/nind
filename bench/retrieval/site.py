@@ -265,9 +265,6 @@ def thread_tables(directory):
     per_query = {}
     for r in jsonl(os.path.join(directory, "search-threads.jsonl")):
         per_query.setdefault(index_key(r["index"]), {})[r["threads"]] = r["p50_ms"]
-    concurrency = {}
-    for r in jsonl(os.path.join(directory, "concurrency.jsonl")):
-        concurrency.setdefault(index_key(r["index"]), {})[r["threads"]] = r
     builds = {}
     for r in jsonl(os.path.join(directory, "build-threads.jsonl")):
         if r.get("phase") == "build" and not r.get("error"):
@@ -276,14 +273,128 @@ def thread_tables(directory):
     pq_threads = sorted({t for v in per_query.values() for t in v})
     tables = {"per_query": grid("index", [(labels[k], per_query[k]) for k in order if k in per_query], pq_threads,
                                 lambda v: fmt(v), best=min)}
-    c_threads = sorted({t for v in concurrency.values() for t in v})
-    tables["concurrency"] = grid("index", [(labels[k], {t: r["qps"] for t, r in concurrency[k].items()})
-                                           for k in order if k in concurrency], c_threads, lambda v: "{:,.0f}".format(v))
     b_threads = sorted({t for (large, _), v in builds.items() if not large for t in v})
     b_rows = [(NAMES[s], {t: r["build_s"] for t, r in builds[(False, s)].items()})
               for s, _ in SYSTEMS if (False, s) in builds]
     tables["builds"] = grid("system", b_rows, b_threads, lambda v: fmt(v, " s"), best=min)
-    return tables, per_query, concurrency, builds
+    return tables, per_query, builds
+
+
+#: the systems of the several-callers runs, and their datasets: (key, label)
+CALLER_SYSTEMS = ["nind", "nind-8s", "lucene", "tantivy"]
+CALLER_DATASETS = [("msmarco-stop", "MS MARCO 8.8M"), ("v2-stop", "MS MARCO v2 138M")]
+
+
+def callers(path):
+    """The several-callers runs (concurrency.py, every system): {(dataset, mode): {system: {callers: row}}}"""
+    data = {}
+    for r in (jsonl(path) if path else []):
+        dataset = "v2-stop" if "/v2/" in r["index"] else "msmarco-stop"
+        data.setdefault((dataset, r["mode"]), {}).setdefault(r["system"], {})[r["callers"]] = r
+    return data
+
+
+def callers_table(data, dataset, mode, key="qps", cell=lambda v: "{:,.0f}".format(v), best=max):
+    """callers x systems; the best system of each row in bold"""
+    runs = data.get((dataset, mode), {})
+    counts = sorted({c for v in runs.values() for c in v})
+    systems = [s for s in CALLER_SYSTEMS if s in runs]
+    lines = ["| callers | %s |" % " | ".join(NAMES[s] for s in systems), "|---:|" + "---:|" * len(systems)]
+    for c in counts:
+        values = [runs[s].get(c, {}).get(key) for s in systems]
+        chosen = best([v for v in values if v is not None]) if best else None
+        lines.append("| %d | %s |" % (c, " | ".join("–" if v is None else ("**%s**" % cell(v) if v == chosen else cell(v))
+                                                     for v in values)))
+    return "\n".join(lines)
+
+
+CALLERS_TEXT = """**Many callers at once**, every system: N callers, each sending its next query when the last
+one returns (`bench/retrieval/concurrency.py`), top 10, stopwords removed; queries per second, the best
+of each row in bold. Threads share one searcher (nind, Lucene through pyjnius and tantivy-py release
+Python's GIL while they search); processes each open the index, as separate servers would. Pinned as
+above. {code}
+
+MS MARCO 8.8M, threads:
+
+{v1_threads}
+
+MS MARCO v2 138M, threads:
+
+{v2_threads}
+
+Processes, 8.8M:
+
+{v1_processes}
+
+Processes, 138M:
+
+{v2_processes}
+
+99th percentile at 138M, threads, ms:
+
+{v2_p99}
+
+- **8.8M**: Lucene serves up to {v1_lead}% more with few callers, they tie with 12 (one socket's
+  cores), and past them nind's threads keep scaling ({v1_nind_48} queries/s with 48 callers) while
+  Lucene's lose ({v1_lucene_24} with 24, {v1_lucene_48} with 48); 48 Lucene processes serve the most
+  ({v1_lucene_p48}), each with its own JVM.
+- **138M: Lucene serves more at every load**, {v2_ratio}× nind's with 48 callers. Their medians tie
+  (above), but throughput follows the mean, and nind's slow queries are slower: its 99th percentile is
+  {v2_nind_p99} ms with one caller, Lucene's {v2_lucene_p99} ms. nind gains little from hardware
+  threads beyond the cores ({v2_nind_24} to {v2_nind_48} queries/s from 24 to 48 callers, Lucene
+  {v2_lucene_24} to {v2_lucene_48}). Faster slow queries are "Search, what's left" in `docs/TODO.md`.
+- **Segments** don't add throughput (each query does the same work); they lower latency with threads
+  per query (above).
+- **Processes** each run their share of the queries after their own warm-up: with many of them, few
+  queries each (Lucene's JVMs warm up apart), so those rows vary more.
+- **Memory of its own per process** (anonymous memory, 138M): {anonymous}. A system that maps its
+  index (Lucene, tantivy) shares those pages between processes, as nind shares its mapped document
+  names; nind's are mostly its documents' lengths and its directory cache."""
+
+
+def callers_section(path, anonymous_path, code):
+    data = callers(path)
+    if not data:
+        return "", {"c_v1_nind_12": "–", "c_v1_lucene_12": "–", "c_v1_nind_48": "–", "c_v1_lucene_48": "–",
+                    "c_v2_lucene_48": "–", "c_v2_nind_48": "–"}
+
+    def value(dataset, mode, system, callers_nb, key="qps"):
+        r = data.get((dataset, mode), {}).get(system, {}).get(callers_nb)
+        return r[key] if r else None
+
+    def qps(dataset, mode, system, callers_nb):
+        v = value(dataset, mode, system, callers_nb)
+        return "{:,.0f}".format(v) if v is not None else "–"
+
+    anonymous = []
+    for r in (jsonl(anonymous_path) if anonymous_path else []):
+        if r.get("callers") == 1 and "anonymous_gb" in r:
+            anonymous.append("%s %.2f GB" % (NAMES[r["system"]], r["anonymous_gb"]))
+    leads = [value("msmarco-stop", "threads", "lucene", c) / value("msmarco-stop", "threads", "nind", c) - 1
+             for c in (1, 2, 4, 8) if value("msmarco-stop", "threads", "nind", c)]
+    v2_nind_48, v2_lucene_48 = value("v2-stop", "threads", "nind", 48), value("v2-stop", "threads", "lucene", 48)
+    text = CALLERS_TEXT.format(
+        code=code,
+        v1_threads=callers_table(data, "msmarco-stop", "threads"), v2_threads=callers_table(data, "v2-stop", "threads"),
+        v1_processes=callers_table(data, "msmarco-stop", "processes"),
+        v2_processes=callers_table(data, "v2-stop", "processes"),
+        v2_p99=callers_table(data, "v2-stop", "threads", key="p99_ms", cell=lambda v: "{:,.0f}".format(v), best=min),
+        v1_nind_48=qps("msmarco-stop", "threads", "nind", 48), v1_lucene_24=qps("msmarco-stop", "threads", "lucene", 24),
+        v1_lucene_48=qps("msmarco-stop", "threads", "lucene", 48),
+        v1_lucene_p48=qps("msmarco-stop", "processes", "lucene", 48),
+        v2_ratio="%.1f" % (v2_lucene_48 / v2_nind_48) if v2_nind_48 and v2_lucene_48 else "–",
+        v2_nind_p99=fmt(value("v2-stop", "threads", "nind", 1, "p99_ms")),
+        v2_lucene_p99=fmt(value("v2-stop", "threads", "lucene", 1, "p99_ms")),
+        v1_lead="%.0f" % (100 * max(leads)) if leads else "–",
+        v2_nind_24=qps("v2-stop", "threads", "nind", 24), v2_nind_48=qps("v2-stop", "threads", "nind", 48),
+        v2_lucene_24=qps("v2-stop", "threads", "lucene", 24), v2_lucene_48=qps("v2-stop", "threads", "lucene", 48),
+        anonymous="; ".join(anonymous) if anonymous else "not measured")
+    return text, {"c_v1_nind_12": qps("msmarco-stop", "threads", "nind", 12),
+                  "c_v1_lucene_12": qps("msmarco-stop", "threads", "lucene", 12),
+                  "c_v1_nind_48": qps("msmarco-stop", "threads", "nind", 48),
+                  "c_v1_lucene_48": qps("msmarco-stop", "threads", "lucene", 48),
+                  "c_v2_lucene_48": qps("v2-stop", "threads", "lucene", 48),
+                  "c_v2_nind_48": qps("v2-stop", "threads", "nind", 48)}
 
 
 #: the systems searched under a page-cache budget
@@ -370,8 +481,11 @@ showed before are kept at the end.
   tantivy {v1_tantivy} ms), **{v1_8s8t} ms** with 8 segments and 8 threads.
 - **Stopwords kept** is nind's weak case: very long postings lists. At 138M, {v2f_nind} ms on one thread
   against {v2f_lucene} ms for Lucene; {v2f_8s8t} ms with 8 segments and 8 threads.
-- **Throughput.** Many queries at once on one `NindEngine` (one thread each): {qps_v1_12} queries/s at
-  8.8M on 12 cores, {qps_v1_24} on 24; {qps_v2_24} at 138M on 24.
+- **Many callers at once**, every system: at 8.8M Lucene serves a little more with few callers, they
+  tie with 12 ({c_v1_nind_12} and {c_v1_lucene_12} queries/s), and nind keeps scaling past them
+  ({c_v1_nind_48} with 48, Lucene's threads {c_v1_lucene_48}). At 138M Lucene serves more at every load
+  ({c_v2_lucene_48} queries/s with 48 callers, nind {c_v2_nind_48}): the medians tie, but nind's slowest
+  queries are slower.
 - **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 stays at
   {mem_nind_1} ms (it reads about 1 MB per query); Lucene's goes from {mem_lucene_all} to {mem_lucene_1} ms.
   But nind holds {mem_nind_own} GB of its own (document names and lengths, read whole at open), Lucene
@@ -440,14 +554,7 @@ A single index splits its documents into ranges, one per thread; its gain stops 
 (4 with stopwords kept) and at 4 at 138M. Segments scale further: each thread searches its
 own segments, sharing the top 10's threshold. Crossing to the second socket costs more than it gives.
 
-**Throughput**, many queries at once: one `NindEngine` shared by T threads, one query per thread
-(`bench/retrieval/concurrency.py`), queries per second.
-
-{concurrency_table}
-
-The search releases Python's GIL: throughput grows with the cores ({speedup_12}× on 12, {speedup_24}× on 24
-at 8.8M), and hardware threads beyond them add little. One index gives the most throughput: segments
-and threads per query lower latency, not the total work.
+{callers_section}
 
 **Build threads**, 8.8M passages (`--threads`): seconds.
 
@@ -532,12 +639,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--server", nargs="+", required=True, help="the server's report.csv files")
     parser.add_argument("--threads", required=True,
-                        help="directory of search-threads.jsonl, concurrency.jsonl, build-threads.jsonl")
+                        help="directory of search-threads.jsonl, build-threads.jsonl")
     parser.add_argument("--laptop", nargs="+", required=True, help="the laptop's report.csv files, oldest first")
     parser.add_argument("--docs", default="docs")
     parser.add_argument("--date", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--memory", default=None, help="memory-budget.jsonl: searches under a page-cache budget")
+    parser.add_argument("--callers", default=None, help="concurrency-callers.jsonl: several callers, every system")
+    parser.add_argument("--callers-anonymous", default=None,
+                        help="concurrency.py's run with --mode processes giving each system's memory per process")
+    parser.add_argument("--callers-code", default="", help="which nind the several-callers runs used (a sentence)")
     parser.add_argument("--code-of", default=None, help="a later version with the same code as --version")
     parser.add_argument("--laptop-date", required=True)
     parser.add_argument("--laptop-version", default="3.2.0")
@@ -595,16 +706,9 @@ def main():
         lines += ["", "Each cell: median top-10 latency · nDCG@10."]
         return "\n".join(lines)
 
-    tables, per_query, concurrency, builds = thread_tables(args.threads)
+    tables, per_query, builds = thread_tables(args.threads)
     memory_section, memory_values = memory(args.memory)
-
-    def qps(index, threads):
-        r = concurrency.get(index, {}).get(threads)
-        return "{:,.0f}".format(r["qps"]) if r else "–"
-
-    def speedup(index, threads):
-        c = concurrency.get(index, {})
-        return "%.1f" % (c[threads]["qps"] / c[1]["qps"]) if threads in c and 1 in c else "–"
+    callers_text, callers_values = callers_section(args.callers, args.callers_anonymous, args.callers_code)
 
     def build(large, system, threads, key="build_s", scale=1):
         r = builds.get((large, system), {}).get(threads)
@@ -626,9 +730,7 @@ def main():
         v1_tantivy=get("msmarco-stop", "tantivy", "k10_p50"), v1_8s8t=get("msmarco-stop", "nind-8s-8t", "k10_p50"),
         v2f_nind=get("v2", "nind", "k10_p50"), v2f_lucene=get("v2", "lucene", "k10_p50"),
         v2f_8s8t=get("v2", "nind-8s-8t", "k10_p50"),
-        qps_v1_12=qps("v1/msmarco-stop/nind", 12), qps_v1_24=qps("v1/msmarco-stop/nind", 24),
-        qps_v2_24=qps("v2/v2-stop/nind", 24),
-        speedup_12=speedup("v1/msmarco-stop/nind", 12), speedup_24=speedup("v1/msmarco-stop/nind", 24),
+        callers_section=callers_text, **callers_values,
         v2_32s_build=get("v2-stop", "nind-32s", "build_s"), v2_lucene_build=get("v2-stop", "lucene", "build_s"),
         v2_tantivy_build=get("v2-stop", "tantivy", "build_s"), v2_32s_build48=build(True, "nind-32s", 48),
         v2_nind_build=get("v2-stop", "nind", "build_s"), v2_nind_mem=get("v2-stop", "nind", "build_mem", 0, 1024),
@@ -653,7 +755,7 @@ def main():
         v1_image=image("msmarco", "MS MARCO 8.8M: search latency, build time, index size and update time per "
                                   "system; the same data is in the table below."),
         v1_table=table(rows, "msmarco-stop", columns), v1_full_table=table(rows, "msmarco", columns),
-        per_query_table=tables["per_query"], concurrency_table=tables["concurrency"], builds_table=tables["builds"],
+        per_query_table=tables["per_query"], builds_table=tables["builds"],
         mem_32s_1=build(False, "nind-32s", 1, "peak_mb", 1024), mem_32s_48=build(False, "nind-32s", 48, "peak_mb", 1024),
         b138_32s=build(True, "nind-32s", 48), b138_32s_mem=build(True, "nind-32s", 48, "peak_mb", 1024),
         b138_lucene=build(True, "lucene", 48), b138_tantivy=build(True, "tantivy", 48),

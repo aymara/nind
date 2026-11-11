@@ -80,7 +80,8 @@ written by `NindIndexer`: `<prefix>.nindmeta` (JSON: tokenizer options,
 local index or not), `<prefix>.ninddoclengths` (document lengths, so
 `NindEngine` needs no local index) and, when documents have names,
 `<prefix>.ninddocnames` (document id <-> name, the C++ `NindDocNames`
-format: written once, read whole, name -> id by binary search).
+format: written once, mapped rather than read, so names stay in the page
+cache shared by every process; name -> id by binary search).
 
 An index can also be made of immutable *segments*, each with those files:
 a generation then holds a manifest, `<prefix>.nindsegments`, and hard links to

@@ -87,14 +87,23 @@ public:
             m_sparse.swap(unique);
         }
         if (!m_identity) m_docIds.assign(docIds.begin(), docIds.end());
-        m_lengths.assign(lengths.begin(), lengths.end());
+        setLengths(lengths);
+    }
+    // documents firstId, firstId + 1...: no table
+    Impl(const NindDocId firstId, const std::vector<uint32_t> &lengths, const double avgDocLength):
+        m_docIds(), m_first(firstId), m_lengths(), m_shortLengths(), m_minLength(0), m_identity(true), m_dense(), m_sparse(),
+        m_docsNb(lengths.size()), m_avgDocLength(avgDocLength),
+        m_poolMutex(), m_pool()
+    {
+        if (lengths.size() >= NO_POSITION) throw std::invalid_argument("too many documents");
+        setLengths(lengths);
+    }
+    void setLengths(const std::vector<uint32_t> &lengths) {
         //lengths under 2^16: 2 bytes each (more of them in the processor's caches)
         uint32_t maxLength = 0;
         for (size_t i = 0; i < lengths.size(); i++) maxLength = std::max(maxLength, lengths[i]);
-        if (maxLength < 65536) {
-            m_shortLengths.assign(lengths.begin(), lengths.end());
-            std::vector<uint32_t>().swap(m_lengths);
-        }
+        if (maxLength < 65536) m_shortLengths.assign(lengths.begin(), lengths.end());
+        else m_lengths.assign(lengths.begin(), lengths.end());
         m_minLength = 0;
         for (size_t i = 0; i < lengths.size(); i++)
             if (i == 0 || lengths[i] < m_minLength) m_minLength = lengths[i];
@@ -120,8 +129,6 @@ public:
         // scratch arrays and read buffer from the pool: concurrent searches each get their own
         ScratchLease lease(*this);
         NindReadBuffer &buffer = lease.scratch->buffer;
-        std::vector<double> &scores = lease.scratch->scores;
-        if (scores.size() != m_docsNb) scores.assign(m_docsNb, 0.0);
         std::vector<uint32_t> touched;          // positions whose score isn't 0 any more
 
         // the query's distinct terms; per occurrence (query order, repeats included) its term
@@ -148,6 +155,10 @@ public:
                 return result;
             }
         }
+        // one score per document, for the exhaustive search only (MaxScore keeps its candidates
+        // apart): 8 bytes a document per concurrent search, 1 GB at 138M
+        std::vector<double> &scores = lease.scratch->scores;
+        if (scores.size() != m_docsNb) scores.assign(m_docsNb, 0.0);
         collectAll(termIndex, distinctIds, corpus, buffer, lease.scratch->stamps, lease.scratch->stamp, idfs, postings);
         const Params parameters = params(k1, b, corpus);
         // the scores, term occurrence by term occurrence in query order (as NindEngine._bm25_score)
@@ -723,6 +734,13 @@ NindBm25Scorer::NindBm25Scorer(const std::vector<NindDocId> &docIds,
                                const std::vector<uint32_t> &lengths,
                                const double avgDocLength):
     m_impl(new Impl(docIds, lengths, avgDocLength))
+{
+}
+////////////////////////////////////////////////////////////
+NindBm25Scorer::NindBm25Scorer(const NindDocId firstId,
+                               const std::vector<uint32_t> &lengths,
+                               const double avgDocLength):
+    m_impl(new Impl(firstId, lengths, avgDocLength))
 {
 }
 ////////////////////////////////////////////////////////////

@@ -73,12 +73,20 @@ of 3.0.0 (format v2).
   - **Local index readers.** Opening an index no longer reads a header per
     document (0.4 s at 8.8M, was 7.3 s), but the first local index lookup does,
     once (~4 min at 300M, extrapolated): store the id map in the file?
-  - **Names and lengths.** Read whole at open (names validated: 0.10 s at 8.8M,
-    ~30 bytes per document). At 138M that is 6.6 GB read at open (names 4.96 GB,
-    lengths 1.66 GB) and 7.5 GB of the search process's memory, against 1.3 GB
-    for Lucene: with 1 GB of page cache nind's search is unchanged, so this is
-    what bounds the machine it needs (`bench/README.md` section 7). `mmap`, or
-    names looked up in the file?
+  - [x] **Names and lengths.** They were read whole at open: at 138M, 6.6 GB read
+    (names 4.96 GB, lengths 1.66 GB) and 7.5 GB of the search process's memory,
+    against 1.3 GB for Lucene. Names are mapped now (`NindMappedFile`: page
+    cache, shared, checked lookup by lookup, whole by `check()` in
+    `verify_index`); lengths are read mapped, ids left out when consecutive;
+    MaxScore searches no longer take an 8-byte-per-document scores array (1 GB
+    per concurrent search at 138M). 138M: open 6.4 -> 1.0 s, the process's own
+    memory 5.15 -> 0.52 GiB opened, 6.50 -> 0.85 GiB after queries; same
+    search speed. The names check of a sharded build: 7.2 -> 2.6 GiB.
+  - **Exhaustive searches' scratch.** Still 8 bytes per document per concurrent
+    exhaustive search, kept in a pool of up to one per hardware thread: 1 GB at
+    138M each, but only for a top k over documents / 4000 (34,500 at 138M) or
+    several categories (Amose). Accumulate in the touched documents only (sorted
+    postings: the same additions in the same order) when they are few?
   - **Merges.** A commit's merges are synchronous and single-threaded (17.6 s for
     the first update of a 16-shard 8.8M build): in the background, published as
     their own generation?
@@ -123,38 +131,57 @@ of 3.0.0 (format v2).
       costs ~950 bytes per distinct term in a build (each chunk's own word list,
       the union, `term_to_id`, the lexicon writer's input), 2.2 GiB for 2.5M
       terms. The union and the id maps in C++ (chunk vocabularies as one buffer)?
-    - **The names check after a sharded build** reads every shard's names whole
-      (`NindDocNames::merge` to a file then removed): 7.2 GiB at 138M, which no
-      number of shards divides, so `memory_gb` can't go below ~8.5 GiB there.
-      Hashes of the names, sorted, and only collisions compared? With the
-      "Names and lengths" item below.
+    - **The names check after a sharded build** (`NindDocNames::merge` to a
+      file then removed) takes 20 bytes per document, the names now mapped: 2.6
+      GiB at 138M (7.2 when it read them), which no number of shards divides, so
+      `memory_gb` can't go below ~3.9 GiB there. Shards in document order need
+      neither its sort nor most of its arrays; only the names' order is to check.
     - **The model is fitted on MS MARCO v2** (shards of 1M to 14M passages; up
       to 50% over for small shards, which costs segments). Check it on another
       kind of corpus (long documents, code); `merge=True`'s memory isn't in the
       budget; `index_files` has no `memory_gb` yet.
-    - **The benchmarks page** shows the builds before these changes: rerun the
-      build phases (direct and segments, 8.8M and 138M).
-  - **Updates at 138M**: +1% in 60–84 s (a new segment) against 12 s for Lucene
-    and 17 s for tantivy: where does it go?
+    - **The benchmarks page** shows the builds and the search memory before
+      these changes: rerun the build phases (direct and segments, 8.8M and
+      138M) and stage 5 (memory budgets: nind's 7 GB of its own is 0.9 now).
+  - [x] **Updates at 138M**: +1% took 60–84 s (a new segment) against 12 s for
+    Lucene and 17 s for tantivy; 12.4 s now (16M: 7.8 -> 1.6 s, Lucene 3.5 s).
+    Where it went:
+    - the new segment's vocabulary in a tree of every token: words are ids of
+      the update's own vocabulary now, hashed once as added (`NindSegmentedUpdate`);
+      the merge policy reads segment counts from the side files' headers instead
+      of opening the index;
+    - per token in Python (the harness's JSON parsing and `add_tokens`, 20 s at
+      138M; lists of strings to C++, 4 s): `IndexUpdate.add_jsonl` parses and
+      tokenizes in worker processes and hands batches to C++
+      (`SegmentedUpdate.add_documents`); the harness uses it (Lucene's update gets
+      the raw JSON lines too); `add_tokens` skips encoding ASCII tokens;
+    - writing the new segment's term index (12 of the last 17 s): its document
+      lengths, for the blocks, were a table by id only for ids starting near 0;
+      an update's (and a shard's) start far from it, so a binary search per
+      posting, twice. A table from the first id: also 8M in 8 shards 25 -> 18 s.
+    The new segment is still written by one thread.
   - **Amose.** Adapt it to `NindSegmentedIndex`/`NindSegmentedUpdate` (compound
     words on updates, term specifics: see the proposal); `NindAmoseMerge` needs
     its CLI (below). This doesn't constrain nind's design any more.
 - [x] **Concurrency benchmark** on format v2, up to 48 threads and 138M
   (section 7): 20.6× on 24 cores.
-- **Several callers, all systems.** The concurrency benchmark ran nind only: does
-  its per-query lead hold under load against Lucene and tantivy (bm25s if cheap)?
-  - Threads sharing one searcher (how nind and Lucene are served). First check
-    whether pyjnius and tantivy-py release the GIL during a search; if not, run
-    Lucene's threads in Java (one `IndexSearcher`).
-  - N processes on the same index: independent of the GIL, and shows nind's
-    names and lengths read again by each process (6.6 GB at 138M).
-  - Systems nind, nind-8s, Lucene, tantivy; 1–48 callers, each sending its next
-    query when the last returns, stage 3's pinning; queries/s, p50 and p99 per
-    caller; 8.8M (in memory) and 138M. The indexes in `nind-bench` serve as is.
+- [x] **Several callers, all systems** (`docs/benchmarks.md`, Threads; stage 6 in
+  `bench/retrieval/results/2026-11-11-server`). `concurrency.py` drives any system:
+  threads sharing one searcher (pyjnius and tantivy-py release the GIL too) or
+  processes each opening the index. 8.8M: Lucene up to 19% more with few
+  callers, a tie with 12, nind ahead past them (4,303 queries/s with 48, Lucene
+  2,574). 138M: **Lucene serves more at every load**, 1.6× with 48 callers.
   - Optional: queries arriving at a fixed rate (50% and 80% of each system's
     maximum) for tail latency, closer to a service.
-  - `concurrency.py` generalised to every system; about 6–8 h of runs; extends
-    the Threads section of `docs/benchmarks.md`.
+- **Throughput at 138M.** The medians tie with Lucene's, but nind's slow queries
+  are slower (99th percentile 353 ms against 247 with one caller), and throughput
+  follows the mean: which queries, and why (the window scan below, long lists of
+  frequent terms)? nind also gains little from hardware threads beyond the cores
+  (425 -> 477 queries/s from 24 to 48 callers, Lucene 599 -> 786).
+- **A search process's own memory**, 138M: nind 1.06 GB, Lucene 0.83 (its JVM),
+  tantivy 0.04 (both map their index). nind's: the lengths (2 bytes a document,
+  0.26 GB; Lucene maps its norms), the 256 MB directory cache per segment, the
+  term index's and lexicon's indirection maps. Map the lengths file?
 - [x] **Top 100** in the comparison benchmark.
 - **Stopwords kept at scale.** MS MARCO v2 138M, top 10 on one thread: 138 ms vs
   36 ms for Lucene (16M: 15.5 vs 6.1 ms); the gap grows with the corpus.

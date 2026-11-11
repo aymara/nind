@@ -508,8 +508,14 @@ MS MARCO prefix, stopwords removed; 2000 queries, k=10, after a warm-up):
 
 ```bash
 bench-env/bin/python bench/retrieval/concurrency.py WORK/fiqa-stop/nind/index data/fiqa-stop/queries.tsv \
-    [--threads 1 2 4 8 16] [--queries 2000]
+    [--system nind] [--mode threads|processes] [--callers 1 2 4 8 16] [--queries 2000] [--warmup 200]
 ```
+
+`--system` takes any system of `systems.py` (its index: `WORK/<dataset>/<system>/index`);
+`--mode processes` runs each caller in its own process (`spawn`: each opens the index, as
+separate servers would) instead of threads sharing one searcher. Each line also gives the
+peak PSS and private memory of every process of the run. Lucene (pyjnius) and tantivy-py
+release the GIL during a search, as nind does, so threads work for all three.
 
 Before: `NindEngine` serialized every call (one lock; the native readers
 weren't thread-safe). After: the thread-safe readers
@@ -649,7 +655,22 @@ and 6 h.
   its top 1000 from 89 to 2,022 ms (mapped files; readahead suspected, not
   checked); tantivy's top 1000 from 163 to 478 ms. But nind's own memory is
   7.5 GB (Lucene 1.3, tantivy 0.85): at open it reads its names (4.96 GB) and
-  lengths (1.66 GB) files whole.
+  lengths (1.66 GB) files whole. Since then (4.1.0's development version) names
+  are mapped and lengths read without their ids: 1.06 GB of its own after
+  queries, opened in 1.0 s instead of 6.4.
+- **Several callers, every system (stage 6, 2026-11-11).** `concurrency.py
+  --system S --mode threads|processes`, `scripts/stage6.sh`: nind, nind-8s,
+  Lucene, tantivy; 1-48 callers, pinned as stage 3; 8.8M and 138M; about 1.5 h.
+  pyjnius and tantivy-py release the GIL (4 threads: 4 times the queries/s), so
+  threads drive all of them. 8.8M: Lucene up to 19% more with few callers, a tie
+  with 12, nind ahead past them (4,303 queries/s with 48 against 2,574); 48
+  Lucene processes reach 4,906 with 56 GB of JVMs. 138M: Lucene ahead at every
+  load, 1.6× with 48 callers: nind's slow queries are slower (p99 353 against
+  247 ms). Results: `bench/retrieval/results/2026-11-11-server`.
+- **Updates after stage 6.** The harness's nind update uses `IndexUpdate.add_jsonl`
+  (batches, tokenized in worker processes) instead of `add_tokens` per document:
+  +1% at 138M in 12.4 s (60-84 s before; Lucene 11.6 s), at 16M in 1.6 s
+  (`updates.txt` there).
 
 ## Notes
 

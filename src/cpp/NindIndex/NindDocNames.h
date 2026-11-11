@@ -3,7 +3,7 @@
 //
 // Description: the names of the documents of an index (their identifiers in the
 // corpus, e.g. "d49309"), for both lookups: document id -> name and name -> document id.
-// Written once (a new index generation is never modified), read whole.
+// Written once (a new index generation is never modified), mapped for reading.
 //
 // Copyright: 2026 LATEJCON. See LICENCE.md file that comes with this distribution
 // This file is part of NIND (as "nouvelle indexation").
@@ -21,11 +21,13 @@
 #include "NindBasics/NindDocId.h"
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
+class NindMappedFile;
 ////////////////////////////////////////////////////////////
 /**\brief The names of the documents of an index (file <name>.ninddocnames).
 * <fichier>        ::= <magic="NINDDN02"> <flags> <nombre> <premierIdent>
@@ -38,7 +40,12 @@ namespace latecon {
 *                                       (magic NINDDN03: <Entier8>, only for names over 4 GiB)
 * <parNom>         ::= { <Entier4> }    the documents' ranks in increasing name order (byte order)
 * <noms>           ::= { <Octet> }      the names (UTF-8), in document order
-* Entier4: 4 bytes, little-endian. Names are unique; they may be empty. */
+* Entier4: 4 bytes, little-endian. Names are unique; they may be empty.
+* Read through a mapping of the file (NindMappedFile): the names stay in the page cache, shared by
+* the processes reading them, not in the process's memory (4.6 GiB for MS MARCO v2's 138M
+* passages). Opening checks the header and the arrays' sizes; each lookup checks the bounds of
+* what it reads (FormatFileException otherwise); check() checks the whole file (offsets
+* increasing, idents and names in order: a file that passes gives every lookup right). */
 class DLLExportLexicon NindDocNames {
 public:
     /**\brief Write the names of documents into a new file
@@ -70,6 +77,12 @@ public:
     *\param fileName file name
     *\throws OpenFileException, ReadFileException, FormatFileException if invalid */
     explicit NindDocNames(const std::string &fileName);
+    ~NindDocNames();
+
+    /**\brief Check the whole file: offsets increasing, idents strictly increasing, names in strictly
+    * increasing order (unique)
+    *\throws FormatFileException if invalid */
+    void check() const;
 
     /**\brief number of documents */
     size_t size() const { return m_size; }
@@ -103,9 +116,15 @@ private:
     std::pair<size_t, size_t> nameAt(const size_t rank) const;
     //compares the name of rank rank with name (like std::string::compare)
     int compareName(const size_t rank, const char *name, const size_t length) const;
+    //the rank of the document at a place in name order (checked)
+    size_t rankByName(const size_t place) const;
 
+    NindDocNames(const NindDocNames &);
+    NindDocNames &operator=(const NindDocNames &);
     std::string m_fileName;
-    std::vector<unsigned char> m_bytes;     //the whole file
+    std::unique_ptr<NindMappedFile> m_file;
+    const unsigned char *m_bytes;           //the whole file, mapped
+    size_t m_fileSize;
     size_t m_size;
     bool m_hasIdents;
     NindDocId m_firstIdent;

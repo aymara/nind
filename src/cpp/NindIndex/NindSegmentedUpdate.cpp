@@ -26,9 +26,11 @@
 #include "NindBasics/NindReadBuffer.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <set>
 #include <unordered_map>
+#include <stdexcept>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -156,41 +158,50 @@ void deleteDocuments(const NindSegmentedIndex::SegmentInfo &segment, const vecto
     remove(fileName.c_str());
     deletes.write(fileName);
 }
-// the new segment of the documents, words in the lexicon by increasing bytes
-void writeSegment(const string &segmentBase, const map<NindDocId, vector<string> const *> &documents,
-                  const vector<string> &names, const bool withLocalIndex)
+// the new segment of the documents (their words: ids in words), words in the lexicon by increasing
+// bytes
+void writeSegment(const string &segmentBase, const map<NindDocId, vector<uint32_t> const *> &documents,
+                  const vector<string> &words, const vector<string> &names, const bool withLocalIndex)
 {
-    vector<string> vocabulary;
+    //the words these documents use (not those of a document replaced or removed since), sorted
+    vector<uint32_t> used;
     {
-        set<string> distinct;
-        for (map<NindDocId, vector<string> const *>::const_iterator d = documents.begin(); d != documents.end(); d++)
-            distinct.insert(d->second->begin(), d->second->end());
-        vocabulary.assign(distinct.begin(), distinct.end());
+        vector<bool> seen(words.size(), false);
+        for (map<NindDocId, vector<uint32_t> const *>::const_iterator d = documents.begin(); d != documents.end(); d++)
+            for (size_t i = 0; i < d->second->size(); i++) {
+                const uint32_t word = (*d->second)[i];
+                if (!seen[word]) {
+                    seen[word] = true;
+                    used.push_back(word);
+                }
+            }
+        sort(used.begin(), used.end(), [&words](const uint32_t a, const uint32_t b) { return words[a] < words[b]; });
     }
-    NindLexiconIndex lexicon(segmentBase, true, false, max((unsigned int)vocabulary.size(), 1u));
-    vector<list<string> > words;
-    words.reserve(vocabulary.size());
-    for (size_t w = 0; w < vocabulary.size(); w++) words.push_back(list<string>(1, vocabulary[w]));
+    NindLexiconIndex lexicon(segmentBase, true, false, max((unsigned int)used.size(), 1u));
+    vector<list<string> > lexiconWords;
+    lexiconWords.reserve(used.size());
+    for (size_t w = 0; w < used.size(); w++) lexiconWords.push_back(list<string>(1, words[used[w]]));
     vector<unsigned int> idents;
     lexicon.beginBulk();
-    lexicon.addWords(words, idents);
+    lexicon.addWords(lexiconWords, idents);
     lexicon.endBulk();
+    vector<list<string> >().swap(lexiconWords);
     const NindPadFile::Identification identification = lexicon.getIdentification();
-    unordered_map<string, uint32_t> termIds;
-    termIds.reserve(vocabulary.size());
-    for (size_t w = 0; w < vocabulary.size(); w++) termIds[vocabulary[w]] = idents[w];
+    //update's word id -> term id: an array, no hashing per token
+    vector<uint32_t> termIds(words.size(), 0);
+    for (size_t w = 0; w < used.size(); w++) termIds[used[w]] = idents[w];
     NindIndexBuilder builder;
     vector<NindDocId> docIds;
     vector<uint32_t> lengths, tokens;
-    for (map<NindDocId, vector<string> const *>::const_iterator d = documents.begin(); d != documents.end(); d++) {
-        tokens.clear();
-        for (size_t i = 0; i < d->second->size(); i++) tokens.push_back(termIds[(*d->second)[i]]);
+    for (map<NindDocId, vector<uint32_t> const *>::const_iterator d = documents.begin(); d != documents.end(); d++) {
+        tokens.resize(d->second->size());
+        for (size_t i = 0; i < tokens.size(); i++) tokens[i] = termIds[(*d->second)[i]];
         builder.addDocument(d->first, tokens.data(), tokens.size());
         docIds.push_back(d->first);
         lengths.push_back((uint32_t)tokens.size());
     }
     {
-        NindTermIndex terms(segmentBase, true, identification, 0, (unsigned int)vocabulary.size() + 1);
+        NindTermIndex terms(segmentBase, true, identification, 0, (unsigned int)used.size() + 1);
         terms.beginBulk();
         builder.writeTermIndex(terms, identification);
         terms.endBulk();
@@ -289,10 +300,42 @@ void mergeSegments(const string &base, vector<string> &segments, const vector<si
     stats.mergesNb++;
     stats.mergedDocsNb += docIds.size();
 }
-// what the tiered policy merges now (empty: nothing)
-vector<size_t> segmentsToMerge(const NindSegmentedIndex &index, const unsigned int mergeFactor, const uint64_t maxMergedDocs)
+// the first count of a side file: <magic (8 bytes, its first magicSize given)> <count (Entier4)>;
+// false if there is no file
+bool headerCount(const string &fileName, const char *magic, const size_t magicSize, uint64_t &count)
 {
-    const vector<NindSegmentedIndex::SegmentInfo> infos = index.segments();
+    FILE *file = fopen(fileName.c_str(), "rb");
+    if (file == 0) return false;
+    unsigned char header[12];
+    const bool ok = fread(header, 1, 12, file) == 12 && memcmp(header, magic, magicSize) == 0;
+    fclose(file);
+    if (!ok) throw FormatFileException(fileName);
+    count = (uint64_t)header[8] | ((uint64_t)header[9] << 8) | ((uint64_t)header[10] << 16) | ((uint64_t)header[11] << 24);
+    return true;
+}
+// the documents and deleted documents of each segment, as NindSegmentedIndex::segments() counts
+// them, from their files' headers: opening the index would read every segment's lengths and
+// lexicon (a commit's merge policy needs nothing else)
+vector<NindSegmentedIndex::SegmentInfo> segmentCounts(const string &base, const vector<string> &segments)
+{
+    vector<NindSegmentedIndex::SegmentInfo> infos(segments.size());
+    for (size_t s = 0; s < segments.size(); s++) {
+        const string shard = NindSegmentedIndex::segmentBase(base, segments[s]);
+        infos[s].name = segments[s];
+        infos[s].base = shard;
+        //lengths: their own count (NINDDL02 or NINDDL01); without (an older index): opened
+        if (!headerCount(shard + ".ninddoclengths", "NINDDL0", 7, infos[s].docsNb)) {
+            infos[s].docsNb = NindSegmentedIndex(shard).segments()[0].docsNb;
+        }
+        infos[s].deletedNb = 0;
+        headerCount(shard + ".ninddeletes", "NINDDE01", 8, infos[s].deletedNb);
+    }
+    return infos;
+}
+// what the tiered policy merges now (empty: nothing)
+vector<size_t> segmentsToMerge(const vector<NindSegmentedIndex::SegmentInfo> &infos, const unsigned int mergeFactor,
+                               const uint64_t maxMergedDocs)
+{
     map<unsigned int, vector<size_t> > tiers;
     for (size_t s = 0; s < infos.size(); s++) {
         const uint64_t live = infos[s].docsNb - infos[s].deletedNb;
@@ -330,7 +373,9 @@ NindSegmentedUpdate::NindSegmentedUpdate(const string &base,
                                          const Options &options):
     m_base(base),
     m_options(options),
-    m_documents()
+    m_documents(),
+    m_words(),
+    m_wordIds()
 {
 }
 ////////////////////////////////////////////////////////////
@@ -343,8 +388,47 @@ void NindSegmentedUpdate::addDocument(const NindDocId ident,
                                       const string &name)
 {
     Document &document = m_documents[ident];
-    document.words = words;
+    document.words.resize(words.size());
+    for (size_t i = 0; i < words.size(); i++) document.words[i] = wordId(words[i]);
     document.name = name;
+}
+////////////////////////////////////////////////////////////
+void NindSegmentedUpdate::addDocuments(const vector<NindDocId> &idents,
+                                       const uint32_t *ends,
+                                       const uint32_t *localIds,
+                                       const size_t wordsNb,
+                                       const vector<string> &vocabulary,
+                                       const vector<string> &names)
+{
+    if (names.size() != idents.size()) throw invalid_argument("addDocuments: as many names as documents expected");
+    uint32_t previous = 0;
+    for (size_t d = 0; d < idents.size(); d++) {
+        if (ends[d] < previous || ends[d] > wordsNb)
+            throw invalid_argument("addDocuments: ends must be ascending and within the words");
+        previous = ends[d];
+    }
+    if (previous != wordsNb) throw invalid_argument("addDocuments: the last end must be the number of words");
+    for (size_t i = 0; i < wordsNb; i++)
+        if (localIds[i] >= vocabulary.size()) throw invalid_argument("addDocuments: a local id beyond the vocabulary");
+    vector<uint32_t> ids(vocabulary.size());
+    for (size_t v = 0; v < vocabulary.size(); v++) ids[v] = wordId(vocabulary[v]);
+    for (size_t d = 0, begin = 0; d < idents.size(); begin = ends[d], d++) {
+        Document &document = m_documents[idents[d]];
+        document.words.resize(ends[d] - begin);
+        for (size_t i = begin; i < ends[d]; i++) document.words[i - begin] = ids[localIds[i]];
+        document.name = names[d];
+    }
+}
+////////////////////////////////////////////////////////////
+uint32_t NindSegmentedUpdate::wordId(const string &word)
+{
+    const pair<unordered_map<string, uint32_t>::iterator, bool> found =
+        m_wordIds.insert(make_pair(word, (uint32_t)m_words.size()));
+    if (found.second) {
+        if (m_words.size() == 0xFFFFFFFFu) throw invalid_argument("NindSegmentedUpdate: too many distinct words");
+        m_words.push_back(word);
+    }
+    return found.first->second;
 }
 ////////////////////////////////////////////////////////////
 void NindSegmentedUpdate::removeDocument(const NindDocId ident)
@@ -393,7 +477,7 @@ NindSegmentedUpdate::Stats NindSegmentedUpdate::commit()
             deleteDocuments(infos[s->first], s->second);
     }
     //2) the new segment
-    map<NindDocId, vector<string> const *> documents;
+    map<NindDocId, vector<uint32_t> const *> documents;
     vector<string> names;
     for (map<NindDocId, Document>::const_iterator d = m_documents.begin(); d != m_documents.end(); d++) {
         if (d->second.words.empty()) continue;
@@ -404,15 +488,15 @@ NindSegmentedUpdate::Stats NindSegmentedUpdate::commit()
         const string name = newSegmentName(segments);
         const string segmentBase = NindSegmentedIndex::segmentBase(m_base, name);
         makeDirectory(directoryOf(segmentBase));
-        writeSegment(segmentBase, documents, names, m_options.withLocalIndex);
+        writeSegment(segmentBase, documents, m_words, names, m_options.withLocalIndex);
         segments.push_back(name);
         stats.addedDocsNb = documents.size();
     }
     NindSegmentedIndex::writeManifest(m_base, segments);
     //3) the merges
     while (m_options.mergeFactor >= 2) {
-        const NindSegmentedIndex index(m_base);
-        const vector<size_t> chosen = segmentsToMerge(index, m_options.mergeFactor, m_options.maxMergedDocs);
+        const vector<size_t> chosen = segmentsToMerge(segmentCounts(m_base, segments), m_options.mergeFactor,
+                                                      m_options.maxMergedDocs);
         if (chosen.empty()) break;
         mergeSegments(m_base, segments, chosen, stats);
         NindSegmentedIndex::writeManifest(m_base, segments);

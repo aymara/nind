@@ -44,6 +44,16 @@ public:
     static bool read(const std::string &fileName,
                      std::vector<NindDocId> &docIds,
                      std::vector<uint32_t> &lengths);
+    /**\brief read() without the document ids when they are consecutive (every file nind writes):
+    * the file is mapped, only the lengths are copied (4 bytes a document)
+    *\param firstId receives the first document's id
+    *\param docIds receives the ids, left empty when they are firstId, firstId + 1...
+    *\return false if there is no such file
+    *\throws FormatFileException, ReadFileException if invalid */
+    static bool readCompact(const std::string &fileName,
+                            NindDocId &firstId,
+                            std::vector<NindDocId> &docIds,
+                            std::vector<uint32_t> &lengths);
     /**\brief The last (largest) document of a file, read alone
     *\return false if there is no such file or it's empty
     *\throws FormatFileException, ReadFileException if invalid */

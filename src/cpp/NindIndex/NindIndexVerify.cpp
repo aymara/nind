@@ -16,6 +16,7 @@
 ////////////////////////////////////////////////////////////
 #include "NindIndexVerify.h"
 #include "NindSegmentedIndex.h"
+#include "NindDocNames.h"
 #include "NindLexiconIndex.h"
 #include "NindTermIndex.h"
 #include "NindLocalIndex.h"
@@ -293,6 +294,13 @@ NindIndexVerify::Report NindIndexVerify::verify(const string &fileNameExtensionL
             }
         }
         catch (const FileException &e) { problems.add(string("local index: ") + e.what()); }
+    }
+    //the documents' names (opening them only checks their header: each lookup checks what it reads)
+    if (fileExists(fileNameExtensionLess + ".ninddocnames")) {
+        try {
+            NindDocNames(fileNameExtensionLess + ".ninddocnames").check();
+        }
+        catch (const FileException &e) { problems.add(string("names: ") + e.what()); }
     }
     //the cross check: a block's shortest length is at most each of its documents' length (a
     //document's length: its localisations; above, a top-k search could skip a block it needs)

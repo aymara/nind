@@ -33,6 +33,7 @@ pybind11_add_module(_native
   bindings.cpp
   ${NIND_CPP_ROOT}/NindBasics/NindFile.cpp
   ${NIND_CPP_ROOT}/NindBasics/NindReadBuffer.cpp
+  ${NIND_CPP_ROOT}/NindBasics/NindMappedFile.cpp
   ${NIND_CPP_ROOT}/NindBasics/NindPadFile.cpp
   ${NIND_CPP_ROOT}/NindBasics/NindSignalCatcher.cpp
   ${NIND_CPP_ROOT}/NindRetrolexicon/NindRetrolexicon.cpp

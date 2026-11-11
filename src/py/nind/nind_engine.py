@@ -640,6 +640,10 @@ class _CancelUpdate(Exception):
     """Raised into the generation of an update that changes nothing, so that it isn't published."""
 
 
+#: IndexUpdate._pending's value for a document of a batch (IndexUpdate.add_jsonl), written apart
+_IN_BATCH = object()
+
+
 def _check_doc_id(doc_id):
     import operator
     doc_id = operator.index(doc_id)
@@ -733,7 +737,8 @@ class IndexUpdate:
         # tokenizes like the index: the indexer, with the index's tokenizer options
         self._tokenizing_indexer = copy.copy(indexer)
         self._tokenizing_indexer.tokenizer_options = self._tokenizer_options
-        self._pending = {}      # doc id -> its tokens, or None to remove it
+        self._pending = {}      # doc id -> its tokens, None to remove it, or _IN_BATCH
+        self._batches = []      # add_jsonl's: (doc ids, tokenizer batch, names), in order
         self._published = None  # the index before this update, opened when first needed
         self._max_published = native.SegmentedUpdate.max_doc_id(self._base)
         self._next_id = self._max_published + 1 if self._max_published is not None else 0
@@ -822,11 +827,63 @@ class IndexUpdate:
             elif owner is not None and owner != _check_doc_id(doc_id):
                 raise ValueError("another document (%d) is named %r" % (owner, name))
         doc_id = self._next_id if doc_id is None else _check_doc_id(doc_id)
-        self._pending[doc_id] = [token for token in tokens if _storable(token)]
+        # (ASCII: its length is its size in UTF-8, no encoding needed)
+        self._pending[doc_id] = [token for token in tokens
+                                 if (token.isascii() and 0 < len(token) <= 254) or _storable(token)]
         self._next_id = max(self._next_id, doc_id + 1)
         if name is not None:
             self._set_name(doc_id, name)
         return doc_id
+
+    def add_jsonl(self, path, id_field="id", text_field="contents", workers=None):
+        """Add the records of a JSON Lines corpus (the format of
+        :meth:`NindIndexer.index_jsonl`), each named by its ``id_field``: a
+        record with the name of a document replaces it (as :meth:`add_tokens`
+        with ``name``), the others get new identifiers.
+
+        The way to add many documents: the file is parsed and tokenized in
+        worker processes, and the documents go to the C++ API in batches,
+        nothing done per token in Python.
+
+        :param workers: processes parsing and tokenizing the file (default:
+            ``os.cpu_count()``); ``1``, or a file smaller than
+            ``NindIndexer.JSONL_PARALLEL_MIN_BYTES``, works in this process.
+        :return: the documents' identifiers, in the file's order.
+        :raises ValueError: if a line isn't a JSON object with both fields.
+        """
+        self._check_active()
+        indexer = self._tokenizing_indexer
+        end = indexer._jsonl_end(path, None)
+        if workers is None:
+            workers = os.cpu_count() or 1
+        doc_ids = []
+        if workers <= 1 or end < indexer.JSONL_PARALLEL_MIN_BYTES:
+            self._add_batch(indexer._tokenize_jsonl_range(path, 0, end, id_field, text_field), doc_ids)
+            return doc_ids
+        ranges = indexer._jsonl_ranges(path, end, workers * 4)
+        with ProcessPoolExecutor(max_workers=min(workers, len(ranges)), initializer=_pool_worker_init) as pool:
+            for part in pool.map(indexer._tokenize_jsonl_range, [path] * len(ranges),
+                                 [start for start, _ in ranges], [stop for _, stop in ranges],
+                                 [id_field] * len(ranges), [text_field] * len(ranges)):
+                self._add_batch(part, doc_ids)
+        return doc_ids
+
+    def _add_batch(self, part, doc_ids):
+        # one tokenizer batch of add_jsonl: (record ids, (vocabulary, term ids, ends))
+        record_ids, chunk = part
+        ids, names = array('Q'), []
+        for record_id in record_ids:
+            name = record_id if isinstance(record_id, str) else str(record_id)
+            doc_id = self._owner(name)
+            if doc_id is None:
+                doc_id = self._next_id
+            self._next_id = max(self._next_id, doc_id + 1)
+            self._pending[doc_id] = _IN_BATCH
+            self._set_name(doc_id, name)
+            ids.append(doc_id)
+            names.append(name)
+        self._batches.append((ids, chunk, names))
+        doc_ids.extend(ids)
 
     def doc_id(self, name):
         """The identifier of the document named ``name`` (``None`` if there is none),
@@ -851,7 +908,8 @@ class IndexUpdate:
         self._check_active()
         doc_id = _check_doc_id(doc_id)
         self._set_name(doc_id, None)
-        if self._was_published(doc_id):
+        if self._was_published(doc_id) or self._pending.get(doc_id) is _IN_BATCH:
+            # (a batch's document is written with its batch: removed after it)
             found = self._pending.get(doc_id, True) is not None
             self._pending[doc_id] = None
             return found
@@ -867,7 +925,13 @@ class IndexUpdate:
         # replaced and removed documents masked in theirs, the merges the policy asks for
         update = native.SegmentedUpdate(self._base, with_local_index=self._local, merge_factor=self.MERGE_FACTOR,
                                         max_merged_docs=self.MAX_MERGED_DOCS)
+        # the batches first: a later change of one of their documents is in _pending
+        for doc_ids, (vocabulary, term_ids, ends), names in self._batches:
+            update.add_documents(doc_ids, _uint_array(ends), _uint_array(term_ids), vocabulary, names)
+        self._batches = []
         for doc_id, tokens in self._pending.items():
+            if tokens is _IN_BATCH:
+                continue
             if not tokens:
                 update.remove_document(doc_id)
                 continue
@@ -1038,9 +1102,9 @@ class NindIndexer:
             of the file (``BUILD_BYTES_PER_*``, ``HEAPS_EXPONENT``). Fewer
             workers if each wouldn't get twice ``BUILD_BYTES_PER_PROCESS``; fewer workers also mean fewer
             shards, i.e. faster searches on one thread. Shards can't divide what
-            the end of the build needs, checking that the names are unique: every
-            name plus ``NAMES_CHECK_BYTES_PER_DOCUMENT`` (MS MARCO v2's 138M
-            passages: about 8.5 GiB); a smaller budget raises ``ValueError``.
+            the end of the build needs, checking that the names are unique:
+            ``NAMES_CHECK_BYTES_PER_DOCUMENT`` (MS MARCO v2's 138M passages:
+            about 3.9 GiB, 2.6 measured); a smaller budget raises ``ValueError``.
         :return: the ``id_field`` value of every indexed record: element
             ``n`` is the identifier of document ``n``. With ``shards > 1``, a
             read-only sequence of them as strings, read from the index files
@@ -1091,8 +1155,8 @@ class NindIndexer:
     BUILD_BYTES_PER_TERM = 1000
     BUILD_BYTES_PER_PROCESS = 300 << 20
     HEAPS_EXPONENT = 0.7
-    #: After a sharded build, checking that the documents' names are unique holds every name plus
-    #: this many bytes per document.
+    #: After a sharded build, checking that the documents' names are unique takes this many bytes
+    #: per document (the names themselves are mapped: page cache, not the process's memory).
     NAMES_CHECK_BYTES_PER_DOCUMENT = 28
     #: ``index_jsonl(memory_gb=...)`` counts the tokens, documents and distinct terms of this many
     #: pieces of the file, of this many bytes each, spread over it (the whole file when smaller).
@@ -1118,7 +1182,7 @@ class NindIndexer:
                     + self.BUILD_BYTES_PER_TERM * terms + process)
         if shards <= 1 and build(1) <= budget:
             return 1, workers
-        names_check = process + sample.names + self.NAMES_CHECK_BYTES_PER_DOCUMENT * sample.documents
+        names_check = process + self.NAMES_CHECK_BYTES_PER_DOCUMENT * sample.documents
         if names_check > budget:
             raise ValueError("memory_gb: checking the names of %d documents after building the shards needs "
                              "about %.1f" % (sample.documents, names_check / 2 ** 30))
@@ -1135,10 +1199,10 @@ class NindIndexer:
             low, high = (low, middle) if fits(middle) else (middle, high)
         return high, workers
 
-    _Sample = collections.namedtuple("_Sample", "tokens documents names sampled_tokens sampled_terms")
+    _Sample = collections.namedtuple("_Sample", "tokens documents sampled_tokens sampled_terms")
 
     def _jsonl_sample(self, path, end, id_field, text_field):
-        # the tokens, documents and bytes of the documents' names of [0, end), estimated from
+        # the tokens and documents of [0, end), estimated from
         # JSONL_SAMPLE_PIECES line-aligned pieces spread over it (counted exactly when it is
         # smaller than them), and the tokens and distinct terms of those pieces
         if end <= self.JSONL_SAMPLE_PIECES * self.JSONL_SAMPLE_BYTES:
@@ -1150,19 +1214,18 @@ class NindIndexer:
                     f.seek(start + self.JSONL_SAMPLE_BYTES - 1)
                     f.readline()        # finish the line: the piece ends with it
                     pieces.append((start, min(f.tell(), end)))
-        tokens = documents = names = sampled = 0
+        tokens = documents = sampled = 0
         terms = set()
         for start, stop in pieces:
             record_ids, chunk = self._tokenize_jsonl_range(path, start, stop, id_field, text_field)
             tokens += len(chunk[1]) // 4
             documents += len(record_ids)
-            names += sum(len(str(record_id).encode("utf-8")) for record_id in record_ids)
             terms.update(chunk[0])
             sampled += stop - start
         if sampled == 0:
-            return self._Sample(0, 0, 0, 0, 0)
+            return self._Sample(0, 0, 0, 0)
         scale = end / sampled
-        return self._Sample(tokens * scale, documents * scale, names * scale, tokens, len(terms))
+        return self._Sample(tokens * scale, documents * scale, tokens, len(terms))
 
     def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards, merge):
         ranges = self._jsonl_ranges(path, end, shards)

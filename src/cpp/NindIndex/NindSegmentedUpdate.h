@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 ////////////////////////////////////////////////////////////
 namespace latecon {
@@ -71,6 +72,18 @@ public:
                      const std::vector<std::string> &words,
                      const std::string &name = std::string());
 
+    /**\brief addDocument() for many documents at once, given as a tokenizer's batch (see
+    * NindTokenizer): document d is vocabulary[localIds[i]] for i in [ends[d - 1], ends[d]), named
+    * names[d]; each word of the vocabulary is looked up once, not once per occurrence
+    *\throws std::invalid_argument if idents and names differ in size, ends aren't ascending or
+    * don't cover the words, or a local id is beyond the vocabulary */
+    void addDocuments(const std::vector<NindDocId> &idents,
+                      const uint32_t *ends,
+                      const uint32_t *localIds,
+                      const size_t wordsNb,
+                      const std::vector<std::string> &vocabulary,
+                      const std::vector<std::string> &names);
+
     /**\brief Remove a document (nothing if it isn't live) */
     void removeDocument(const NindDocId ident);
 
@@ -91,12 +104,16 @@ private:
     NindSegmentedUpdate(const NindSegmentedUpdate &);
     NindSegmentedUpdate &operator=(const NindSegmentedUpdate &);
     struct Document {
-        std::vector<std::string> words;
+        std::vector<uint32_t> words;                //their ids in m_words
         std::string name;
     };
+    //the id of a word in m_words (added if new)
+    uint32_t wordId(const std::string &word);
     std::string m_base;
     Options m_options;
     std::map<NindDocId, Document> m_documents;      //no words: removed
+    std::vector<std::string> m_words;               //the words of the added documents, once each
+    std::unordered_map<std::string, uint32_t> m_wordIds;
 };
 ////////////////////////////////////////////////////////////
     } // end namespace

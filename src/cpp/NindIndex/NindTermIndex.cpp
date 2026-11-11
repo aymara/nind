@@ -166,6 +166,7 @@ NindTermIndex::NindTermIndex(const std::string &fileNameExtensionLess,
               TAILLE_DEJFINITION_MINIMUM, 
               indirectionBlocSize),
     m_specificsNumber(specificsNumber),
+    m_denseFirst(0),
     m_denseLengths(),
     m_sparseLengths(),
     m_packed()
@@ -1041,13 +1042,19 @@ void NindTermIndex::setDocumentLengths(const vector<pair<NindDocId, unsigned int
 {
     m_denseLengths.clear();
     m_sparseLengths.clear();
+    m_denseFirst = 0;
     if (lengths.empty()) return;
-    NindDocId maxIdent = 0;
-    for (size_t i = 0; i < lengths.size(); i++) maxIdent = max(maxIdent, lengths[i].first);
-    //dense when the ids are (about) consecutive: a table by id
-    if (maxIdent < 2 * (NindDocId)lengths.size() + 1024) {
-        m_denseLengths.assign((size_t)maxIdent + 1, 0);
-        for (size_t i = 0; i < lengths.size(); i++) m_denseLengths[(size_t)lengths[i].first] = lengths[i].second;
+    NindDocId minIdent = lengths[0].first, maxIdent = 0;
+    for (size_t i = 0; i < lengths.size(); i++) {
+        maxIdent = max(maxIdent, lengths[i].first);
+        minIdent = min(minIdent, lengths[i].first);
+    }
+    //dense when the ids are (about) consecutive: a table by id, from the first one (a segment an
+    //update adds starts far from 0: a binary search per posting there made its term index 3 times slower)
+    if (maxIdent - minIdent < 2 * (NindDocId)lengths.size() + 1024) {
+        m_denseFirst = minIdent;
+        m_denseLengths.assign((size_t)(maxIdent - minIdent) + 1, 0);
+        for (size_t i = 0; i < lengths.size(); i++) m_denseLengths[(size_t)(lengths[i].first - minIdent)] = lengths[i].second;
         return;
     }
     m_sparseLengths = lengths;
@@ -1065,7 +1072,8 @@ void NindTermIndex::setDocumentLengths(const vector<pair<NindDocId, unsigned int
 //a document's length, 0 if unknown
 unsigned int NindTermIndex::documentLength(const NindDocId ident) const
 {
-    if (!m_denseLengths.empty()) return ident < m_denseLengths.size() ? m_denseLengths[(size_t)ident] : 0;
+    if (!m_denseLengths.empty())
+        return (ident >= m_denseFirst && ident - m_denseFirst < m_denseLengths.size()) ? m_denseLengths[(size_t)(ident - m_denseFirst)] : 0;
     const vector<pair<NindDocId, unsigned int> >::const_iterator it = lower_bound(m_sparseLengths.begin(), m_sparseLengths.end(),
         pair<NindDocId, unsigned int>(ident, 0),
         [](const pair<NindDocId, unsigned int> &a, const pair<NindDocId, unsigned int> &b) { return a.first < b.first; });
