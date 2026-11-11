@@ -304,6 +304,7 @@ private:
     static const size_t WINDOW_SPAN = 16384;            //a window's largest span of document ids (a multiple of 64)
     static const size_t MIN_WINDOW_SPAN = 4096;         //scanRangeByWindow's windows: at least this many
     static const size_t WINDOWED_TERMS = 5;             //from this many terms, scanRangeByWindow
+    static const uint64_t WINDOWED_DENSITY = 8;         //or from this many blocks per MIN_WINDOW_SPAN documents
     // a query term, as every thread of a search sees it (read only)
     struct TermInfo {
         std::shared_ptr<const NindTermIndex::TermDirectory> directory;     //(from the scorer's cache)
@@ -771,7 +772,12 @@ private:
         std::atomic<double> ownThreshold(0.0);
         std::atomic<double> &shared = corpus.threshold ? *corpus.threshold : ownThreshold;
         std::vector<Found> found(slices);
-        const bool byWindow = termsNb >= WINDOWED_TERMS;
+        // windows when many terms, or when the terms' blocks are dense (a very long list, a stopword's:
+        // each of its blocks would end a window of the document-at-a-time scan; MS MARCO v2 138M,
+        // stopwords kept, 4 terms: 58.6 -> 23.7 ms)
+        uint64_t blocks = 0;
+        for (size_t t = 0; t < termsNb; t++) blocks += terms[t].blocksNb;
+        const bool byWindow = termsNb >= WINDOWED_TERMS || blocks * MIN_WINDOW_SPAN >= WINDOWED_DENSITY * (span + 1);
         const auto scan = [&](const NindDocId lo, const NindDocId hi, Found &into) {
             if (byWindow) scanRangeByWindow(termIndex, terms, lo, hi, topK, parameters, corpus, shared, into);
             else scanRangeByDocument(termIndex, terms, lo, hi, topK, parameters, corpus, shared, into);

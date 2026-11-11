@@ -222,10 +222,21 @@ of 3.0.0 (format v2).
   lexicon's indirection maps.
 - [x] **Top 100** in the comparison benchmark.
 - **Stopwords kept at scale.** MS MARCO v2 138M, top 10 on one thread: 138 ms vs
-  36 ms for Lucene (16M: 15.5 vs 6.1 ms); the gap grows with the corpus.
+  36 ms for Lucene (16M: 15.5 vs 6.1 ms) with 3.2.0. With the windowed scan
+  (5 terms or more) nind is level with Lucene from 5 terms; short queries were
+  far behind (4 terms 58.6 ms against 16.4): a stopword's hundreds of thousands
+  of blocks each ended a window of the document-at-a-time scan. Windows now also
+  when the terms average 8 blocks or more per 4096 documents (102 of 153 short
+  queries with stopwords, 5 of 637 without): 3 terms 19.9 -> 9.8 ms (Lucene 9.4),
+  4 terms 58.6 -> 23.7 (16.4); median 42.4 -> 32.2 ms (28.8), mean 66.6 -> 59.8
+  (46.7, 500 queries). Left: queries of 10 terms or more (282 ms against 169).
 - **Latency varies between processes.** The same search, one process per run:
-  2.12 or 2.67 ms (8.8M, one thread). Not huge pages, the memory sampler or
-  names; NUMA placement of the page cache or of the scorer's arrays?
+  2.12 or 2.67 ms (8.8M, one thread), seen again while measuring (runs of a
+  setting 10-20% apart on every kind of query, the code path unchanged). Pinned
+  to one CPU, ten processes agree within 2% (node 1's memory or node 0's), with
+  the same huge pages (14-16 MB): not THP. The benchmarks pin to 12 CPUs, a
+  process free to move among them: try one CPU against twelve when the machine
+  is idle; meanwhile compare settings in alternated runs, several each.
 - [x] **Index larger than memory** (section 7): with 1 GB of page cache for a
   14 GB index, nind's top 10 is unchanged; 8 segments with 8 threads lose
   their lead (3.8 -> 19 ms).
