@@ -32,14 +32,19 @@ namespace latecon {
 ////////////////////////////////////////////////////////////
 /**\brief Builds the term and local index files of a new corpus at once, from its documents
 * given as batches of term ids, in document order (the lexicon written apart, e.g. with
-* NindLexiconIndex::addWords). Memory: about 4 bytes per token plus 16 per document; writing the
-* term index builds every term's postings (12 bytes per posting) once. Each block of the term
+* NindLexiconIndex::addWords). Memory: about 4 bytes per token plus 16 per document (reserve
+* avoids growing them by copies); writing the term index builds every term's postings (5 bytes
+* per posting, at most one per token) once. At most 2^32 - 1 documents. Each block of the term
 * index gets its shortest document's length (a document's length: its tokens). The writers are
 * best in bulk mode (NindIndex::beginBulk), as nind's NindIndexer uses it; term and local index
 * can be written from two threads (they are different files). */
 class DLLExportLexicon NindIndexBuilder {
 public:
     NindIndexBuilder();
+
+    /**\brief Room for tokensNb more tokens and docsNb more documents, when the caller knows them:
+    * no copy of the buffers as they grow, no unused capacity */
+    void reserve(const size_t tokensNb, const size_t docsNb);
 
     /**\brief Documents firstDocId, firstDocId + 1...: document i is localIds[ends[i-1]:ends[i]],
     * local id x being the term idMap[x]
@@ -92,6 +97,7 @@ public:
                                                     const unsigned char cg);
 
 private:
+    static const uint32_t MAX_SMALL_FREQ = 255;     //writeTermIndex: frequencies from it are kept apart
     std::vector<uint64_t> m_docIds;     //in increasing order (external document ids, 64 bits)
     std::vector<size_t> m_docEnds;      //document d is m_tokens[m_docEnds[d-1]:m_docEnds[d]]
     std::vector<uint32_t> m_tokens;     //term ids

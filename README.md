@@ -103,9 +103,11 @@ with indexer.update() as update:
 
 An update costs what it changes, whatever the size of the index (88k documents added to 8.8M in
 2.6 s): its documents go to a new segment, the replaced and removed ones are masked, segments are
-merged now and then. For a corpus too large to build at once, `index_jsonl(path, shards=64)` builds
-in worker processes, with memory bounded by `workers` shards, and keeps the shards as segments (no
-merge: 25 s vs 46 s for MS MARCO). Results are always those of one index of the live documents;
+merged now and then. For a large corpus (more than about 10M documents), give the build a memory
+budget: `index_jsonl(path, memory_gb=16)` picks the fewest shards that fit in it (one, a direct
+build, if the corpus fits), builds them in worker processes and keeps them as segments (no merge,
+and faster: 25 s vs 46 s for MS MARCO, 507 s vs 1,426 s for its 138M passages). `shards=N` sets
+their number instead. Results are always those of one index of the live documents;
 `indexer.force_merge()` makes it one index. See `docs/proposals/segments.md`.
 
 Searching is thread-safe: a server can call `engine.search` from many threads at once (the

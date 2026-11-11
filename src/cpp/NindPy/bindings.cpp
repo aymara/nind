@@ -708,6 +708,7 @@ PYBIND11_MODULE(_native, m) {
     // the builder: they can run concurrently, each on its own writer).
     py::class_<NindIndexBuilder>(m, "IndexBuilder")
         .def(py::init<>())
+        .def("reserve", &NindIndexBuilder::reserve, py::arg("tokens_nb"), py::arg("docs_nb"))
         .def("add_documents", [](NindIndexBuilder &self, uint64_t firstDocId, const py::buffer &ends,
                                  const py::buffer &termIds, const py::buffer &idMap) {
             const UIntView documentEnds = uintView(ends, "ends");

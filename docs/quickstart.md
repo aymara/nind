@@ -97,9 +97,13 @@ index, which a search on a single thread answers fastest, and which
 `engine.local_index` need (they raise `ValueError` on several segments or
 deleted documents).
 
-A corpus too large to build at once: `indexer.index_jsonl(path, shards=64)`
-builds that many segments in worker processes, in parallel, with memory bounded
-by `workers` shards; `merge=True` merges them into one index at the end.
+A large corpus (more than about 10M documents): `indexer.index_jsonl(path,
+memory_gb=16)` builds the fewest segments that fit in 16 GiB (a direct build if
+the corpus fits), in worker processes, in parallel; `shards=64` asks for 64
+instead, with memory bounded by `workers` of them at a time. A direct build
+holds the whole corpus (about 7 bytes per token, 110 per document and 1 KB per
+distinct term) and is slower; segments give the same results, and `merge=True`
+(or a later `indexer.force_merge()`) makes one index of them.
 
 ## Search it
 

@@ -89,8 +89,51 @@ of 3.0.0 (format v2).
     4 threads (2.6×), 8 segments reach 7× on 8–12. An exhaustive search takes 12
     bytes per document of scratch per concurrent search (per segment, so at most
     its own size at a time).
-  - **Direct builds at 138M**: 102 GB of memory and 1,426 s (one writer); 32
-    segments: 30 GB, 507 s. Make segments the documented way past ~10M?
+  - **Build memory.** A direct build at 138M took 102 GiB and 1,426 s (one
+    writer), 4 times Lucene's 26 GiB for a similar index (13.8 vs 12.7 GiB): 23
+    bytes per token, 7.4 times the index. Done:
+    - [x] **The builder's buffers.** `NindIndexBuilder` writes the term index
+      from 5 bytes per posting (32-bit document positions, 8-bit frequencies,
+      255 and more apart) instead of 12, its buffers are reserved up front (they
+      were copied at every batch), `_write_chunks` frees each tokenized chunk
+      once added, the names are written without a dict. The same files; 8M:
+      6.5 -> 4.3 GiB, adds 11.5 -> 3.5 s; 138M: 102 -> 57 GiB, 1,426 -> 1,127 s.
+    - [x] **Segments, the documented route past ~10M documents** (README,
+      quickstart, `index_jsonl`): faster builds, bounded memory, same results.
+    - [x] **A memory budget**, `index_jsonl(memory_gb=X)`: the fewest shards
+      (and, if needed, fewer workers) that fit, from samples of the file and a
+      model of a build (`BUILD_BYTES_PER_*`: tokens, documents, and the
+      vocabulary, ~1 KB per distinct term, extrapolated from the samples with
+      Heaps' law); pool workers give freed memory back after each shard
+      (`malloc_trim`: a worker's next shard started 0.4 GiB higher). 138M,
+      8 workers: 16 GiB -> 56 segments, 14.3 GiB peak, 388 s; 12 GiB -> 86
+      segments, 10.3 GiB, 400 s; 8M in 2 GiB: 13 segments, 2 workers, 1.3 GiB.
+    Left:
+    - **Term-range passes.** Build the postings of 1/K of the terms at a time,
+      scanning the tokens K times: the postings array (5 bytes per posting, the
+      largest buffer with the tokens' 4) divided by K, for one more sequential
+      scan per pass (~18 GiB at 138M: seconds against minutes). For a direct
+      build under a budget.
+    - **Compressed tokens.** Term ids in variable-length bytes: ~2 of the 4
+      bytes per token, for a decoding cost on the two passes over them.
+    - **Sorted runs on disk and a merge** (Lucene's way): memory bounded
+      whatever the corpus, for I/O and a merge; segments already give it.
+    - **What Python holds.** A direct `index_jsonl` keeps the record ids, as it
+      returns them (77 bytes per document: 10.6 GiB at 138M); the vocabulary
+      costs ~950 bytes per distinct term in a build (each chunk's own word list,
+      the union, `term_to_id`, the lexicon writer's input), 2.2 GiB for 2.5M
+      terms. The union and the id maps in C++ (chunk vocabularies as one buffer)?
+    - **The names check after a sharded build** reads every shard's names whole
+      (`NindDocNames::merge` to a file then removed): 7.2 GiB at 138M, which no
+      number of shards divides, so `memory_gb` can't go below ~8.5 GiB there.
+      Hashes of the names, sorted, and only collisions compared? With the
+      "Names and lengths" item below.
+    - **The model is fitted on MS MARCO v2** (shards of 1M to 14M passages; up
+      to 50% over for small shards, which costs segments). Check it on another
+      kind of corpus (long documents, code); `merge=True`'s memory isn't in the
+      budget; `index_files` has no `memory_gb` yet.
+    - **The benchmarks page** shows the builds before these changes: rerun the
+      build phases (direct and segments, 8.8M and 138M).
   - **Updates at 138M**: +1% in 60–84 s (a new segment) against 12 s for Lucene
     and 17 s for tantivy: where does it go?
   - **Amose.** Adapt it to `NindSegmentedIndex`/`NindSegmentedUpdate` (compound
@@ -98,6 +141,20 @@ of 3.0.0 (format v2).
     its CLI (below). This doesn't constrain nind's design any more.
 - [x] **Concurrency benchmark** on format v2, up to 48 threads and 138M
   (section 7): 20.6× on 24 cores.
+- **Several callers, all systems.** The concurrency benchmark ran nind only: does
+  its per-query lead hold under load against Lucene and tantivy (bm25s if cheap)?
+  - Threads sharing one searcher (how nind and Lucene are served). First check
+    whether pyjnius and tantivy-py release the GIL during a search; if not, run
+    Lucene's threads in Java (one `IndexSearcher`).
+  - N processes on the same index: independent of the GIL, and shows nind's
+    names and lengths read again by each process (6.6 GB at 138M).
+  - Systems nind, nind-8s, Lucene, tantivy; 1–48 callers, each sending its next
+    query when the last returns, stage 3's pinning; queries/s, p50 and p99 per
+    caller; 8.8M (in memory) and 138M. The indexes in `nind-bench` serve as is.
+  - Optional: queries arriving at a fixed rate (50% and 80% of each system's
+    maximum) for tail latency, closer to a service.
+  - `concurrency.py` generalised to every system; about 6–8 h of runs; extends
+    the Threads section of `docs/benchmarks.md`.
 - [x] **Top 100** in the comparison benchmark.
 - **Stopwords kept at scale.** MS MARCO v2 138M, top 10 on one thread: 138 ms vs
   36 ms for Lucene (16M: 15.5 vs 6.1 ms); the gap grows with the corpus.

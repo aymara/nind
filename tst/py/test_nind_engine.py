@@ -709,6 +709,97 @@ def test_jsonl_ranges_are_line_aligned(tmp_path):
             assert stop == start and data[start - 1:start] == b"\n"
 
 
+def test_jsonl_sample_counts_or_estimates(tmp_path, monkeypatch):
+    records = [{"id": "d%d" % i, "contents": "word " * 10} for i in range(400)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    indexer = NindIndexer(str(tmp_path))
+    end = os.path.getsize(path)
+    names = sum(len("d%d" % i) for i in range(400))
+    assert indexer._jsonl_sample(path, end, "id", "contents") == (4000, 400, names, 4000, 1)  # small: counted
+    assert indexer._jsonl_sample(path, 0, "id", "contents") == (0, 0, 0, 0, 0)
+    monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_PIECES", 4)
+    monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_BYTES", 300)
+    sample = indexer._jsonl_sample(path, end, "id", "contents")
+    assert sample.tokens == pytest.approx(4000, rel=0.05) and sample.documents == pytest.approx(400, rel=0.05)
+    assert sample.names == pytest.approx(names, rel=0.1)
+    assert sample.sampled_tokens < 4000 and sample.sampled_terms == 1
+
+
+def test_plan_jsonl_memory(tmp_path, monkeypatch):
+    # a model of 16 KiB per token, nothing per document or term, 1 MiB per process: 4000 tokens,
+    # 62.5 MiB
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": "d%d" % i, "contents": "word " * 10} for i in range(400)])
+    end = os.path.getsize(path)
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TOKEN", 16 << 10)
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_DOCUMENT", 0)
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TERM", 0)
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_PROCESS", 1 << 20)
+    indexer = NindIndexer(str(tmp_path))
+
+    def plan(workers, shards, mib):
+        return indexer._plan_jsonl_memory(path, end, "id", "contents", workers, shards, mib / 1024)
+    need = 62.5
+    assert plan(4, 1, 64) == (1, 4)                     # 62.5 + 1 MiB: direct
+    assert plan(4, 10, 64) == (10, 4)                   # more shards than needed asked for: kept
+    for workers, mib in ((2, 20), (4, 30), (4, 60), (8, 50)):
+        shards, used = plan(workers, 1, mib)
+        assert used == workers and shards >= 2
+        assert 1 + workers * (1 + need / shards) <= mib                     # fits, beside this process
+        assert shards == 2 or 1 + workers * (1 + need / (shards - 1)) > mib  # the fewest that fit
+    shards, used = plan(8, 1, 6)                        # beside this process, 2 processes of 2 MiB
+    assert used == 2 and 1 + used * (1 + need / shards) <= 6
+    assert plan(8, 100, 6) == (100, 2)
+    with pytest.raises(ValueError):
+        plan(1, 1, 2.5)
+    # the names checked after the shards (400 documents of 1 MiB each here) don't fit
+    monkeypatch.setattr(NindIndexer, "NAMES_CHECK_BYTES_PER_DOCUMENT", 1 << 20)
+    with pytest.raises(ValueError, match="names"):
+        plan(4, 1, 30)
+    monkeypatch.undo()
+
+
+def test_plan_jsonl_memory_counts_the_vocabulary(tmp_path, monkeypatch):
+    # every token a new term: 1 MiB per term, nothing else but 1 MiB per process; 1000 terms of
+    # which a shard over 1/s of them has 1000 * (1/s)^0.7
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": "d%d" % i, "contents": "w%s" % "".join(
+        "abcdefghij"[int(c)] for c in str(i))} for i in range(1000)])
+    for name, value in (("BUILD_BYTES_PER_TOKEN", 0), ("BUILD_BYTES_PER_DOCUMENT", 0),
+                        ("BUILD_BYTES_PER_TERM", 1 << 20), ("BUILD_BYTES_PER_PROCESS", 1 << 20)):
+        monkeypatch.setattr(NindIndexer, name, value)
+    indexer = NindIndexer(str(tmp_path))
+    shards, workers = indexer._plan_jsonl_memory(path, os.path.getsize(path), "id", "contents", 2, 1, 400 / 1024)
+    assert workers == 2
+
+    def peak(parts):
+        return 1 + 2 * (1000 * (1 / parts) ** 0.7 + 1)
+    assert peak(shards) <= 400 < peak(shards - 1)
+
+
+def test_index_jsonl_memory_budget_builds_segments(tmp_path, monkeypatch):
+    records = [{"id": "d%d" % i, "contents": "tag%s common %s" % ("abcdefghij"[i % 10], "pad " * (i % 50))}
+               for i in range(400)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    (tmp_path / "direct").mkdir()
+    (tmp_path / "budget").mkdir()
+    direct_ids = NindIndexer(str(tmp_path / "direct")).index_jsonl(path, workers=1)
+    # 1 MiB per token: 10,600 tokens need 10.35 GiB; 2 builds at a time beside this process, in 2
+    # GiB, 0.29 each for its process: 2 * 10.35 / (2 - 3 * 0.29) -> 19 segments
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TOKEN", 1 << 20)
+    ids = NindIndexer(str(tmp_path / "budget")).index_jsonl(path, workers=2, memory_gb=2)
+    assert ids == direct_ids
+    direct, budget = NindEngine(str(tmp_path / "direct")), NindEngine(str(tmp_path / "budget"))
+    assert len(budget._snapshot.index.segments()) == 19
+    for query in ["taga", "common pad", "tagj pad"]:
+        direct_results, budget_results = direct.search(query, doc_names=True), budget.search(query, doc_names=True)
+        assert [name for name, _ in budget_results] == [name for name, _ in direct_results]
+        assert [score for _, score in budget_results] == pytest.approx([score for _, score in direct_results])
+    # within budget: built directly, one index
+    (tmp_path / "fits").mkdir()
+    monkeypatch.undo()
+    NindIndexer(str(tmp_path / "fits")).index_jsonl(path, workers=2, memory_gb=1)
+    assert len(NindEngine(str(tmp_path / "fits"))._snapshot.index.segments()) == 1
+
+
 def test_index_jsonl_rejects_bad_records_and_keeps_previous_index(tmp_path):
     index_dir = tmp_path / "jsonl"
     index_dir.mkdir()

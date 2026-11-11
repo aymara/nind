@@ -143,6 +143,59 @@ TEST_CASE("NindIndexBuilder.SameAsAnUpdate") {
     CHECK(report.ok());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindIndexBuilder.LargeFrequencies") {
+    //frequencies around the 8-bit postings' limit (255 and more are kept apart)
+    TestTempDir tmp;
+    const vector<string> vocabulary = {"a", "b", "c"};
+    const unsigned int repeats[] = {1, 254, 255, 256, 1000, 3};
+    vector<vector<uint32_t> > documents;
+    for (size_t d = 0; d < 6; d++) {
+        vector<uint32_t> words(repeats[d], 0);                    //"a" repeats[d] times
+        words.push_back(d % 2 == 0 ? 1 : 2);
+        if (d == 4) words.insert(words.end(), 256, 2);            //"c" 256 times in the same document
+        documents.push_back(words);
+    }
+    const string built = tmp.file("built");
+    {
+        NindLexiconIndex lexicon(built, true, false, 16);
+        vector<list<string> > words;
+        for (size_t w = 0; w < vocabulary.size(); w++) words.push_back(list<string>(1, vocabulary[w]));
+        vector<unsigned int> idents;
+        lexicon.addWords(words, idents);
+        const NindIndex::Identification identification = lexicon.getIdentification();
+        //one by one, ids 7, 10, 13... (not consecutive: looked up when writing)
+        NindIndexBuilder builder;
+        builder.reserve(2000, documents.size());
+        for (size_t d = 0; d < documents.size(); d++) {
+            vector<uint32_t> termIds;
+            for (size_t i = 0; i < documents[d].size(); i++) termIds.push_back(idents[documents[d][i]]);
+            builder.addDocument(7 + 3 * d, termIds.data(), termIds.size());
+        }
+        NindTermIndex terms(built, true, identification, 0, 16);
+        terms.beginBulk();
+        builder.writeTermIndex(terms, identification);
+        terms.endBulk();
+        NindLocalIndex local(built, true, identification, 16);
+        builder.writeLocalIndex(local, identification);
+    }
+    const string updated = tmp.file("updated");
+    {
+        NindIndexUpdate update(updated);
+        for (size_t d = 0; d < documents.size(); d++) {
+            vector<string> words;
+            for (size_t i = 0; i < documents[d].size(); i++) words.push_back(vocabulary[documents[d][i]]);
+            update.addDocument(7 + 3 * d, words);
+        }
+        update.commit();
+    }
+    const Seen expected = seen(updated, vocabulary);
+    CHECK(seen(built, vocabulary) == expected);
+    CHECK_EQ(1000u, expected.postings.at("a").at(19));
+    CHECK_EQ(256u, expected.postings.at("c").at(19));
+    CHECK_EQ(255u, expected.postings.at("a").at(13));
+    CHECK(NindIndexVerify::verify(built, true).ok());
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindIndexBuilder.Definitions") {
     const uint64_t docs[] = {9, 3, 5};
     const uint32_t freqs[] = {1, 2, 3};
