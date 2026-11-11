@@ -9,10 +9,12 @@
 #include "NindIndex/NindLocalIndex.h"
 #include "NindBasics/NindReadBuffer.h"
 #include "TestTempDir.h"
+#include "TestFileBytes.h"
 #include "doctest.h"
 #include <cstdint>
 #include <list>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -215,5 +217,107 @@ TEST_CASE("NindIndexBuilder.Definitions") {
     REQUIRE_EQ(2u, local.size());
     CHECK_EQ(255u, local.front().localisation.size());
     CHECK_EQ(45u, local.back().localisation.size());
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindIndexBuilder.BatchesWriteWhatLexiconIdsWrite") {
+    // the same documents, as tokenizer batches (the builder numbers the words, writes the lexicon)
+    // and with a lexicon written first (its ids): the same files
+    TestTempDir tmp;
+    uint64_t state = 21;
+    vector<vector<string> > documents;
+    for (unsigned int d = 0; d < 500; d++) {
+        vector<string> words;
+        const unsigned int length = 1 + next(state) % 30;
+        for (unsigned int i = 0; i < length; i++) {
+            const unsigned int rank = (unsigned int)(next(state) % 1000);
+            words.push_back((rank % 7 == 0 ? "é" : "w") + to_string(rank * rank / 5000));
+        }
+        documents.push_back(words);
+    }
+    const string byIds = tmp.file("ids"), byBatches = tmp.file("batches");
+    {
+        set<string> distinct;
+        for (size_t d = 0; d < documents.size(); d++) distinct.insert(documents[d].begin(), documents[d].end());
+        const vector<string> vocabulary(distinct.begin(), distinct.end());
+        NindLexiconIndex lexicon(byIds, true, false, (unsigned int)vocabulary.size());
+        vector<list<string> > words;
+        for (size_t w = 0; w < vocabulary.size(); w++) words.push_back(list<string>(1, vocabulary[w]));
+        vector<unsigned int> idents;
+        lexicon.beginBulk();
+        lexicon.addWords(words, idents);
+        lexicon.endBulk();
+        map<string, uint32_t> identOf;
+        for (size_t w = 0; w < vocabulary.size(); w++) identOf[vocabulary[w]] = idents[w];
+        NindIndexBuilder builder;
+        for (size_t d = 0; d < documents.size(); d++) {
+            vector<uint32_t> termIds;
+            for (size_t i = 0; i < documents[d].size(); i++) termIds.push_back(identOf[documents[d][i]]);
+            builder.addDocument(10 + d, termIds.data(), termIds.size());
+        }
+        const NindIndex::Identification identification = lexicon.getIdentification();
+        NindTermIndex terms(byIds, true, identification, 0, (unsigned int)vocabulary.size() + 1);
+        terms.beginBulk();
+        builder.writeTermIndex(terms, identification);
+        terms.endBulk();
+        NindLocalIndex local(byIds, true, identification, 600);
+        local.beginBulk();
+        builder.writeLocalIndex(local, identification);
+        local.endBulk();
+    }
+    {
+        NindIndexBuilder builder;
+        for (size_t first = 0; first < documents.size(); first += 100) {
+            string words;
+            vector<uint32_t> wordEnds, localIds, ends;
+            map<string, uint32_t> local;
+            for (size_t d = first; d < first + 100; d++) {
+                for (size_t i = 0; i < documents[d].size(); i++) {
+                    const pair<map<string, uint32_t>::iterator, bool> found =
+                        local.insert(make_pair(documents[d][i], (uint32_t)wordEnds.size()));
+                    if (found.second) {
+                        words += documents[d][i];
+                        wordEnds.push_back((uint32_t)words.size());
+                    }
+                    localIds.push_back(found.first->second);
+                }
+                ends.push_back((uint32_t)localIds.size());
+            }
+            builder.addBatch(10 + first, ends.data(), ends.size(), localIds.data(), localIds.size(),
+                             words.data(), words.size(), wordEnds.data(), wordEnds.size());
+        }
+        NindLexiconIndex lexicon(byBatches, true, false, (unsigned int)builder.wordsNb());
+        lexicon.beginBulk();
+        builder.writeLexicon(lexicon);
+        lexicon.endBulk();
+        const NindIndex::Identification identification = lexicon.getIdentification();
+        NindTermIndex terms(byBatches, true, identification, 0, (unsigned int)builder.wordsNb() + 1);
+        terms.beginBulk();
+        builder.writeTermIndex(terms, identification);
+        terms.endBulk();
+        NindLocalIndex local(byBatches, true, identification, 600);
+        local.beginBulk();
+        builder.writeLocalIndex(local, identification);
+        local.endBulk();
+    }
+    // misuses: lexicon ids after a batch, the term index before the lexicon
+    {
+        NindIndexBuilder builder;
+        const uint32_t oneEnd[] = {1}, zero[] = {0};
+        builder.addBatch(1, oneEnd, 1, zero, 1, "a", 1, oneEnd, 1);
+        CHECK_THROWS_AS(builder.addDocuments(5000, oneEnd, 1, zero, 1, oneEnd, 1), std::invalid_argument);
+        NindLexiconIndex lexicon(tmp.file("early"), true, false, 1);
+        const NindIndex::Identification identification = lexicon.getIdentification();
+        NindTermIndex terms(tmp.file("early"), true, identification, 0, 16);
+        CHECK_THROWS_AS(builder.writeTermIndex(terms, identification), std::invalid_argument);
+        const uint32_t longEnd[] = {255};
+        CHECK_THROWS_AS(builder.addBatch(2, oneEnd, 1, zero, 1, string(255, 'x').data(), 255, longEnd, 1),
+                        std::invalid_argument);
+    }
+    // the same bytes, but the identification's time
+    for (const char *extension : {".nindlexiconindex", ".nindtermindex", ".nindlocalindex"}) {
+        const vector<unsigned char> a = readFileBytes(byIds + extension), b = readFileBytes(byBatches + extension);
+        REQUIRE_EQ(a.size(), b.size());
+        CHECK(vector<unsigned char>(a.begin(), a.end() - 8) == vector<unsigned char>(b.begin(), b.end() - 8));
+    }
 }
 ////////////////////////////////////////////////////////////

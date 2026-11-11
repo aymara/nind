@@ -27,7 +27,11 @@ NindIndexBuilder::NindIndexBuilder():
     m_docIds(),
     m_docEnds(),
     m_tokens(),
-    m_maxTermId(0)
+    m_maxTermId(0),
+    m_words(),
+    m_wordIds(),
+    m_mode(NO_DOCUMENT),
+    m_writtenWordsNb(0)
 {
 }
 ////////////////////////////////////////////////////////////
@@ -43,6 +47,8 @@ void NindIndexBuilder::addDocument(const NindDocId docId,
 {
     if (!m_docIds.empty() && docId <= m_docIds.back())
         throw std::invalid_argument("documents must be added in increasing id order");
+    if (m_mode == BATCHES || m_mode == WRITTEN) throw std::invalid_argument("lexicon ids after batches");
+    m_mode = LEXICON_IDS;
     if (m_docIds.size() >= std::numeric_limits<uint32_t>::max())
         throw std::invalid_argument("too many documents for one build (at most 2^32 - 1)");
     for (size_t i = 0; i < tokensNb; i++) {
@@ -82,6 +88,8 @@ void NindIndexBuilder::addDocuments(const NindDocId firstDocId,
     }
     if (m_docIds.size() + docsNb > std::numeric_limits<uint32_t>::max())
         throw std::invalid_argument("too many documents for one build (at most 2^32 - 1)");
+    if (m_mode == BATCHES || m_mode == WRITTEN) throw std::invalid_argument("lexicon ids after batches");
+    m_mode = LEXICON_IDS;
     const size_t base = m_tokens.size();
     //no exact reserve here: it would copy the whole buffer at every batch (see reserve)
     for (size_t i = 0; i < tokensNb; i++) {
@@ -96,10 +104,88 @@ void NindIndexBuilder::addDocuments(const NindDocId firstDocId,
 }
 
 ////////////////////////////////////////////////////////////
+void NindIndexBuilder::addBatch(const NindDocId firstDocId,
+                                const uint32_t *ends, const size_t docsNb,
+                                const uint32_t *localIds, const size_t tokensNb,
+                                const char *words, const size_t wordsBytes,
+                                const uint32_t *wordEnds, const size_t wordsNb)
+{
+    if (m_mode == LEXICON_IDS || m_mode == WRITTEN) throw std::invalid_argument("a batch after lexicon ids or writeLexicon");
+    uint32_t prev = 0;
+    for (size_t i = 0; i < docsNb; i++) {
+        if (ends[i] < prev || ends[i] > tokensNb)
+            throw std::invalid_argument("ends: end offsets must be ascending and within the data");
+        prev = ends[i];
+    }
+    if (prev != tokensNb) throw std::invalid_argument("ends: last end offset must equal the data length");
+    if (docsNb != 0 && !m_docIds.empty() && firstDocId <= m_docIds.back())
+        throw std::invalid_argument("documents must be added in increasing id order");
+    if (docsNb != 0 && firstDocId > std::numeric_limits<uint64_t>::max() - (docsNb - 1))
+        throw std::invalid_argument("document id out of range");
+    if (m_docIds.size() + docsNb > std::numeric_limits<uint32_t>::max())
+        throw std::invalid_argument("too many documents for one build (at most 2^32 - 1)");
+    //the batch's words: their builder ids (each word looked up once)
+    std::vector<uint32_t> ids(wordsNb);
+    std::string word;
+    for (size_t w = 0, begin = 0; w < wordsNb; begin = wordEnds[w], w++) {
+        if (wordEnds[w] < begin || wordEnds[w] > wordsBytes) throw std::invalid_argument("word_ends: ascending, within the words");
+        if (wordEnds[w] == begin || wordEnds[w] - begin > 254) throw std::invalid_argument("words: 1 to 254 bytes each");
+        word.assign(words + begin, wordEnds[w] - begin);
+        const std::pair<std::unordered_map<std::string, uint32_t>::iterator, bool> found =
+            m_wordIds.insert(std::make_pair(word, (uint32_t)m_words.size() + 1));
+        if (found.second) {
+            if (m_words.size() + 1 >= std::numeric_limits<uint32_t>::max()) throw std::invalid_argument("too many words");
+            m_words.push_back(word);
+        }
+        ids[w] = found.first->second;
+    }
+    for (size_t i = 0; i < tokensNb; i++)
+        if (localIds[i] >= wordsNb) throw std::invalid_argument("term_ids: local id beyond the words");
+    m_mode = BATCHES;
+    const size_t base = m_tokens.size();
+    for (size_t i = 0; i < tokensNb; i++) {
+        const uint32_t id = ids[localIds[i]];
+        m_tokens.push_back(id);
+        if (id > m_maxTermId) m_maxTermId = id;
+    }
+    for (size_t i = 0; i < docsNb; i++) {
+        m_docIds.push_back(firstDocId + (uint64_t)i);
+        m_docEnds.push_back(base + ends[i]);
+    }
+}
+////////////////////////////////////////////////////////////
+void NindIndexBuilder::writeLexicon(NindLexiconIndex &lexicon)
+{
+    if (m_mode == LEXICON_IDS || m_mode == WRITTEN) throw std::invalid_argument("writeLexicon: no batches to write");
+    //by increasing bytes (UTF-8: code points, the order NindIndexer gave them before): their idents
+    std::vector<uint32_t> order(m_words.size());
+    for (size_t w = 0; w < order.size(); w++) order[w] = (uint32_t)w;
+    std::sort(order.begin(), order.end(), [this](const uint32_t a, const uint32_t b) { return m_words[a] < m_words[b]; });
+    std::vector<unsigned int> idents;
+    {
+        std::unordered_map<std::string, uint32_t>().swap(m_wordIds);
+        std::vector<std::string> sorted(order.size());
+        for (size_t w = 0; w < order.size(); w++) sorted[w].swap(m_words[order[w]]);
+        std::vector<std::string>().swap(m_words);
+        lexicon.addSimpleWords(sorted, idents);     //(sorted, unique: each bucket written from its words)
+    }
+    //builder id (1..) -> lexicon ident, then every token renumbered
+    std::vector<uint32_t> identOf(order.size() + 1, 0);
+    for (size_t w = 0; w < order.size(); w++) identOf[order[w] + 1] = idents[w];
+    m_maxTermId = 0;
+    for (size_t i = 0; i < m_tokens.size(); i++) {
+        m_tokens[i] = identOf[m_tokens[i]];
+        if (m_tokens[i] > m_maxTermId) m_maxTermId = m_tokens[i];
+    }
+    m_writtenWordsNb = order.size();
+    m_mode = WRITTEN;
+}
+////////////////////////////////////////////////////////////
 void NindIndexBuilder::writeTermIndex(NindTermIndex &termIndex,
                                       const NindPadFile::Identification &identification,
                                       const unsigned char cg) const
 {
+    if (m_mode == BATCHES) throw std::invalid_argument("writeTermIndex: writeLexicon first");
     const std::list<unsigned int> noSpecifics;
     //0) the documents' lengths (their tokens: what NindEngine scores with), for the blocks
     {
@@ -185,6 +271,7 @@ void NindIndexBuilder::writeLocalIndex(NindLocalIndex &localIndex,
                                        const NindPadFile::Identification &identification,
                                        const unsigned char cg) const
 {
+    if (m_mode == BATCHES) throw std::invalid_argument("writeLocalIndex: writeLexicon first");
     size_t maxLength = 0, begin = 0;
     for (size_t d = 0; d < m_docIds.size(); d++) {
         maxLength = std::max(maxLength, m_docEnds[d] - begin);

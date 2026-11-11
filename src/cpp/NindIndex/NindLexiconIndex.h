@@ -66,6 +66,14 @@ public:
     void addWords(const std::vector<std::list<std::string> > &words,
                   std::vector<unsigned int> &idents);
 
+    /**\brief addWords for simple words (one component each). A new lexicon (no word yet, no retro
+    * lexicon) given its words sorted and unique, a build's, gets them numbered 1, 2... and each hash
+    * bucket written from its own words: about 8 bytes a word besides them, where addWords holds every
+    * bucket and their retro words (~400 bytes a word); otherwise addWords. The same file either way.
+    *\throws as addWords */
+    void addSimpleWords(const std::vector<std::string> &words,
+                        std::vector<unsigned int> &idents);
+
     /**\brief get ident of the specified word
      * if word exists in lexicon, its ident is returned
      * else, return 0 (0 is not a valid ident !)

@@ -233,6 +233,47 @@ void NindLexiconIndex::addWords(const vector<list<string> > &words,
     if (m_withRetrolexicon) m_nindRetrolexicon->addRetroWords(retroWords, m_identification);
 }
 ////////////////////////////////////////////////////////////
+void NindLexiconIndex::addSimpleWords(const vector<string> &words,
+                                      vector<unsigned int> &idents)
+{
+    bool sortedUnique = true;
+    for (size_t i = 1; i < words.size() && sortedUnique; i++) sortedUnique = words[i - 1] < words[i];
+    if (!m_isWriter || m_withRetrolexicon || m_identification.lexiconWordsNb != 0 || !sortedUnique
+        || words.size() >= 0xFFFFFFFFu) {
+        vector<list<string> > lists(words.size());
+        for (size_t i = 0; i < words.size(); i++) lists[i].push_back(words[i]);
+        addWords(lists, idents);
+        return;
+    }
+    for (size_t i = 0; i < words.size(); i++) {
+        if (words[i].empty()) throw NindLexiconIndexException("NindLexiconIndex::addWords empty word " + m_fileName);
+        if (words[i].length() > 254)
+            throw NindLexiconIndexException("NindLexiconIndex::addWords word longer than 254 bytes " + m_fileName);
+    }
+    NindCriticalSection criticalSection(m_file);
+    //words 1, 2... in order (as addWords numbers new words); (bucket, word) by bucket, then word
+    idents.resize(words.size());
+    vector<pair<unsigned int, unsigned int> > byBucket(words.size());
+    for (size_t i = 0; i < words.size(); i++) {
+        idents[i] = (unsigned int)i + 1;
+        byBucket[i] = make_pair(clef(words[i]) % m_modulo, (unsigned int)i);
+    }
+    if (words.empty()) return;
+    sort(byBucket.begin(), byBucket.end());
+    m_identification.lexiconWordsNb = (unsigned int)words.size();
+    m_identification.lexiconTime = (time_t)time(NULL);
+    //each bucket once, its words in order (as addWords lists them), by increasing bucket
+    list<Mot> mots;
+    for (size_t i = 0; i < byBucket.size(); ) {
+        mots.clear();
+        size_t j = i;
+        for (; j < byBucket.size() && byBucket[j].first == byBucket[i].first; j++)
+            mots.push_back(Mot(words[byBucket[j].second], byBucket[j].second + 1));
+        setDefinitionWords(mots, m_identification);
+        i = j;
+    }
+}
+////////////////////////////////////////////////////////////
 //lit tous les mots d'un seau de hachage
 void NindLexiconIndex::readBucket(const unsigned int ident,
                                   list<Mot> &mots)

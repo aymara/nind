@@ -420,6 +420,24 @@ void NindSegmentedUpdate::addDocuments(const vector<NindDocId> &idents,
     }
 }
 ////////////////////////////////////////////////////////////
+void NindSegmentedUpdate::addBatch(const vector<NindDocId> &idents,
+                                   const uint32_t *ends,
+                                   const uint32_t *localIds,
+                                   const size_t tokensNb,
+                                   const char *words,
+                                   const size_t wordsBytes,
+                                   const uint32_t *wordEnds,
+                                   const size_t wordsNb,
+                                   const vector<string> &names)
+{
+    vector<string> vocabulary(wordsNb);
+    for (size_t w = 0, begin = 0; w < wordsNb; begin = wordEnds[w], w++) {
+        if (wordEnds[w] < begin || wordEnds[w] > wordsBytes) throw invalid_argument("addBatch: word ends ascending, within the words");
+        vocabulary[w].assign(words + begin, wordEnds[w] - begin);
+    }
+    addDocuments(idents, ends, localIds, tokensNb, vocabulary, names);
+}
+////////////////////////////////////////////////////////////
 uint32_t NindSegmentedUpdate::wordId(const string &word)
 {
     const pair<unordered_map<string, uint32_t>::iterator, bool> found =

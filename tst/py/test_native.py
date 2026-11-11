@@ -392,3 +392,14 @@ def test_document_ids_over_32_bits_round_trip(tmp_path):
     reader = _native.NindTermIndex(base, is_writer=False, lexicon_identification=identification,
                                    specifics_number=0)
     assert [d.ident for d in reader.get_term_def(1)[0].documents] == [5, 2 ** 63 + 9]
+
+
+def test_tokenize_batch_packed_is_tokenize_batch_packed():
+    tokenizer = native.Tokenizer(native.TokenizerOptions())
+    texts = ["fooBar baz_qux 12abc", "", "café café baz", "x" * 300 + " y"]
+    vocabulary, term_ids, ends = tokenizer.tokenize_batch(texts)
+    words, word_ends, packed_ids, packed_ends = tokenizer.tokenize_batch_packed(texts)
+    ends_array = array("I")
+    ends_array.frombytes(word_ends)
+    assert [words[a:b].decode("utf-8") for a, b in zip([0] + list(ends_array[:-1]), ends_array)] == vocabulary
+    assert (packed_ids, packed_ends) == (term_ids, ends)

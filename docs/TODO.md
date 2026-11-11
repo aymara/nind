@@ -126,19 +126,24 @@ of 3.0.0 (format v2).
       bytes per token, for a decoding cost on the two passes over them.
     - **Sorted runs on disk and a merge** (Lucene's way): memory bounded
       whatever the corpus, for I/O and a merge; segments already give it.
-    - **What Python holds.** A direct `index_jsonl` keeps the record ids, as it
-      returns them (77 bytes per document: 10.6 GiB at 138M); the vocabulary
-      costs ~950 bytes per distinct term in a build (each chunk's own word list,
-      the union, `term_to_id`, the lexicon writer's input), 2.2 GiB for 2.5M
-      terms. The union and the id maps in C++ (chunk vocabularies as one buffer)?
+    - [x] **What Python held.** The vocabulary was ~1 KB per distinct term in a
+      build: each chunk's word list, the union, `term_to_id`, and mostly the
+      lexicon writer (`addWords`: every bucket and its retro words, ~380 bytes
+      a word). Tokenizer batches are packed now, the builder numbers their words
+      and writes the lexicon bucket by bucket (`addSimpleWords`, 4.6x faster);
+      the same files. Shards of 1M to 14M passages: -8 to -13%; refit, the model
+      is ~9 bytes per token, 110 per document, 100 per term, 300 MB per process
+      (the old "per term" cost was mostly that fixed part): 138M in 16 GiB now
+      35 segments (56) in 267 s (388), in 8 GiB 90 segments. Left: a direct
+      `index_jsonl` keeps the record ids (77 bytes per document, 10.6 GiB at
+      138M), as it returns them.
     - [x] **The names check after a sharded build** merged the shards' names to
       a file then removed (5 GB written, 20 bytes per document: 2.6 GiB at 138M,
       which no number of shards divided: `memory_gb` couldn't go below ~3.9 GiB).
       `NindDocNames::checkUnique`: each shard's `check()`, their name orders
       merged through a heap; 138M: 0.01 GiB, 13.9 s instead of 19-27, nothing
       written.
-    - **The model is fitted on MS MARCO v2** (shards of 1M to 14M passages; up
-      to 50% over for small shards, which costs segments). Check it on another
+    - **The model is fitted on MS MARCO v2** (shards of 1M to 14M passages). Check it on another
       kind of corpus (long documents, code); `merge=True`'s memory isn't in the
       budget; `index_files` has no `memory_gb` yet.
     - **The benchmarks page** shows the builds and the search memory before

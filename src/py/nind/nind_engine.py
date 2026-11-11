@@ -149,12 +149,13 @@ def _tokenize_text(options, text):
 
 
 def _tokenize_batch(options, texts):
+    # a chunk: (words' UTF-8 bytes, their ends, term ids, document ends), see _write_chunks
     tokenizer = _native_tokenizer(options)
     try:
-        return tokenizer.tokenize_batch(texts)
+        return tokenizer.tokenize_batch_packed(texts)
     except (TypeError, UnicodeEncodeError):
         # a text not encodable in UTF-8: only then are the texts checked one by one
-        return tokenizer.tokenize_batch([_encodable(text) for text in texts])
+        return tokenizer.tokenize_batch_packed([_encodable(text) for text in texts])
 
 
 def _storable(token):
@@ -166,9 +167,9 @@ def _storable(token):
 
 
 def _chunk_from_token_lists(token_lists):
-    """(vocabulary, term ids, ends) of documents given as token lists, as
-    native.Tokenizer.tokenize_batch returns them; unstorable tokens are dropped."""
-    local_ids, vocabulary = {}, []
+    """A chunk (words' UTF-8 bytes, their ends, term ids, document ends) of documents given as token
+    lists, as native.Tokenizer.tokenize_batch_packed returns it; unstorable tokens are dropped."""
+    local_ids, words, word_ends = {}, bytearray(), array('I')
     term_ids, ends = array('I'), array('I')
     for tokens in token_lists:
         for token in tokens:
@@ -176,11 +177,18 @@ def _chunk_from_token_lists(token_lists):
             if local_id is None:
                 if not _storable(token):
                     continue
-                local_id = local_ids[token] = len(vocabulary)
-                vocabulary.append(token)
+                local_id = local_ids[token] = len(word_ends)
+                words += token.encode("utf-8")
+                word_ends.append(len(words))
             term_ids.append(local_id)
         ends.append(len(term_ids))
-    return vocabulary, term_ids.tobytes(), ends.tobytes()
+    return bytes(words), word_ends.tobytes(), term_ids.tobytes(), ends.tobytes()
+
+
+def _chunk_words(chunk):
+    """The words of a chunk (see _chunk_from_token_lists), as bytes."""
+    words, ends = chunk[0], _uint_array(chunk[1])
+    return [words[begin:end] for begin, end in zip([0] + list(ends[:-1]), ends)]
 
 
 _malloc_trim = None
@@ -876,7 +884,7 @@ class IndexUpdate:
         return doc_ids
 
     def _add_batch(self, part, doc_ids):
-        # one tokenizer batch of add_jsonl: (record ids, (vocabulary, term ids, ends))
+        # one tokenizer batch of add_jsonl: (record ids, chunk)
         record_ids, chunk = part
         ids, names = array('Q'), []
         for record_id in record_ids:
@@ -933,8 +941,8 @@ class IndexUpdate:
         update = native.SegmentedUpdate(self._base, with_local_index=self._local, merge_factor=self.MERGE_FACTOR,
                                         max_merged_docs=self.MAX_MERGED_DOCS)
         # the batches first: a later change of one of their documents is in _pending
-        for doc_ids, (vocabulary, term_ids, ends), names in self._batches:
-            update.add_documents(doc_ids, _uint_array(ends), _uint_array(term_ids), vocabulary, names)
+        for doc_ids, (words, word_ends, term_ids, ends), names in self._batches:
+            update.add_batch(doc_ids, _uint_array(ends), _uint_array(term_ids), words, _uint_array(word_ends), names)
         self._batches = []
         for doc_id, tokens in self._pending.items():
             if tokens is _IN_BATCH:
@@ -1076,9 +1084,9 @@ class NindIndexer:
         reading its own line-aligned part of it.
 
         Large corpora (more than about 10M documents): give ``memory_gb``, or
-        ``shards``. A direct build holds the whole corpus in memory (about 7
-        bytes per token, 110 per document and 1 KB per distinct term: 4.3 GiB
-        for 8M MS MARCO passages, 57 GiB for 138M) and is slower; shards bound
+        ``shards``. A direct build holds the whole corpus in memory (about 9
+        bytes per token, 110 per document and 100 per distinct term: 3.6 GiB
+        for 8M MS MARCO passages) and is slower; shards bound
         the memory and build in parallel, and their segments give the same
         results.
 
@@ -1152,11 +1160,11 @@ class NindIndexer:
     #: The memory of one build (direct, or a shard's), as ``index_jsonl(memory_gb=...)`` estimates
     #: it: bytes per token, per document, per distinct term (``HEAPS_EXPONENT``: a build's
     #: vocabulary grows as its tokens to this power, from the samples' vocabulary) and per process.
-    #: MS MARCO v2, builds of 1M to 138M passages: the heaviest shards of a build at the estimate,
-    #: most under it (up to 50% for small shards).
-    BUILD_BYTES_PER_TOKEN = 7
+    #: MS MARCO v2, shards of 1M to 14M passages built alone within 5% of it; 138M in 16 and 8 GiB:
+    #: 35 and 90 shards, peaks 13.7 and 7.1 GiB.
+    BUILD_BYTES_PER_TOKEN = 9
     BUILD_BYTES_PER_DOCUMENT = 110
-    BUILD_BYTES_PER_TERM = 1000
+    BUILD_BYTES_PER_TERM = 100
     BUILD_BYTES_PER_PROCESS = 300 << 20
     HEAPS_EXPONENT = 0.7
     #: ``index_jsonl(memory_gb=...)`` counts the tokens, documents and distinct terms of this many
@@ -1215,9 +1223,9 @@ class NindIndexer:
         terms = set()
         for start, stop in pieces:
             record_ids, chunk = self._tokenize_jsonl_range(path, start, stop, id_field, text_field)
-            tokens += len(chunk[1]) // 4
+            tokens += len(chunk[2]) // 4
             documents += len(record_ids)
-            terms.update(chunk[0])
+            terms.update(_chunk_words(chunk))
             sampled += stop - start
         if sampled == 0:
             return self._Sample(0, 0, 0, 0)
@@ -1417,25 +1425,28 @@ class NindIndexer:
 
     def _write_chunks(self, chunks, first_doc_id, base):
         # writes the index files at base (a path without extension), plus the document lengths
-        # chunks: (vocabulary, term ids, ends) of consecutive documents, the first one being
-        # document first_doc_id (see native.Tokenizer.tokenize_batch); the list is emptied as they
-        # are added (the caller should hold no other reference to them: they would stay in memory)
-        vocabulary = sorted(set().union(*(chunk[0] for chunk in chunks)))
-        terms_nb = len(vocabulary)
-        term_to_id, identification = self._write_lexicon(vocabulary, base)
-        del vocabulary
+        # chunks: (words' bytes, their ends, term ids, ends) of consecutive documents, the first one
+        # being document first_doc_id (see native.Tokenizer.tokenize_batch_packed); the list is
+        # emptied as they are added (the caller should hold no other reference to them: they would
+        # stay in memory). The builder numbers the words (nothing per word in Python) and writes the
+        # lexicon, its words by increasing bytes.
         builder = native.IndexBuilder()
-        builder.reserve(sum(len(chunk[1]) for chunk in chunks) // 4, sum(len(chunk[2]) for chunk in chunks) // 4)
+        builder.reserve(sum(len(chunk[2]) for chunk in chunks) // 4, sum(len(chunk[3]) for chunk in chunks) // 4)
         doc_id = first_doc_id
         chunks.reverse()
         while chunks:
-            chunk_vocabulary, term_ids, ends = chunks.pop()
+            words, word_ends, term_ids, ends = chunks.pop()
             ends = _uint_array(ends)
-            builder.add_documents(doc_id, ends, _uint_array(term_ids),
-                                  array('I', map(term_to_id.__getitem__, chunk_vocabulary)))
+            builder.add_batch(doc_id, ends, _uint_array(term_ids), words, _uint_array(word_ends))
             doc_id += len(ends)
-            del chunk_vocabulary, term_ids, ends
-        del term_to_id
+            del words, word_ends, term_ids, ends
+        terms_nb = builder.words_nb
+        lexicon_writer = native.NindLexiconIndex(base, is_writer=True, indirection_bloc_size=max(1, terms_nb))
+        lexicon_writer.begin_bulk()
+        builder.write_lexicon(lexicon_writer)
+        lexicon_writer.end_bulk()
+        identification = lexicon_writer.get_identification()
+        del lexicon_writer
         writers = [native.NindTermIndex(base, is_writer=True, lexicon_identification=identification,
                                         specifics_number=0, indirection_bloc_size=terms_nb + 1)]
         if self._with_local_index:

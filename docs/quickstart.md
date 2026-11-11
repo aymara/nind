@@ -101,7 +101,7 @@ A large corpus (more than about 10M documents): `indexer.index_jsonl(path,
 memory_gb=16)` builds the fewest segments that fit in 16 GiB (a direct build if
 the corpus fits), in worker processes, in parallel; `shards=64` asks for 64
 instead, with memory bounded by `workers` of them at a time. A direct build
-holds the whole corpus (about 7 bytes per token, 110 per document and 1 KB per
+holds the whole corpus (about 9 bytes per token, 110 per document and 100 per
 distinct term) and is slower; segments give the same results, and `merge=True`
 (or a later `indexer.force_merge()`) makes one index of them.
 

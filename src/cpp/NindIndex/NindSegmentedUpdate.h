@@ -84,6 +84,19 @@ public:
                       const std::vector<std::string> &vocabulary,
                       const std::vector<std::string> &names);
 
+    /**\brief addDocuments() with the vocabulary given as its words' UTF-8 bytes one after the other
+    * (word w: words[wordEnds[w - 1], wordEnds[w])), as NindIndexBuilder::addBatch
+    *\throws std::invalid_argument as addDocuments, or on word ends not ascending */
+    void addBatch(const std::vector<NindDocId> &idents,
+                  const uint32_t *ends,
+                  const uint32_t *localIds,
+                  const size_t tokensNb,
+                  const char *words,
+                  const size_t wordsBytes,
+                  const uint32_t *wordEnds,
+                  const size_t wordsNb,
+                  const std::vector<std::string> &names);
+
     /**\brief Remove a document (nothing if it isn't live) */
     void removeDocument(const NindDocId ident);
 

@@ -20,10 +20,13 @@
 ////////////////////////////////////////////////////////////
 #include "NindTermIndex.h"
 #include "NindLocalIndex.h"
+#include "NindLexiconIndex.h"
 #include "NindBasics/NindDocId.h"
 #include "NindCommonExport.h"
 #include <cstdint>
 #include <list>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 ////////////////////////////////////////////////////////////
@@ -54,6 +57,26 @@ public:
                       const uint32_t *ends, const size_t docsNb,
                       const uint32_t *localIds, const size_t tokensNb,
                       const uint32_t *idMap, const size_t idMapSize);
+
+    /**\brief Documents firstDocId, firstDocId + 1...: a tokenizer's batch (NindTokenizer), its words
+    * given as their UTF-8 bytes one after the other (word w: words[wordEnds[w - 1], wordEnds[w])),
+    * document i being words localIds[ends[i - 1]:ends[i]]. The builder numbers the words itself, each
+    * looked up once a batch (about 50 bytes a distinct word, none per occurrence), and writes them to
+    * the lexicon (writeLexicon) before the term and local indexes. Not with addDocuments' lexicon ids.
+    *\throws std::invalid_argument as addDocuments, on word ends not ascending, or a word too long
+    * (more than 254 bytes) or empty */
+    void addBatch(const NindDocId firstDocId,
+                  const uint32_t *ends, const size_t docsNb,
+                  const uint32_t *localIds, const size_t tokensNb,
+                  const char *words, const size_t wordsBytes,
+                  const uint32_t *wordEnds, const size_t wordsNb);
+
+    /**\brief The batches' words into a new lexicon (in bulk mode or not), by increasing bytes (their
+    * idents 1, 2...), the documents' words renumbered so: then writeTermIndex, writeLocalIndex */
+    void writeLexicon(NindLexiconIndex &lexicon);
+
+    /**\brief The batches' distinct words (also after writeLexicon) */
+    size_t wordsNb() const { return m_mode == WRITTEN ? m_writtenWordsNb : m_words.size(); }
 
     /**\brief Write every term's postings (category cg), terms in increasing id order */
     void writeTermIndex(NindTermIndex &termIndex,
@@ -100,8 +123,13 @@ private:
     static const uint32_t MAX_SMALL_FREQ = 255;     //writeTermIndex: frequencies from it are kept apart
     std::vector<uint64_t> m_docIds;     //in increasing order (external document ids, 64 bits)
     std::vector<size_t> m_docEnds;      //document d is m_tokens[m_docEnds[d-1]:m_docEnds[d]]
-    std::vector<uint32_t> m_tokens;     //term ids
+    std::vector<uint32_t> m_tokens;     //term ids (batches: the builder's word ids, until writeLexicon)
     uint32_t m_maxTermId;
+    //the batches' words, by the builder's id (cleared by writeLexicon)
+    std::vector<std::string> m_words;
+    std::unordered_map<std::string, uint32_t> m_wordIds;
+    enum { NO_DOCUMENT, LEXICON_IDS, BATCHES, WRITTEN } m_mode;
+    size_t m_writtenWordsNb;            //the words writeLexicon wrote
 };
 ////////////////////////////////////////////////////////////
     } // end namespace

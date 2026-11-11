@@ -231,9 +231,7 @@ PYBIND11_MODULE(_native, m) {
         .def("add_simple_words", [](NindLexiconIndex &self, const std::vector<std::string> &words) {
             std::vector<unsigned int> idents;
             py::gil_scoped_release release;
-            std::vector<std::list<std::string> > lists(words.size());
-            for (size_t i = 0; i < words.size(); i++) lists[i].push_back(words[i]);
-            self.addWords(lists, idents);
+            self.addSimpleWords(words, idents);
             return idents;
         }, py::arg("words"))
         // bulk mode (see NindIndex::beginBulk): only for a file no reader opens before
@@ -699,6 +697,37 @@ PYBIND11_MODULE(_native, m) {
                 }
             }
             return py::make_tuple(vocabulary, uintBytes(termIds), uintBytes(ends));
+        }, py::arg("texts"))
+        // tokenize_batch with the vocabulary packed: (its words' UTF-8 bytes one after the other,
+        // their end offsets, term ids, ends), all bytes (uint32): no Python string per word
+        .def("tokenize_batch_packed", [](const NindTokenizer &self, const std::vector<std::string> &texts) {
+            std::string words;
+            std::vector<uint32_t> wordEnds, termIds, ends;
+            {
+                py::gil_scoped_release release;
+                std::unordered_map<std::string, uint32_t> localIds;
+                std::vector<std::pair<size_t, size_t> > spans;
+                std::string token;
+                for (size_t d = 0; d < texts.size(); d++) {
+                    self.tokenize(texts[d].data(), texts[d].size(), spans);
+                    for (size_t i = 0; i < spans.size(); i++) {
+                        self.getToken(texts[d].data(), spans[i], token);
+                        std::unordered_map<std::string, uint32_t>::const_iterator it = localIds.find(token);
+                        if (it == localIds.end()) {
+                            it = localIds.insert(std::make_pair(token, (uint32_t)wordEnds.size())).first;
+                            words += token;
+                            if (words.size() > std::numeric_limits<uint32_t>::max())
+                                throw py::value_error("tokenize_batch_packed: too many words in one batch");
+                            wordEnds.push_back((uint32_t)words.size());
+                        }
+                        termIds.push_back((*it).second);
+                    }
+                    if (termIds.size() > std::numeric_limits<uint32_t>::max())
+                        throw py::value_error("tokenize_batch_packed: too many tokens in one batch");
+                    ends.push_back((uint32_t)termIds.size());
+                }
+            }
+            return py::make_tuple(py::bytes(words), uintBytes(wordEnds), uintBytes(termIds), uintBytes(ends));
         }, py::arg("texts"));
 
     // ---- IndexBuilder -----------------------------------------------------
@@ -718,6 +747,21 @@ PYBIND11_MODULE(_native, m) {
             self.addDocuments(firstDocId, documentEnds.data, documentEnds.size, localIds.data, localIds.size,
                               map.data, map.size);
         }, py::arg("first_doc_id"), py::arg("ends"), py::arg("term_ids"), py::arg("id_map"))
+        // a packed tokenizer batch (Tokenizer.tokenize_batch_packed): the builder numbers its words
+        .def("add_batch", [](NindIndexBuilder &self, uint64_t firstDocId, const py::buffer &ends,
+                             const py::buffer &termIds, const py::buffer &words, const py::buffer &wordEnds) {
+            const UIntView documentEnds = uintView(ends, "ends");
+            const UIntView localIds = uintView(termIds, "term_ids");
+            const UIntView ends2 = uintView(wordEnds, "word_ends");
+            const py::buffer_info bytes = words.request();
+            if (bytes.ndim != 1 || bytes.itemsize != 1) throw py::value_error("words: expected bytes");
+            py::gil_scoped_release release;
+            self.addBatch(firstDocId, documentEnds.data, documentEnds.size, localIds.data, localIds.size,
+                          static_cast<const char *>(bytes.ptr), (size_t)bytes.size, ends2.data, ends2.size);
+        }, py::arg("first_doc_id"), py::arg("ends"), py::arg("term_ids"), py::arg("words"), py::arg("word_ends"))
+        .def("write_lexicon", &NindIndexBuilder::writeLexicon, py::arg("lexicon"),
+             py::call_guard<py::gil_scoped_release>())
+        .def_property_readonly("words_nb", &NindIndexBuilder::wordsNb)
         .def("write_term_index", &NindIndexBuilder::writeTermIndex,
              py::arg("term_index"), py::arg("file_identification"), py::arg("cg") = 0,
              py::call_guard<py::gil_scoped_release>())
@@ -875,6 +919,22 @@ PYBIND11_MODULE(_native, m) {
             py::gil_scoped_release release;
             self.addDocuments(ids.values, documentEnds.data, localIds.data, localIds.size, vocabulary, names);
         }, py::arg("doc_ids"), py::arg("ends"), py::arg("term_ids"), py::arg("vocabulary"), py::arg("names"))
+        // a packed tokenizer batch (Tokenizer.tokenize_batch_packed)
+        .def("add_batch", [](NindSegmentedUpdate &self, const py::buffer &docIds, const py::buffer &ends,
+                             const py::buffer &termIds, const py::buffer &words, const py::buffer &wordEnds,
+                             const std::vector<std::string> &names) {
+            const DocIdsView ids = docIdsView(docIds, "doc_ids");
+            const UIntView documentEnds = uintView(ends, "ends");
+            const UIntView localIds = uintView(termIds, "term_ids");
+            const UIntView ends2 = uintView(wordEnds, "word_ends");
+            const py::buffer_info bytes = words.request();
+            if (bytes.ndim != 1 || bytes.itemsize != 1) throw py::value_error("words: expected bytes");
+            if (documentEnds.size != ids.values.size()) throw py::value_error("doc_ids and ends: as many expected");
+            py::gil_scoped_release release;
+            self.addBatch(ids.values, documentEnds.data, localIds.data, localIds.size,
+                          static_cast<const char *>(bytes.ptr), (size_t)bytes.size, ends2.data, ends2.size, names);
+        }, py::arg("doc_ids"), py::arg("ends"), py::arg("term_ids"), py::arg("words"), py::arg("word_ends"),
+           py::arg("names"))
         .def("remove_document", &NindSegmentedUpdate::removeDocument, py::arg("doc_id"))
         .def("commit", &NindSegmentedUpdate::commit, py::call_guard<py::gil_scoped_release>())
         .def_static("force_merge", &NindSegmentedUpdate::forceMerge, py::arg("base"), py::call_guard<py::gil_scoped_release>())
