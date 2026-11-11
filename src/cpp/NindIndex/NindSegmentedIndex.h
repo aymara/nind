@@ -30,6 +30,7 @@
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
+class NindMappedFile;
 ////////////////////////////////////////////////////////////
 /**\brief The files of an index's document lengths (<name>.ninddoclengths): every document's length
 * in tokens, the documents of length 0 left out.
@@ -54,6 +55,17 @@ public:
                             NindDocId &firstId,
                             std::vector<NindDocId> &docIds,
                             std::vector<uint32_t> &lengths);
+    /**\brief The lengths of a file, mapped, not copied (see NindBm25Scorer), when its ids are
+    * consecutive and the host little-endian (every file nind writes, on x86 and ARM)
+    *\param file receives the mapping (the lengths stay valid while it lives)
+    *\param lengths receives where they are in it, count of them
+    *\return false if there is no such file or it can't be read so (then: readCompact)
+    *\throws FormatFileException, ReadFileException if invalid */
+    static bool map(const std::string &fileName,
+                    NindDocId &firstId,
+                    std::shared_ptr<const NindMappedFile> &file,
+                    const uint32_t *&lengths,
+                    size_t &count);
     /**\brief The last (largest) document of a file, read alone
     *\return false if there is no such file or it's empty
     *\throws FormatFileException, ReadFileException if invalid */
@@ -121,9 +133,13 @@ public:
     *\param base path without extension
     *\param previous an index opened earlier (or null): its segments of the same names are shared,
     * not read again (segments never change; the deletions are read again)
+    *\param mapLengths the documents' lengths read where they are, in their mapped files (shared by
+    * the processes searching the index, none of their own memory; MS MARCO v2 138M: 0.5 GB less a
+    * process, searches 3-6% slower: 4 KB pages, not the huge pages of a copy) instead of copied
     *\throws FileException if a file is missing or invalid */
     explicit NindSegmentedIndex(const std::string &base,
-                                const NindSegmentedIndex *previous = 0);
+                                const NindSegmentedIndex *previous = 0,
+                                const bool mapLengths = false);
     ~NindSegmentedIndex();
 
     /**\brief The documents with a positive score for the query's words, by decreasing score, then

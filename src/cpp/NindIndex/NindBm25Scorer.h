@@ -29,6 +29,7 @@
 ////////////////////////////////////////////////////////////
 namespace latecon {
     namespace nindex {
+class NindMappedFile;
 ////////////////////////////////////////////////////////////
 /**\brief Okapi BM25 search over a term index, driven by the postings of the query terms (only
 * the documents containing them are scored), on flat arrays: no allocation nor hashing per
@@ -60,6 +61,15 @@ public:
     *\throws std::invalid_argument if there are too many documents */
     NindBm25Scorer(const NindDocId firstId,
                    const std::vector<uint32_t> &lengths,
+                   const double avgDocLength);
+    /**\brief The corpus of documents firstId, firstId + 1..., their lengths (count of them) read where
+    * they are, in a mapped file the scorer keeps (NindDocLengths::map): not copied, shared by the
+    * processes that map it
+    *\throws std::invalid_argument if there are too many documents */
+    NindBm25Scorer(const NindDocId firstId,
+                   const std::shared_ptr<const NindMappedFile> &file,
+                   const uint32_t *lengths,
+                   const size_t count,
                    const double avgDocLength);
     ~NindBm25Scorer();
 

@@ -127,6 +127,37 @@ bool NindDocLengths::read(const string &fileName,
     return true;
 }
 ////////////////////////////////////////////////////////////
+bool NindDocLengths::map(const string &fileName,
+                         NindDocId &firstId,
+                         shared_ptr<const NindMappedFile> &file,
+                         const uint32_t *&lengths,
+                         size_t &count)
+{
+    const uint16_t one = 1;
+    if (*(const unsigned char *)&one != 1) return false;         //big-endian: read, not mapped
+    if (!fileExists(fileName)) return false;
+    shared_ptr<const NindMappedFile> mapped(new NindMappedFile(fileName));
+    const unsigned char *bytes = mapped->data();
+    if (mapped->size() < 12) throw FormatFileException(fileName);
+    size_t idSize;
+    if (memcmp(bytes, LENGTHS_MAGIC_V2, 8) == 0) idSize = 8;
+    else if (memcmp(bytes, LENGTHS_MAGIC_V1, 8) == 0) idSize = 4;
+    else throw FormatFileException(fileName);
+    const uint64_t number = get4(bytes + 8);
+    if (mapped->size() != 12 + (idSize + 4) * number) throw FormatFileException(fileName);
+    const unsigned char *ids = bytes + 12;
+    const auto idAt = [&](const size_t i) -> NindDocId { return (idSize == 8) ? get8(ids + 8 * i) : get4(ids + 4 * i); };
+    firstId = (number == 0) ? 0 : idAt(0);
+    for (size_t i = 1; i < number; i++)
+        if (idAt(i) != firstId + i) return false;
+    const unsigned char *values = ids + idSize * number;
+    if (number != 0 && (uintptr_t)values % alignof(uint32_t) != 0) return false;
+    file = mapped;
+    lengths = (const uint32_t *)values;
+    count = (size_t)number;
+    return true;
+}
+////////////////////////////////////////////////////////////
 bool NindDocLengths::readCompact(const string &fileName,
                                  NindDocId &firstId,
                                  vector<NindDocId> &docIds,
@@ -288,15 +319,24 @@ public:
         unique_ptr<NindBm25Scorer> scorer;
         unique_ptr<NindDocNames> names;
         uint64_t totalLength;
-        Segment(const string &segmentName, const string &segmentBase): name(segmentName), base(segmentBase),
+        Segment(const string &segmentName, const string &segmentBase, const bool mapLengths): name(segmentName), base(segmentBase),
             lexicon(), terms(), scorer(), names(), totalLength(0)
         {
             lexicon.reset(new NindLexiconIndex(base, false));
             terms.reset(new NindTermIndex(base, false, lexicon->getIdentification(), 0));
             NindDocId firstId = 0;
+            //mapped if asked (consecutive ids: every file nind writes): shared by processes, not copied
+            shared_ptr<const NindMappedFile> mapped;
+            const uint32_t *mappedLengths = 0;
+            size_t count = 0;
+            if (mapLengths && NindDocLengths::map(base + ".ninddoclengths", firstId, mapped, mappedLengths, count)) {
+                for (size_t d = 0; d < count; d++) totalLength += mappedLengths[d];
+                scorer.reset(new NindBm25Scorer(firstId, mapped, mappedLengths, count, count ? (double)totalLength / count : 0.0));
+            }
             vector<NindDocId> docIds;           //(empty: firstId, firstId + 1...)
             vector<uint32_t> lengths;
-            if (!NindDocLengths::readCompact(base + ".ninddoclengths", firstId, docIds, lengths)) {
+            if (scorer) {}
+            else if (!NindDocLengths::readCompact(base + ".ninddoclengths", firstId, docIds, lengths)) {
                 //written before document lengths were stored apart: from the local index
                 NindLocalIndex local(base, false, lexicon->getIdentification());
                 local.getDocIdents(docIds);
@@ -308,10 +348,12 @@ public:
                         lengths[d] += (uint32_t)(*it).localisation.size();
                 }
             }
-            for (size_t d = 0; d < lengths.size(); d++) totalLength += lengths[d];
-            const double avgLength = lengths.empty() ? 0.0 : (double)totalLength / lengths.size();
-            if (docIds.empty()) scorer.reset(new NindBm25Scorer(firstId, lengths, avgLength));
-            else scorer.reset(new NindBm25Scorer(docIds, lengths, avgLength));
+            if (!scorer) {
+                for (size_t d = 0; d < lengths.size(); d++) totalLength += lengths[d];
+                const double avgLength = lengths.empty() ? 0.0 : (double)totalLength / lengths.size();
+                if (docIds.empty()) scorer.reset(new NindBm25Scorer(firstId, lengths, avgLength));
+                else scorer.reset(new NindBm25Scorer(docIds, lengths, avgLength));
+            }
             FILE *namesFile = fopen((base + ".ninddocnames").c_str(), "rb");
             if (namesFile != 0) {
                 fclose(namesFile);
@@ -369,7 +411,8 @@ public:
 };
 ////////////////////////////////////////////////////////////
 NindSegmentedIndex::NindSegmentedIndex(const string &base,
-                                       const NindSegmentedIndex *previous):
+                                       const NindSegmentedIndex *previous,
+                                       const bool mapLengths):
     m_impl(new Impl()),
     m_docsNb(0),
     m_avgDocLength(0)
@@ -387,7 +430,7 @@ NindSegmentedIndex::NindSegmentedIndex(const string &base,
                 if (parts[p].segment->name == names[s]) part.segment = parts[p].segment;
         }
         const string segmentFiles = withManifest ? segmentBase(base, names[s]) : base;
-        if (!part.segment) part.segment.reset(new Impl::Segment(names[s], segmentFiles));
+        if (!part.segment) part.segment.reset(new Impl::Segment(names[s], segmentFiles, mapLengths));
         part.base = segmentFiles;
         const NindBm25Scorer &scorer = *part.segment->scorer;
         part.liveLength = part.segment->totalLength;

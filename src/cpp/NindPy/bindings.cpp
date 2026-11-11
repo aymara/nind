@@ -789,10 +789,10 @@ PYBIND11_MODULE(_native, m) {
         .def_readonly("docs_nb", &NindSegmentedIndex::SegmentInfo::docsNb)
         .def_readonly("deleted_nb", &NindSegmentedIndex::SegmentInfo::deletedNb);
     py::class_<NindSegmentedIndex>(m, "SegmentedIndex")
-        .def(py::init([](const std::string &base, const NindSegmentedIndex *previous) {
+        .def(py::init([](const std::string &base, const NindSegmentedIndex *previous, bool mapLengths) {
             py::gil_scoped_release release;
-            return new NindSegmentedIndex(base, previous);
-        }), py::arg("base"), py::arg("previous") = nullptr)
+            return new NindSegmentedIndex(base, previous, mapLengths);
+        }), py::arg("base"), py::arg("previous") = nullptr, py::arg("map_lengths") = false)
         .def("search", [](const NindSegmentedIndex &self, const std::vector<std::string> &words, double k1, double b,
                           long topK, bool prune, unsigned int threads) {
             std::vector<std::list<std::string> > query;

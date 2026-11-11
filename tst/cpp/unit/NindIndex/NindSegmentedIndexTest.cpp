@@ -150,7 +150,9 @@ struct Fixture {
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindSegmentedIndex.AnswersAsOneIndexOfItsLiveDocuments") {
     Fixture f;
-    const NindSegmentedIndex index(f.base);
+    for (const bool mapLengths : {false, true}) {
+    CAPTURE(mapLengths);
+    const NindSegmentedIndex index(f.base, 0, mapLengths);
     const NindSegmentedIndex reference(f.tmp.file("reference"));
     CHECK_EQ(4u, index.segments().size());
     CHECK_EQ(1u, reference.segments().size());
@@ -166,6 +168,7 @@ TEST_CASE("NindSegmentedIndex.AnswersAsOneIndexOfItsLiveDocuments") {
                 checkSameResults(index, reference, f.queries[q], topKs[k], true, threads);
             }
         }
+    }
     }
 }
 ////////////////////////////////////////////////////////////

@@ -17,6 +17,7 @@
 #include "NindBm25Scorer.h"
 #include "NindThreadPool.h"
 #include "NindBasics/NindReadBuffer.h"
+#include "NindBasics/NindMappedFile.h"
 #include <algorithm>
 #include <atomic>
 #include <exception>
@@ -98,12 +99,31 @@ public:
         if (lengths.size() >= NO_POSITION) throw std::invalid_argument("too many documents");
         setLengths(lengths);
     }
+    // documents firstId, firstId + 1..., their lengths in a mapped file (not copied)
+    Impl(const NindDocId firstId, const std::shared_ptr<const NindMappedFile> &file, const uint32_t *lengths,
+         const size_t count, const double avgDocLength):
+        m_docIds(), m_first(firstId), m_lengths(), m_shortLengths(), m_minLength(0), m_identity(true), m_dense(), m_sparse(),
+        m_docsNb(count), m_avgDocLength(avgDocLength),
+        m_poolMutex(), m_pool()
+    {
+        if (count >= NO_POSITION) throw std::invalid_argument("too many documents");
+        m_wide = lengths;
+        m_mapped = file;
+        for (size_t i = 0; i < count; i++)
+            if (i == 0 || lengths[i] < m_minLength) m_minLength = lengths[i];
+    }
     void setLengths(const std::vector<uint32_t> &lengths) {
         //lengths under 2^16: 2 bytes each (more of them in the processor's caches)
         uint32_t maxLength = 0;
         for (size_t i = 0; i < lengths.size(); i++) maxLength = std::max(maxLength, lengths[i]);
-        if (maxLength < 65536) m_shortLengths.assign(lengths.begin(), lengths.end());
-        else m_lengths.assign(lengths.begin(), lengths.end());
+        if (maxLength < 65536) {
+            m_shortLengths.assign(lengths.begin(), lengths.end());
+            m_narrow = m_shortLengths.data();
+        }
+        else {
+            m_lengths.assign(lengths.begin(), lengths.end());
+            m_wide = m_lengths.data();
+        }
         m_minLength = 0;
         for (size_t i = 0; i < lengths.size(); i++)
             if (i == 0 || lengths[i] < m_minLength) m_minLength = lengths[i];
@@ -861,15 +881,18 @@ private:
     uint64_t m_first;                   //the smallest document id
     std::vector<uint32_t> m_lengths;    //position -> length (or, all under 2^16:)
     std::vector<uint16_t> m_shortLengths;
+    const uint32_t *m_wide = 0;         //the lengths read: m_lengths', a mapped file's, or
+    const uint16_t *m_narrow = 0;       //m_shortLengths'
+    std::shared_ptr<const NindMappedFile> m_mapped;     //the file m_wide is in, if mapped
     static const size_t PREFETCH_DISTANCE = 8;
     void prefetchLength(const NindDocId docId) const {
         const uint32_t position = positionOf(docId);
         if (position == NO_POSITION) return;
-        if (m_shortLengths.empty()) __builtin_prefetch(&m_lengths[position]);
-        else __builtin_prefetch(&m_shortLengths[position]);
+        if (m_narrow) __builtin_prefetch(m_narrow + position);
+        else __builtin_prefetch(m_wide + position);
     }
     double lengthOf(const uint32_t position) const {
-        return m_shortLengths.empty() ? (double)m_lengths[position] : (double)m_shortLengths[position];
+        return m_narrow ? (double)m_narrow[position] : (double)m_wide[position];
     }
     uint32_t m_minLength;               //the shortest document
     bool m_identity;                    //document i at position i: no table
@@ -925,6 +948,15 @@ NindBm25Scorer::NindBm25Scorer(const NindDocId firstId,
                                const std::vector<uint32_t> &lengths,
                                const double avgDocLength):
     m_impl(new Impl(firstId, lengths, avgDocLength))
+{
+}
+////////////////////////////////////////////////////////////
+NindBm25Scorer::NindBm25Scorer(const NindDocId firstId,
+                               const std::shared_ptr<const NindMappedFile> &file,
+                               const uint32_t *lengths,
+                               const size_t count,
+                               const double avgDocLength):
+    m_impl(new Impl(firstId, file, lengths, count, avgDocLength))
 {
 }
 ////////////////////////////////////////////////////////////

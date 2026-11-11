@@ -189,14 +189,27 @@ of 3.0.0 (format v2).
   (24 processes), Lucene from 8 (48 threads: nind 477 -> 519, 8 segments 673,
   Lucene 786).
 - **Many threads on a large index.** At 138M nind's threads scale less than
-  Lucene's past 8 (24 -> 48 callers: 474 -> 519 queries/s, Lucene 599 -> 786;
-  8 segments 673): memory bandwidth (each search reads its blocks into its own
-  buffers, lengths scattered), the scorer's shared structures (the directory
-  cache's lock, the scratch pool's mutex)? perf with 48 threads.
-- **A search process's own memory**, 138M: nind 1.06 GB, Lucene 0.83 (its JVM),
-  tantivy 0.04 (both map their index). nind's: the lengths (2 bytes a document,
-  0.26 GB; Lucene maps its norms), the 256 MB directory cache per segment, the
-  term index's and lexicon's indirection maps. Map the lengths file?
+  Lucene's past 8: with 48, repeated runs give nind 634–642 queries/s, Lucene
+  753–770 (`scale-repeat.txt`; stage 6b's 519 was a low run). perf at 12 and 48
+  threads: the same profile, no lock; per-core efficiency with hardware threads,
+  memory traffic (each search decodes its blocks into its own buffers)?
+- **Term directories at 138M.** The scorer's directory cache (256 MB, emptied
+  when full) holds a fifth of what 2,000 queries need: their 3,737 terms have
+  15M blocks of 88 bytes (1.3 GB; "you": 286k blocks, 25 MB). With 2 GB, the
+  138M mean is 6% lower (34.8 -> 32.8 ms), 8.8M unchanged; and each query also
+  rebuilds its terms' block bounds from their directories (4–5%). Tried: the
+  least recently used evicted instead of everything, at 256 MB: no gain at 138M,
+  -2–4% at 8.8M (the working set doesn't fit, whatever goes). Left: cache only
+  what MaxScore reads (first, last, a bound: ~24 bytes a block, 360 MB for those
+  terms), or a larger cache for large indexes (memory per process).
+- [x] **A search process's own memory**, 138M: nind 1.06 GB, Lucene 0.83 (its JVM),
+  tantivy 0.04 (both map their index). `NindEngine(map_lengths=True)` reads the
+  documents' lengths in their mapped files (none of the process's memory: 0.33
+  GiB after queries instead of 0.85, opened in 0.6 s instead of 1.0) for 3-6%
+  slower searches (4 KB pages, not a copy's huge pages: lengths on fewer bytes
+  wouldn't help, see "Search, what's left"); copied by default. Update lookups
+  map them. Left: the 256 MB directory cache (above), the term index's and
+  lexicon's indirection maps.
 - [x] **Top 100** in the comparison benchmark.
 - **Stopwords kept at scale.** MS MARCO v2 138M, top 10 on one thread: 138 ms vs
   36 ms for Lucene (16M: 15.5 vs 6.1 ms); the gap grows with the corpus.

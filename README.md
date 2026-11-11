@@ -113,7 +113,9 @@ their number instead. Results are always those of one index of the live document
 Searching is thread-safe: a server can call `engine.search` from many threads at once (the
 GIL is released). To make one query faster on idle cores, search segments in parallel with
 `NindEngine("indices", search_threads=4)` (or `search(..., threads=4)`): the same results, about
-2× faster with 4 threads. The default (1) suits a server answering many queries at once.
+2× faster with 4 threads. The default (1) suits a server answering many queries at once. Many search
+processes on one index can share its documents' lengths instead of copying them,
+`NindEngine("indices", map_lengths=True)` (0.5 GB less each at 138M documents, searches 3-6% slower).
 See the [benchmarks](https://aymara.github.io/nind/benchmarks.html) against Lucene, tantivy and
 bm25s.
 

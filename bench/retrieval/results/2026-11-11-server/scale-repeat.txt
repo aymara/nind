@@ -1,0 +1,11 @@
+138M, threads sharing one searcher (concurrency.py, 2,000 queries after 300), run again after stage6b,
+nind and Lucene alternated (24 callers: numactl --physcpubind=0-23; 48: unpinned), queries/s:
+
+             run 1   run 2
+nind 24        479     533
+nind 48        634     642
+lucene 24      591     479
+lucene 48      770     753
+
+stage6b's nind with 48 threads (519) was a low run; the 24-caller runs vary by 10-20% either way.
+nind's profile (perf, 12 and 48 threads) has the same shape: no lock, the scan and decoding.

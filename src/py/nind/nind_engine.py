@@ -319,18 +319,19 @@ class _RecordNames(Sequence):
         if not 0 <= index < self._count:
             raise IndexError(index)
         if self._names is None:
-            self._names = native.SegmentedIndex(self._base)
+            self._names = native.SegmentedIndex(self._base, map_lengths=True)       #(names only)
         return self._names.name(index)
 
 
 class _Snapshot:
     """One opened generation of an index: every file from the same build."""
 
-    def __init__(self, base, previous=None):
+    def __init__(self, base, previous=None, map_lengths=False):
         # every file is opened here, while the generation can't be deleted (see _index_store);
         # the segments the previous snapshot had are shared, not read again
         self.base = base
-        self.index = native.SegmentedIndex(base, previous.index if previous is not None else None)
+        self.index = native.SegmentedIndex(base, previous.index if previous is not None else None,
+                                           map_lengths=map_lengths)
         meta = _read_meta(base)
         # an index written before tokenizer options were stored: the original tokenizer
         self.tokenizer_options = meta["tokenizer"] if meta is not None else LEGACY_TOKENIZER
@@ -397,7 +398,7 @@ class NindEngine:
     methods (``dumpeFichier``, ``afficheTerme``...).
     """
 
-    def __init__(self, index_dir, prefix=None, search_threads=1):
+    def __init__(self, index_dir, prefix=None, search_threads=1, map_lengths=False):
         """Open the index in ``index_dir``.
 
         :param index_dir: directory the index was written into by
@@ -414,16 +415,22 @@ class NindEngine:
             documents, top 10, median: 1.5 ms with 1 thread, 0.9 ms with
             4), for block-max searches only (a ``top_k`` small for the
             corpus).
+        :param map_lengths: read the documents' lengths where they are, in their
+            mapped files (shared by every process searching the index: none of
+            this process's memory, 0.5 GB less for MS MARCO v2's 138M passages),
+            instead of a copy (searches 3-6% faster). For many search processes
+            on one index.
         :raises FileNotFoundError: if there is no index in ``index_dir``.
         :raises ValueError: if there are several and no ``prefix`` is given.
         """
         if not isinstance(search_threads, int) or search_threads < 1:
             raise ValueError("search_threads must be a positive integer")
         self.search_threads = search_threads
+        self.map_lengths = bool(map_lengths)
         self.index_dir = index_dir
         self._store = IndexStore(index_dir, prefix or IndexStore.find_prefix(index_dir))
         # (snapshot, version), replaced as a whole when a new build is published
-        self._state = self._store.open_current(_Snapshot)
+        self._state = self._store.open_current(lambda base: _Snapshot(base, None, self.map_lengths))
         self._switch_lock = threading.Lock()
         # the snapshot of the outermost public call running in each thread (nested calls reuse it)
         self._calls = threading.local()
@@ -445,7 +452,7 @@ class NindEngine:
             with self._switch_lock:
                 if self._store.current_version() != self._state[1]:
                     previous = self._state[0]
-                    self._state = self._store.open_current(lambda base: _Snapshot(base, previous))
+                    self._state = self._store.open_current(lambda base: _Snapshot(base, previous, self.map_lengths))
         calls.snapshot = self._state[0]
         try:
             yield calls.snapshot
@@ -769,7 +776,7 @@ class IndexUpdate:
     def _before(self):
         # (reads its documents' lengths: an update that only adds new documents doesn't)
         if self._published is None:
-            self._published = native.SegmentedIndex(self._base)
+            self._published = native.SegmentedIndex(self._base, map_lengths=True)    #(lookups only)
         return self._published
 
     def _was_published(self, doc_id):

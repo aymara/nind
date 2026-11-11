@@ -341,7 +341,8 @@ Processes, 138M:
 - **138M: nind leads with few callers, Lucene with many**: {v2_nind_1} against {v2_lucene_1} queries/s
   alone, {v2_nind_48} (8 segments: {v2_8s_48}) against {v2_lucene_48} with 48 threads. nind gains less from
   more threads on the large index ({v2_nind_24} to {v2_nind_48} from 24 to 48 callers, Lucene
-  {v2_lucene_24} to {v2_lucene_48}); `docs/TODO.md`. 99th percentile alone: {v2_nind_p99} ms, Lucene's
+  {v2_lucene_24} to {v2_lucene_48}; one run each: repeated twice at 48 threads, nind 634 and 642, Lucene 770
+  and 753, `scale-repeat.txt`); `docs/TODO.md`. 99th percentile alone: {v2_nind_p99} ms, Lucene's
   {v2_lucene_p99} ms. (Before MaxScore scanned queries of 5 terms or more in windows, term at a time,
   nind served {v2_nind_48_before} with 48 threads at 138M and {v1_nind_48_before} at 8.8M.)
 - **Segments** serve about as many queries as one index up to 24 callers (each query does the same

@@ -11,6 +11,7 @@ exhaustive searches (see `docs/TODO.md`).
 - `concurrency-callers-nind2.jsonl`: nind and nind-8s again (`scripts/stage6b.sh`), after
   MaxScore scanned queries of 5 terms or more in windows, term at a time (`docs/TODO.md`,
   "Throughput at 138M"); the page shows these for nind.
+- `scale-repeat.txt`: nind and Lucene with 24 and 48 threads at 138M, twice each, alternated.
 - `anonymous-138M.jsonl`: each system's memory per process at 138M (`anonymous_gb`: not a file's;
   one and four processes, 400 queries after 100).
 - `updates.txt`: updates of 1% (MS MARCO v2 16M and 138M) through `IndexUpdate.add_jsonl`.

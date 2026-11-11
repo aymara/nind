@@ -1202,6 +1202,23 @@ def test_update_add_jsonl_then_changes_of_its_documents(tmp_path):
     assert engine.get_tf("zebra", 4) == 1 and engine.get_tf("eel", 2) == 1
 
 
+def test_mapped_lengths_answer_as_copied_ones(tmp_path):
+    records = [{"id": "d%d" % i, "contents": "tag%s common %s" % ("abcdefghij"[i % 10], "pad " * (i % 50))}
+               for i in range(400)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    for shards in (1, 3):
+        index_dir = tmp_path / ("index%d" % shards)
+        index_dir.mkdir()
+        NindIndexer(str(index_dir)).index_jsonl(path, workers=2, shards=shards)
+        copied, mapped = NindEngine(str(index_dir)), NindEngine(str(index_dir), map_lengths=True)
+        assert mapped.avg_doc_len == copied.avg_doc_len
+        for doc_id in (0, 7, 399):
+            assert mapped.get_doc_len(doc_id) == copied.get_doc_len(doc_id)
+        for query in ("taga", "common pad", "tagj pad common"):
+            for k in (3, 1000):
+                assert mapped.search(query, top_k=k, doc_names=True) == copied.search(query, top_k=k, doc_names=True)
+
+
 def test_document_names_are_stored_compactly(tmp_path):
     records = [{"id": "d%d" % i, "contents": "word%s" % "abcdefghij"[i % 10]} for i in range(2000)]
     path = write_jsonl(tmp_path / "corpus.jsonl", records)
