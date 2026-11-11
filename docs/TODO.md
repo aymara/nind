@@ -73,8 +73,12 @@ of 3.0.0 (format v2).
   - **Local index readers.** Opening an index no longer reads a header per
     document (0.4 s at 8.8M, was 7.3 s), but the first local index lookup does,
     once (~4 min at 300M, extrapolated): store the id map in the file?
-  - **Names.** Read whole and validated at open (0.10 s at 8.8M, ~30 bytes per
-    document): `mmap`?
+  - **Names and lengths.** Read whole at open (names validated: 0.10 s at 8.8M,
+    ~30 bytes per document). At 138M that is 6.6 GB read at open (names 4.96 GB,
+    lengths 1.66 GB) and 7.5 GB of the search process's memory, against 1.3 GB
+    for Lucene: with 1 GB of page cache nind's search is unchanged, so this is
+    what bounds the machine it needs (`bench/README.md` section 7). `mmap`, or
+    names looked up in the file?
   - **Merges.** A commit's merges are synchronous and single-threaded (17.6 s for
     the first update of a 16-shard 8.8M build): in the background, published as
     their own generation?
@@ -100,7 +104,9 @@ of 3.0.0 (format v2).
 - **Latency varies between processes.** The same search, one process per run:
   2.12 or 2.67 ms (8.8M, one thread). Not huge pages, the memory sampler or
   names; NUMA placement of the page cache or of the scorer's arrays?
-- **Index larger than memory** (the benchmarks' stage 5): not run yet.
+- [x] **Index larger than memory** (section 7): with 1 GB of page cache for a
+  14 GB index, nind's top 10 is unchanged; 8 segments with 8 threads lose
+  their lead (3.8 -> 19 ms).
 - **Search, what's left** (done in 3.1.2–3.2: windowed block-max MaxScore,
   intra-query threads with a persistent pool, impacts, a directory cache,
   length prefetching; MS MARCO 8.8M top 10: 2.4–2.5 ms on one thread, about

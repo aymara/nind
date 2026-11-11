@@ -10,6 +10,7 @@ shows the one of the reader's theme), matplotlib.
         --server bench/retrieval/results/2026-11-10-server/v1-report.csv \\
                  bench/retrieval/results/2026-11-10-server/v2-report.csv \\
         --threads bench/retrieval/results/2026-11-10-server \\
+        --memory bench/retrieval/results/2026-11-10-server/memory-budget.jsonl --code-of 4.0.1 \\
         --laptop bench/retrieval/results/2026-11-04/report.csv bench/retrieval/results/2026-11-05/report.csv \\
         --laptop-date 2026-11-05 --laptop-previous-date 2026-11-04
 """
@@ -105,7 +106,10 @@ def style(ax, theme):
 
 
 def save(fig, path, theme):
-    fig.savefig(path, format="svg", facecolor=THEMES[theme]["surface"])
+    import matplotlib
+    # the same data gives the same file: no date, ids from a fixed salt
+    matplotlib.rcParams["svg.hashsalt"] = os.path.basename(path)
+    fig.savefig(path, format="svg", facecolor=THEMES[theme]["surface"], metadata={"Date": None})
     if os.environ.get("SITE_PNG"):         #(a PNG beside, to look at the chart)
         fig.savefig(path[:-4] + ".png", format="png", dpi=110, facecolor=THEMES[theme]["surface"])
 
@@ -282,12 +286,77 @@ def thread_tables(directory):
     return tables, per_query, concurrency, builds
 
 
+#: the systems searched under a page-cache budget
+MEMORY_SYSTEMS = ["nind", "nind-8s-8t", "lucene", "tantivy"]
+MEMORY_TEXT = """MS MARCO v2, 138M passages, stopwords removed (indexes of 11 to 15 GB): each system searches in a
+cgroup (`systemd-run --user -p MemoryMax=...`) holding its own memory (the peak of an uncapped run,
++10%) plus a budget for the page cache; the index is evicted from the cache first, so every page
+it reads counts. The first 2,000 queries after a warm-up of 500; median ms.
+
+{top10}
+
+Top 1000, median ms:
+
+{top1000}
+
+- **One thread on nind's index barely reads.** MaxScore reads only the blocks it needs, with
+  positioned reads: about 1.3 MB per query from disk with a 1 GB budget (1.0 MB from a cold cache
+  without one), which the SSDs serve without changing the median. (Its uncapped run is the slower
+  one: separate processes vary, see "How to read these numbers".)
+- **8 segments with 8 threads per query** read more per query (2.3 MB at 1 GB) in a few
+  milliseconds: the disk shows, from {s8_all} ms without a limit to {s8_8} ms with 8 GB and {s8_1} ms with
+  {low} GB, about the single thread's time.
+- **Lucene and tantivy map their files** (`mmap`): with less cache, Lucene's top 10 gets
+  {lucene_ratio}× slower and its top 1000 (which loads each hit's stored id) much more; tantivy's top
+  1000 too. Readahead on mapped files is a likely cause, not investigated.
+- **nind's own memory is the limit**: {nind_own} GB before any cache. At open it reads the document
+  names ({names_gb} GB) and lengths ({lengths_gb} GB) files whole; Lucene needs {lucene_own} GB and
+  tantivy {tantivy_own} GB. Reading them on demand (`mmap`) is in `docs/TODO.md`."""
+
+
+def memory(path):
+    rows = jsonl(path) if path else []
+    if not rows:
+        return "Not measured.", {k: "–" for k in ("mem_nind_1", "mem_lucene_all", "mem_lucene_1", "mem_nind_own",
+                                                  "mem_lucene_own")}
+    by = {(r["system"], r.get("budget_gb")): r for r in rows}
+    budgets = [None] + sorted({r["budget_gb"] for r in rows if r.get("budget_gb")}, reverse=True)
+    label = {None: "no limit"}
+    label.update({b: "%d GB" % b for b in budgets if b})
+
+    def own(system):
+        r = by.get((system, None))
+        return r["cgroup"]["anon_peak"] / 2 ** 30 if r else None
+
+    def grid_of(key):
+        lines = ["| system | own memory | " + " | ".join(label[b] for b in budgets) + " |",
+                 "|---|---:|" + "---:|" * len(budgets)]
+        for system in MEMORY_SYSTEMS:
+            cells = [fmt(by[(system, b)][key]["p50_ms"]) if (system, b) in by else "–" for b in budgets]
+            lines.append("| %s | %s GB | %s |" % (NAMES[system], fmt(own(system)), " | ".join(cells)))
+        return "\n".join(lines)
+
+    def k10(system, budget):
+        r = by.get((system, budget))
+        return r["k10"]["p50_ms"] if r else None
+
+    low = budgets[-1]
+    text = MEMORY_TEXT.format(top10=grid_of("k10"), top1000=grid_of("k1000"),
+                              lucene_ratio="%.0f" % (k10("lucene", low) / k10("lucene", None)),
+                              nind_own=fmt(own("nind")), lucene_own=fmt(own("lucene")), tantivy_own=fmt(own("tantivy")),
+                              names_gb="4.96", lengths_gb="1.66", low=low, s8_all=fmt(k10("nind-8s-8t", None)),
+                              s8_8=fmt(k10("nind-8s-8t", budgets[1])), s8_1=fmt(k10("nind-8s-8t", low)))
+    return text, {"mem_nind_1": fmt(k10("nind", low)), "mem_lucene_all": fmt(k10("lucene", None)),
+                  "mem_lucene_1": fmt(k10("lucene", low)), "mem_nind_own": fmt(own("nind")),
+                  "mem_lucene_own": fmt(own("lucene"))}
+
+
 PAGE = """# Benchmarks
 
 How nind compares with other indexers when it is used as an index plus BM25 top-k search:
 **Lucene** (through Anserini), **tantivy** and **bm25s**, on the same tokens, the same BM25
 parameters (k1 = 1.2, b = 0.75) and the same machine, from 3,600 documents to **138 million** passages.
-nind {version}, measured on a 48-thread server from 2026-11-05 to {date}. The laptop results this page
+nind {version}{code_of}, measured on a 48-thread server from 2026-11-05 to {date}. The laptop results this page
 showed before are kept at the end.
 
 ```{{admonition}} In short
@@ -303,6 +372,10 @@ showed before are kept at the end.
   against {v2f_lucene} ms for Lucene; {v2f_8s8t} ms with 8 segments and 8 threads.
 - **Throughput.** Many queries at once on one `NindEngine` (one thread each): {qps_v1_12} queries/s at
   8.8M on 12 cores, {qps_v1_24} on 24; {qps_v2_24} at 138M on 24.
+- **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 stays at
+  {mem_nind_1} ms (it reads about 1 MB per query); Lucene's goes from {mem_lucene_all} to {mem_lucene_1} ms.
+  But nind holds {mem_nind_own} GB of its own (document names and lengths, read whole at open), Lucene
+  {mem_lucene_own} GB.
 - **Indexing.** 138M passages in **{v2_32s_build} s** in 32 segments (Lucene {v2_lucene_build} s,
   tantivy {v2_tantivy_build} s, 8 threads each), **{v2_32s_build48} s** with 48 threads; one index:
   {v2_nind_build} s and {v2_nind_mem} GB of memory. 8.8M passages: {v1_32s_build} s in 32 segments,
@@ -385,6 +458,10 @@ A build in 32 segments runs its shards in parallel: it scales to every hardware 
 tokenize. At 138M with 48 threads: nind in 32 segments {b138_32s} s (peak {b138_32s_mem} GB), Lucene
 {b138_lucene} s, tantivy {b138_tantivy} s (both slower than with 8 threads on one socket).
 
+## Index larger than memory
+
+{memory_section}
+
 ## Smaller corpora (BEIR)
 
 Every query of each dataset; stopwords removed.
@@ -460,6 +537,8 @@ def main():
     parser.add_argument("--docs", default="docs")
     parser.add_argument("--date", required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--memory", default=None, help="memory-budget.jsonl: searches under a page-cache budget")
+    parser.add_argument("--code-of", default=None, help="a later version with the same code as --version")
     parser.add_argument("--laptop-date", required=True)
     parser.add_argument("--laptop-version", default="3.2.0")
     parser.add_argument("--laptop-previous-date", required=True,
@@ -517,6 +596,7 @@ def main():
         return "\n".join(lines)
 
     tables, per_query, concurrency, builds = thread_tables(args.threads)
+    memory_section, memory_values = memory(args.memory)
 
     def qps(index, threads):
         r = concurrency.get(index, {}).get(threads)
@@ -535,7 +615,8 @@ def main():
         return "%.3f" % value if value is not None else "–"
 
     page = PAGE.format(
-        version=args.version, date=args.date, laptop_version=args.laptop_version, laptop_date=args.laptop_date,
+        version=args.version, date=args.date, code_of=" (the same code as %s)" % args.code_of if args.code_of else "",
+        memory_section=memory_section, **memory_values, laptop_version=args.laptop_version, laptop_date=args.laptop_date,
         laptop_previous_date=args.laptop_previous_date,
         v2_nind=get("v2-stop", "nind", "k10_p50"), v2_lucene=get("v2-stop", "lucene", "k10_p50"),
         v2_tantivy=get("v2-stop", "tantivy", "k10_p50"), v2_8s8t=get("v2-stop", "nind-8s-8t", "k10_p50"),

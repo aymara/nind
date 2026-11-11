@@ -17,7 +17,12 @@ The runs of `bench/README.md` section 7 (the indexes and corpora aren't kept:
 - `concurrency.jsonl`: stage 3, `concurrency.py`, with the index and the CPU pinning.
 - `build-threads.jsonl`: stage 3, builds with 1–48 threads (`run`: `s3-build-<threads>`,
   `s3-build-138M-48` for the 138M builds).
+- `memory-budget.jsonl`: stage 5, searches under a page-cache budget (`budget_gb`, null:
+  no limit; `cgroup`: the cap, peak, peak anonymous memory and memory events).
+  `memory-io.txt`: nind's disk reads per query (`scripts/search_io.py`).
 - `environment.txt`: machine, versions, commit; `harness-at-stage1.diff`: the harness's
   changes over that commit when the runs started (`--repeats`, k=100, page cache,
   segment systems).
-- `scripts/`: the stage scripts (`common.sh` sets the paths and the pinning).
+- `scripts/`: the stage scripts (`common.sh` sets the paths and the pinning). Stage 5:
+  `stage5.sh` ran the uncapped round, `stage5b.sh` the capped ones, with caps from the
+  uncapped round (the short calibration runs of `stage5.sh` underestimated nind's memory).

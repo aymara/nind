@@ -277,8 +277,8 @@ measured again), with its charts (SVG, light and dark; needs matplotlib):
 R=bench/retrieval/results
 python bench/retrieval/site.py --docs docs --date YYYY-MM-DD --version X.Y.Z \
     --server $R/2026-11-10-server/v1-report.csv $R/2026-11-10-server/v2-report.csv \
-    --threads $R/2026-11-10-server \
-    --laptop $R/2026-11-04/report.csv $R/2026-11-05/report.csv \
+    --threads $R/2026-11-10-server --memory $R/2026-11-10-server/memory-budget.jsonl \
+    [--code-of LATER.VERSION] --laptop $R/2026-11-04/report.csv $R/2026-11-05/report.csv \
     --laptop-date 2026-11-05 --laptop-previous-date 2026-11-04
 ```
 
@@ -598,7 +598,8 @@ checked identical to `prepare.py`'s), prefixes of 1M to 64M by `subset.py`.
 three times (their spread: a few percent). 2: v2 prefixes 1M–138M (a whole pass
 of warm-up, then one pass; two at 138M), the 16M and 138M updates, stopwords
 kept at 16M and 138M, `verify_index` on every segment of the one-index and 8-segment builds at 138M. 3: threads per query,
-throughput, build threads. About 14 h, 24 h and 9 h.
+throughput, build threads. 5: an index larger than memory (below). About 14 h, 24 h, 9 h
+and 6 h.
 
 ### Findings
 
@@ -638,6 +639,17 @@ throughput, build threads. About 14 h, 24 h and 9 h.
   runs at 2.12 or 2.67 ms (8.8M, one thread; most runs 2.67). Transparent huge pages,
   the memory sampler and document names were ruled out; passes inside one process
   agree within 1%. Stage 3's thread runs show 2.10 ms where stage 1 has 2.66.
+- **An index larger than memory (stage 5).** 138M, stopwords removed: each
+  system in a user cgroup (`systemd-run --user -p MemoryMax`, page cache
+  included; `scripts/capped.sh`) of its own peak memory +10% plus a page-cache
+  budget of 8 to 1 GB, the index evicted first (`scripts/evict.py`); 2,000
+  queries after 500. One thread on nind's index stays at ~19.5 ms down to 1 GB:
+  it reads ~1.3 MB per query (`/proc/self/io`, `memory-io.txt`). 8 segments with
+  8 threads go from 3.8 to 19.0 ms. Lucene's top 10 goes from 20.1 to 103 ms,
+  its top 1000 from 89 to 2,022 ms (mapped files; readahead suspected, not
+  checked); tantivy's top 1000 from 163 to 478 ms. But nind's own memory is
+  7.5 GB (Lucene 1.3, tantivy 0.85): at open it reads its names (4.96 GB) and
+  lengths (1.66 GB) files whole.
 
 ## Notes
 

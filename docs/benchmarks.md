@@ -3,7 +3,7 @@
 How nind compares with other indexers when it is used as an index plus BM25 top-k search:
 **Lucene** (through Anserini), **tantivy** and **bm25s**, on the same tokens, the same BM25
 parameters (k1 = 1.2, b = 0.75) and the same machine, from 3,600 documents to **138 million** passages.
-nind 3.2.0, measured on a 48-thread server from 2026-11-05 to 2026-11-10. The laptop results this page
+nind 3.2.0 (the same code as 4.0.1), measured on a 48-thread server from 2026-11-05 to 2026-11-10. The laptop results this page
 showed before are kept at the end.
 
 ```{admonition} In short
@@ -19,6 +19,10 @@ showed before are kept at the end.
   against 36.1 ms for Lucene; 17.2 ms with 8 segments and 8 threads.
 - **Throughput.** Many queries at once on one `NindEngine` (one thread each): 2,204 queries/s at
   8.8M on 12 cores, 3,947 on 24; 392 at 138M on 24.
+- **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 stays at
+  19.8 ms (it reads about 1 MB per query); Lucene's goes from 20.1 to 103 ms.
+  But nind holds 6.98 GB of its own (document names and lengths, read whole at open), Lucene
+  1.23 GB.
 - **Indexing.** 138M passages in **507 s** in 32 segments (Lucene 883 s,
   tantivy 1,042 s, 8 threads each), **230 s** with 48 threads; one index:
   1,426 s and 102 GB of memory. 8.8M passages: 31.0 s in 32 segments,
@@ -200,6 +204,43 @@ A build in 32 segments runs its shards in parallel: it scales to every hardware 
 0.492 GB on 1 thread, 8.53 GB on 48). One index has a single writer, so threads only
 tokenize. At 138M with 48 threads: nind in 32 segments 230 s (peak 106 GB), Lucene
 1,241 s, tantivy 1,543 s (both slower than with 8 threads on one socket).
+
+## Index larger than memory
+
+MS MARCO v2, 138M passages, stopwords removed (indexes of 11 to 15 GB): each system searches in a
+cgroup (`systemd-run --user -p MemoryMax=...`) holding its own memory (the peak of an uncapped run,
++10%) plus a budget for the page cache; the index is evicted from the cache first, so every page
+it reads counts. The first 2,000 queries after a warm-up of 500; median ms.
+
+| system | own memory | no limit | 8 GB | 4 GB | 2 GB | 1 GB |
+|---|---:|---:|---:|---:|---:|---:|
+| nind | 6.98 GB | 23.1 | 19.3 | 19.2 | 19.4 | 19.8 |
+| nind, 8 segments, 8 threads per query | 7.81 GB | 3.82 | 10.6 | 11.9 | 16.4 | 19.0 |
+| Lucene (Anserini) | 1.23 GB | 20.1 | 22.9 | 52.3 | 84.3 | 103 |
+| tantivy | 0.795 GB | 151 | 122 | 127 | 143 | 152 |
+
+Top 1000, median ms:
+
+| system | own memory | no limit | 8 GB | 4 GB | 2 GB | 1 GB |
+|---|---:|---:|---:|---:|---:|---:|
+| nind | 6.98 GB | 57.9 | 45.2 | 58.1 | 46.7 | 48.2 |
+| nind, 8 segments, 8 threads per query | 7.81 GB | 12.6 | 12.9 | 13.3 | 19.2 | 24.7 |
+| Lucene (Anserini) | 1.23 GB | 88.9 | 78.9 | 595 | 1,383 | 2,022 |
+| tantivy | 0.795 GB | 163 | 132 | 157 | 326 | 478 |
+
+- **One thread on nind's index barely reads.** MaxScore reads only the blocks it needs, with
+  positioned reads: about 1.3 MB per query from disk with a 1 GB budget (1.0 MB from a cold cache
+  without one), which the SSDs serve without changing the median. (Its uncapped run is the slower
+  one: separate processes vary, see "How to read these numbers".)
+- **8 segments with 8 threads per query** read more per query (2.3 MB at 1 GB) in a few
+  milliseconds: the disk shows, from 3.82 ms without a limit to 10.6 ms with 8 GB and 19.0 ms with
+  1 GB, about the single thread's time.
+- **Lucene and tantivy map their files** (`mmap`): with less cache, Lucene's top 10 gets
+  5× slower and its top 1000 (which loads each hit's stored id) much more; tantivy's top
+  1000 too. Readahead on mapped files is a likely cause, not investigated.
+- **nind's own memory is the limit**: 6.98 GB before any cache. At open it reads the document
+  names (4.96 GB) and lengths (1.66 GB) files whole; Lucene needs 1.23 GB and
+  tantivy 0.795 GB. Reading them on demand (`mmap`) is in `docs/TODO.md`.
 
 ## Smaller corpora (BEIR)
 
