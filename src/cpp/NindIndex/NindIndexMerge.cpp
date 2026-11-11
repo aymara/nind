@@ -261,14 +261,33 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
         vector<size_t> shardEnds;
         vector<pair<unsigned char, unsigned int> > shardCategories;
         vector<NindTermIndex::CategoryPostings> categories;
+        map<unsigned char, uint64_t> expected;  //a large term's documents per category, in every shard
+        const size_t MERGE_RESERVE_FROM = 1u << 20;
         size_t first = 0;
         while (first < shardTerms.size()) {
             const unsigned int mergedIdent = shardTerms[first].mergedIdent;
             categoriesNb = 0;
+            size_t end = first;
+            while (end < shardTerms.size() && shardTerms[end].mergedIdent == mergedIdent) end++;
+            //a large term: each category's documents in every shard, from their directories, reserved at
+            //once (grown by doubling, they took up to twice their size: 18.3 GB for a term in 350M documents)
+            bool sized = false;
+            expected.clear();
             size_t last = first;
-            for (; last < shardTerms.size() && shardTerms[last].mergedIdent == mergedIdent; last++) {
+            for (; last < end; last++) {
                 if (!shardTermIndexes[shardTerms[last].shard]->getTermPostings(shardTerms[last].shardIdent,
                                                                                shardPostings, shardEnds, shardCategories)) continue;
+                if (!sized && end - last > 1 && shardPostings.size() >= MERGE_RESERVE_FROM) {
+                    sized = true;
+                    for (size_t o = last; o < end; o++) {
+                        NindTermIndex::TermDirectory directory;
+                        if (!shardTermIndexes[shardTerms[o].shard]->getTermDirectory(shardTerms[o].shardIdent, directory)) continue;
+                        for (size_t c = 0; c < directory.categories.size(); c++)
+                            expected[directory.categories[c].cg] += directory.categories[c].docsNb;
+                    }
+                    for (size_t k = 0; k < categoriesNb; k++)
+                        byCg[k].documents.reserve(byCg[k].documents.size() + expected[byCg[k].cg]);
+                }
                 for (size_t c = 0, begin = 0; c < shardCategories.size(); begin = shardEnds[c], c++) {
                     const unsigned char cg = shardCategories[c].first;
                     size_t k = 0;
@@ -282,6 +301,7 @@ NindIndexMerge::Stats NindIndexMerge::doMerge(const string &targetName)
                         byCg[k].frequency = 0;
                         byCg[k].documents.clear();
                         byCg[k].sorted = true;
+                        if (sized) byCg[k].documents.reserve(expected[cg]);
                     }
                     MergedCategory &category = byCg[k];
                     size_t end = shardEnds[c];

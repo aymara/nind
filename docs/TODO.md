@@ -67,9 +67,13 @@ of 3.0.0 (format v2).
     during `verify_index` (it then read such a term twice as lists, possibly a
     contributor; it reads flat now), so reading it back is unverified:
     `bench/worst_case_term.py` to rerun (the server has the room).
-  - **Merge memory.** Postings vectors grow by doubling (18.3 GB there, ~12
-    possible with a reserve from the shards' directories); the merge is one
-    thread, and needs the shards and the merged index on disk together.
+  - **Merge memory.** Postings vectors grew by doubling (18.3 GB there, ~12
+    possible with a reserve from the shards' directories). Done: a term of a
+    million postings or more in a shard gets its categories reserved from every
+    shard's directory (checked: 1.5M documents in 3 shards, the same index as a
+    direct build, `verify_index` clean); to measure on the worst-case term. The
+    merge is still one thread, and needs the shards and the merged index on disk
+    together.
   - **Local index readers.** Opening an index no longer reads a header per
     document (0.4 s at 8.8M, was 7.3 s), but the first local index lookup does,
     once (~4 min at 300M, extrapolated): store the id map in the file?
