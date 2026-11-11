@@ -128,7 +128,7 @@ endif ()
 
 ########### setting project verion number ###############
 
-set(NIND_VERSION "4.0.2")
+set(NIND_VERSION "4.1.0")
 
 string(REGEX REPLACE "^([0-9]+)\\.[0-9]+\\.[0-9]+$" "\\1" NIND_VERSION_MAJOR "${NIND_VERSION}")
 string(REGEX REPLACE "^[0-9]+\\.([0-9]+)\\.[0-9]+$" "\\1" NIND_VERSION_MINOR "${NIND_VERSION}")
