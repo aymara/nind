@@ -86,6 +86,14 @@ with it raises `ValueError`); a replaced document keeps its name unless a new
 one is given. `update.doc_id(name)` finds a document by name, changes of the
 update included.
 
+Many documents in memory go faster as one batch, tokenized natively with
+nothing done per token in Python (`add_jsonl(path)` does the same from a file):
+
+```python
+with indexer.update() as update:
+    update.add_texts(texts, doc_ids=ids)      # or names=[...]; as add_text for each
+```
+
 `add_file(path)`, `add_files(paths)` and `remove_documents(ids)` on the
 indexer are one-update shortcuts. An update costs what it changes, whatever
 the size of the index (about 0.25 s to publish, with its `fsync`s, plus the

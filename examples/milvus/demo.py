@@ -1,13 +1,12 @@
-"""Proof of concept: nind as the BM25 index of a Milvus collection.
+"""nind in place of Milvus's built-in BM25: the same full text search code, run with
+Milvus's BM25 (``MilvusClient``) and with nind's (``NindMilvusClient``), results compared.
 
-    uv run python examples/milvus/demo.py                      # embedded Milvus 2.3 server (pip package "milvus")
-    uv run python examples/milvus/demo.py --uri ./demo.db      # Milvus Lite
-    uv run python examples/milvus/demo.py --uri http://localhost:19530   # a running Milvus server
+    examples/milvus/milvus-standalone.sh start            # Milvus 3.0 in Docker
+    uv run python examples/milvus/demo.py                 # http://127.0.0.1:19530
+    uv run python examples/milvus/demo.py --uri ./demo.db # Milvus Lite
 
-Builds a small collection (text, category, vector), indexes its text with nind, then
-compares BM25, vector and hybrid (RRF) searches, filters, an upsert and a delete, and
-checks the results against nind alone. The vectors come from a toy embedding (hashed
-character trigrams): replace ``embed`` with a real model for real use.
+The dense vectors of the hybrid search come from a toy embedding (hashed character
+trigrams): nothing to download.
 """
 
 import argparse
@@ -16,17 +15,14 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 
 import numpy as np
-from pymilvus import DataType, MilvusClient, MilvusException
+from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusClient, RRFRanker, WeightedRanker
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from nind_milvus import NindBM25Collection  # noqa: E402
+from nind_milvus import NindMilvusClient  # noqa: E402
 
-DIM = 256
-COLLECTION = "nind_bm25_demo"
-
+DIM = 64
 CORPUS = [
     ("errors", "ERR_4012: the lexicon file is locked by another writer process"),
     ("errors", "ERR_5003 raised when a posting list block descriptor is corrupt"),
@@ -43,8 +39,9 @@ CORPUS = [
     ("ops", "Restart the vector database after upgrading its configuration file"),
     ("ops", "Back up the collection, then restore it on another cluster"),
     ("ops", "Monitor memory usage of the query nodes during peak traffic"),
-    ("ops", "The garbage collector removes old generations nobody reads anymore"),
+    ("ops", "The garbage collector removes old generations of the index nobody reads anymore"),
 ]
+QUERIES = ["err_4012 locked lexicon", "documents index", "reciprocal rank fusion", "the index writer"]
 
 
 def embed(texts):
@@ -54,148 +51,149 @@ def embed(texts):
         for word in text.lower().split():
             word = "^%s$" % word.strip(".,:;()")
             for i in range(len(word) - 2):
-                vectors[row, int.from_bytes(hashlib.blake2b(word[i:i + 3].encode(), digest_size=4).digest(), "little") % DIM] += 1
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    return vectors / np.where(norms == 0, 1, norms)
+                digest = hashlib.blake2b(word[i:i + 3].encode(), digest_size=4).digest()
+                vectors[row, int.from_bytes(digest, "little") % DIM] += 1
+    return vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-9)
 
 
-def connect(uri, attempts=30):
-    # the embedded server answers its health check before its gRPC proxy accepts connections
-    for attempt in range(attempts):
-        try:
-            return MilvusClient(uri=uri, timeout=10)
-        except MilvusException:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(2)
+# -- Milvus full text search, as its documentation writes it: nothing nind-specific below --
 
-
-def create_collection(client):
-    if client.has_collection(COLLECTION):
-        client.drop_collection(COLLECTION)
-    schema = client.create_schema(auto_id=False, enable_dynamic_field=True)
-    schema.add_field("id", DataType.INT64, is_primary=True)
-    schema.add_field("text", DataType.VARCHAR, max_length=8192)
+def create(client, name, pk_type=DataType.INT64, auto_id=False):
+    if client.has_collection(name):
+        client.drop_collection(name)
+    schema = client.create_schema(auto_id=auto_id)
+    if pk_type == DataType.VARCHAR:
+        schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=64)
+    else:
+        schema.add_field("id", DataType.INT64, is_primary=True)
+    schema.add_field("text", DataType.VARCHAR, max_length=8192, enable_analyzer=True)
     schema.add_field("category", DataType.VARCHAR, max_length=64)
-    schema.add_field("vector", DataType.FLOAT_VECTOR, dim=DIM)
+    schema.add_field("sparse", DataType.SPARSE_FLOAT_VECTOR)
+    schema.add_field("dense", DataType.FLOAT_VECTOR, dim=DIM)
+    schema.add_function(Function(name="text_bm25", function_type=FunctionType.BM25,
+                                 input_field_names=["text"], output_field_names=["sparse"]))
     index_params = client.prepare_index_params()
-    index_params.add_index(field_name="vector", index_type="FLAT", metric_type="COSINE")
-    client.create_collection(COLLECTION, schema=schema, index_params=index_params, consistency_level="Strong")
+    index_params.add_index(field_name="sparse", index_type="SPARSE_INVERTED_INDEX", metric_type="BM25",
+                           params={"inverted_index_algo": "DAAT_MAXSCORE", "bm25_k1": 1.2, "bm25_b": 0.75})
+    index_params.add_index(field_name="dense", index_type="FLAT", metric_type="COSINE")
+    client.create_collection(name, schema=schema, index_params=index_params, consistency_level="Strong")
+
+
+def rows(start=0):
+    vectors = embed([text for _, text in CORPUS])
+    return [{"id": start + i, "text": text, "category": category, "dense": vectors[i].tolist()}
+            for i, (category, text) in enumerate(CORPUS)]
+
+
+def bm25(client, name, query, limit=3, **kwargs):
+    return client.search(name, data=[query], anns_field="sparse", limit=limit,
+                         output_fields=["text", "category"], **kwargs)[0]
+
+
+def hybrid(client, name, query, ranker, limit=3):
+    reqs = [AnnSearchRequest(data=[query], anns_field="sparse", param={}, limit=10),
+            AnnSearchRequest(data=[embed([query])[0].tolist()], anns_field="dense", param={}, limit=10)]
+    return client.hybrid_search(name, reqs, ranker=ranker, limit=limit, output_fields=["text"])[0]
+
+
+def scenario(client, name):
+    """Every step's results, for both clients."""
+    out = {}
+    create(client, name)
+    client.insert(name, rows(100))
+    for query in QUERIES:
+        out["search " + query] = bm25(client, name, query, 5)
+    out["filter"] = bm25(client, name, "documents index", 3, filter='category == "search"')
+    out["offset"] = client.search(name, data=["documents index"], anns_field="sparse", limit=2,
+                                  search_params={"offset": 1})[0]
+    out["hybrid rrf"] = hybrid(client, name, "rank fusion", RRFRanker(60))
+    out["hybrid weighted"] = hybrid(client, name, "rank fusion", WeightedRanker(0.6, 0.4))
+    new_text = "ERR_7777: quota exceeded while writing the vector index"
+    client.upsert(name, [{"id": 100, "text": new_text, "category": "errors", "dense": embed([new_text])[0].tolist()}])
+    out["after upsert, old text"] = bm25(client, name, "4012 lexicon locked")
+    out["after upsert, new text"] = bm25(client, name, "quota exceeded")
+    client.delete(name, ids=[111])
+    client.delete(name, filter='category == "ops"')
+    out["after deletes"] = bm25(client, name, "reciprocal rank fusion vector database", 5)
+    return out
+
+
+def compare(builtin, replaced, tolerance=1e-3):
+    """"same", "same rows" (other scores) or "different": rows at each rank, scores to ``tolerance``
+    (relative); rows of equal scores may come in any order."""
+    if [hit.id for hit in builtin] == [hit.id for hit in replaced]:
+        same_scores = all(abs(a.distance - b.distance) <= tolerance * abs(a.distance)
+                          for a, b in zip(builtin, replaced))
+        return "same" if same_scores else "same rows"
+    if len(builtin) == len(replaced) and all(abs(a.distance - b.distance) <= tolerance * abs(a.distance)
+                                             for a, b in zip(builtin, replaced)):
+        return "same"       # other rows at equal scores: ties
+    return "different"
 
 
 def show(title, hits):
-    print("\n== %s" % title)
+    print("  %s" % title)
     for hit in hits:
-        extra = ""
-        if "bm25_rank" in hit:
-            extra = "  [bm25 #%s, vector #%s]" % (hit["bm25_rank"] or "-", hit["vector_rank"] or "-")
-        print("  %4d  %.4f  %-9s %s%s" % (hit["id"], hit["score"], hit.get("category", ""), hit.get("text", "")[:70], extra))
+        print("    %5s  %.4f  %s" % (hit.id, hit.distance, (hit.get("text") or "")[:60]))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--uri", help="Milvus URI (default: start the embedded Milvus server)")
-    parser.add_argument("--work-dir", help="directory of the nind index and the embedded server's data "
-                                           "(default: a temporary one, removed at the end)")
-    parser.add_argument("--port", type=int, default=19530, help="embedded server's port")
+    parser.add_argument("--uri", default="http://127.0.0.1:19530", help="Milvus URI, or a Milvus Lite file")
     args = parser.parse_args()
-
-    work_dir = args.work_dir or tempfile.mkdtemp(prefix="nind-milvus-")
-    server = None
+    nind_dir = tempfile.mkdtemp(prefix="nind-milvus-")
     try:
-        if args.uri is None:
-            from milvus import MilvusServer
-            server = MilvusServer()
-            server.set_base_dir(os.path.join(work_dir, "milvus"))
-            server.listen_port = args.port
-            print("starting the embedded Milvus server...")
-            server.start()
-            uri = "http://127.0.0.1:%d" % args.port
+        milvus = MilvusClient(uri=args.uri)
+        nind = NindMilvusClient(uri=args.uri, nind_dir=nind_dir)
+        builtin, replaced = scenario(milvus, "fts_builtin"), scenario(nind, "fts_nind")
+        verdicts = {step: compare(builtin[step], replaced[step]) for step in builtin}
+        labels = {"same": "same rows and scores", "same rows": "same rows, other scores",
+                  "different": "DIFFERENT rows"}
+        for step in builtin:
+            print("\n== %s: %s" % (step, labels[verdicts[step]]))
+            show("Milvus BM25", builtin[step])
+            show("nind", replaced[step])
+        print("\nsame rows and scores: %d/%d steps; same rows: %d/%d"
+              % (sum(v == "same" for v in verdicts.values()), len(verdicts),
+                 sum(v != "different" for v in verdicts.values()), len(verdicts)))
+        print("(after an upsert or a delete, Milvus's BM25 statistics still count the replaced and deleted\n"
+              " rows; nind's count the live rows only, as if the index were rebuilt)")
+
+        # checks of the replacement itself
+        assert [hit.id for hit in replaced["after upsert, new text"]] == [100]
+        assert all(hit.id != 100 for hit in replaced["after upsert, old text"])
+        assert all(hit.id != 111 and hit["category"] != "ops" for hit in replaced["after deletes"])
+        assert all(hit["category"] == "search" for hit in replaced["filter"])
+        assert nind.describe_collection("fts_nind")["functions"] == []     # Milvus has no BM25 function
+        if args.uri.startswith(("http:", "https:", "tcp:", "grpc:")):
+            assert all(verdict != "different" for verdict in verdicts.values()), verdicts
+            assert all(verdicts[step] == "same" for step in builtin if not step.startswith("after")), verdicts
         else:
-            uri = args.uri
-        client = connect(uri)
-        try:
-            version = client.get_server_version()
-        except Exception:           # Milvus Lite doesn't implement it
-            version = "(Lite)"
-        print("Milvus", version, "at", uri)
-        create_collection(client)
+            print("(Milvus Lite's BM25 isn't the server's: negated scores, err_4012 kept whole... nind follows "
+                  "the server's)")
 
-        nind_dir = os.path.join(work_dir, "nind")
-        shutil.rmtree(nind_dir, ignore_errors=True)
-        collection = NindBM25Collection(client, COLLECTION, nind_dir, tokenizer={"lowercase": True})
+        # repair: the nind index rebuilt from the collection's rows gives the same results
+        before = {query: [(hit.id, hit.distance) for hit in bm25(nind, "fts_nind", query, 5)] for query in QUERIES}
+        print("\nrebuild_bm25: %d rows" % nind.rebuild_bm25("fts_nind"))
+        for query in QUERIES:
+            after = [(hit.id, hit.distance) for hit in bm25(nind, "fts_nind", query, 5)]
+            assert [pk for pk, _ in after] == [pk for pk, _ in before[query]]
 
-        texts = [text for _, text in CORPUS]
-        rows = [{"id": 100 + i, "text": text, "category": category, "vector": vector.tolist()}
-                for i, ((category, text), vector) in enumerate(zip(CORPUS, embed(texts)))]
-        with collection.batch():            # one nind update for the whole insert
-            collection.insert(rows)
-        print("inserted %d rows; nind: %d documents, average length %.1f"
-              % (len(rows), collection.engine.total_docs, collection.engine.avg_doc_len))
-
-        fields = ["text", "category"]
-        queries = ["ERR_4012 locked lexicon", "indexer writes documents", "reciprocal rank fusion"]
-        for query in queries:
-            show("BM25 (nind): %r" % query, collection.bm25_search(query, 3, output_fields=fields))
-            show("vector (Milvus): %r" % query, collection.vector_search(embed([query])[0], 3, output_fields=fields))
-            show("hybrid RRF: %r" % query, collection.hybrid_search(query, embed([query])[0], 3, output_fields=fields))
-
-        # BM25 ranking restricted by a Milvus filter
-        hits = collection.bm25_search("documents index", 3, filter='category == "search"', output_fields=fields)
-        show('BM25 "documents index", filter category == "search"', hits)
-        assert hits and all(hit["category"] == "search" for hit in hits)
-
-        # self-check: BM25 through the collection = nind alone
-        engine = collection.engine
-        for query in queries:
-            assert [hit["id"] for hit in collection.bm25_search(query, 5)] == \
-                   [doc_id for doc_id, _ in engine.search(query, top_k=5)]
-
-        # upsert: row 100 gets a new text, in both
-        new_text = "ERR_7777: quota exceeded while writing the vector index"
-        collection.upsert([{"id": 100, "text": new_text, "category": "errors", "vector": embed([new_text])[0].tolist()}])
-        # (the tokenizer splits ERR_4012 into err 4012: the other errors still match "err")
-        assert collection.bm25_search("4012", 5) == []
-        assert [hit["id"] for hit in collection.bm25_search("ERR_7777 quota", 1)] == [100]
-        show('after upsert of 100: BM25 "quota exceeded"', collection.bm25_search("quota exceeded", 3, output_fields=fields))
-
-        # delete: row 111 (reciprocal rank fusion) leaves both
-        collection.delete([111])
-        assert 111 not in [hit["id"] for hit in collection.bm25_search("reciprocal rank fusion", 5)]
-        assert not client.query(COLLECTION, filter="id == 111", output_fields=["id"])
-        show('after delete of 111: hybrid "reciprocal rank fusion"',
-             collection.hybrid_search("reciprocal rank fusion", embed(["reciprocal rank fusion"])[0], 3, output_fields=fields))
-
-        # attach nind to an existing collection: rebuild the index from Milvus's rows
-        rebuilt = NindBM25Collection(client, COLLECTION, os.path.join(work_dir, "nind-rebuilt"), tokenizer={"lowercase": True})
-        count = rebuilt.sync_from_milvus()
-        assert count == len(CORPUS) - 1
-        for query in queries + ["quota exceeded"]:
-            got, expected = rebuilt.bm25_search(query, 5), collection.bm25_search(query, 5)
-            assert [hit["id"] for hit in got] == [hit["id"] for hit in expected]
-            assert all(abs(a["score"] - b["score"]) <= 1e-9 * abs(b["score"]) for a, b in zip(got, expected))
-        print("\nsync_from_milvus: %d rows reindexed, same BM25 results" % count)
-
-        # bulk load of a JSON Lines corpus: nind gives the ids, Milvus uses them as primary keys
-        import json
-        path = os.path.join(work_dir, "extra.jsonl")
-        records = [{"id": "doc-a", "contents": "Kubernetes operator deploying the vector database"},
-                   {"id": "doc-b", "contents": "Snapshot isolation for concurrent index readers"},
-                   {"id": "doc-a", "contents": "Helm chart deploying the vector database on Kubernetes"}]
-        with open(path, "w", encoding="utf-8") as out:
-            out.writelines(json.dumps(record) + "\n" for record in records)
-        doc_ids = collection.load_jsonl(path, embed, row_fields=lambda record: {"category": "loaded"})
-        print("load_jsonl: ids", doc_ids)
-        assert doc_ids[0] == doc_ids[2] and doc_ids[0] > 115    # doc-a twice: the second replaces the first
-        hits = collection.bm25_search("helm kubernetes", 2, output_fields=["text", "name"])
-        show('after load_jsonl: BM25 "helm kubernetes"', hits)
-        assert hits[0]["id"] == doc_ids[0] and hits[0]["name"] == "doc-a" and hits[0]["text"].startswith("Helm")
-        print("\nall checks passed")
+        # VARCHAR primary keys, and auto_id
+        create(nind, "fts_varchar", DataType.VARCHAR)
+        nind.insert("fts_varchar", [dict(row, id="doc-%d" % row["id"]) for row in rows()])
+        assert [hit.id for hit in bm25(nind, "fts_varchar", "garbage collector", 1)] == ["doc-15"]
+        nind.delete("fts_varchar", ids=["doc-15"])
+        assert all(hit.id != "doc-15" for hit in bm25(nind, "fts_varchar", "garbage collector"))
+        create(nind, "fts_auto", auto_id=True)
+        ids = nind.insert("fts_auto", [{k: v for k, v in row.items() if k != "id"} for row in rows()])["ids"]
+        assert [hit.id for hit in bm25(nind, "fts_auto", "garbage collector", 1)] == [ids[15]]
+        for name in ("fts_builtin", "fts_nind", "fts_varchar", "fts_auto"):
+            (nind if name != "fts_builtin" else milvus).drop_collection(name)
+        assert os.listdir(os.path.join(nind_dir, "default")) == []
+        print("all checks passed")
     finally:
-        if server is not None:
-            server.stop()
-        if args.work_dir is None:
-            shutil.rmtree(work_dir, ignore_errors=True)
+        shutil.rmtree(nind_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

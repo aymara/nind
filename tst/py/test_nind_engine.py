@@ -1209,6 +1209,51 @@ def test_index_files_with_doc_names(tmp_path, kwargs):
         NindIndexer(str(tmp_path / "unnamed"), prefix="corpus").index_files(["x"], doc_names=["a", "b"])
 
 
+def test_add_texts_is_add_text_in_a_batch(tmp_path):
+    # the same changes, one text at a time and in batches: the same index
+    steps = [
+        [("cat cat dog", None, "a"), ("dog fish", None, "b"), ("bird", 10, None), ("eel", None, None)],
+        [("fish fish fish", 0, None),       # replaced: keeps its name a
+         ("whale cat", None, "b"),          # replaces the document named b
+         ("", 10, None),                    # no token: removes 10
+         ("Ünïcode HTTP_Client", 20, "c"),
+         ("cow", 21, None), ("cow cow", 21, "d")],   # twice in the batch: the last one
+    ]
+    engines = []
+    for batched in (False, True):
+        index_dir = tmp_path / ("batched" if batched else "one-by-one")
+        index_dir.mkdir()
+        indexer = NindIndexer(str(index_dir), prefix="corpus")
+        returned = []
+        for step in steps:
+            with indexer.update() as update:
+                if batched:
+                    returned.append(update.add_texts([text for text, _, _ in step], [doc_id for _, doc_id, _ in step],
+                                                     [name for _, _, name in step]))
+                else:
+                    returned.append([update.add_text(text, doc_id=doc_id, name=name) for text, doc_id, name in step])
+                if len(returned) == 2:
+                    update.add_text("eel eel", doc_id=11)    # a later change of a document: after the batch
+        engines.append((NindEngine(str(index_dir)), returned))
+    (expected, expected_ids), (engine, ids) = engines
+    assert ids == expected_ids == [[0, 1, 10, 11], [0, 1, 10, 20, 21, 21]]
+    assert engine.total_docs == expected.total_docs == 5
+    for term in ("cat", "dog", "fish", "bird", "eel", "whale", "cow", "HTTP", "Client", "Ünïcode"):
+        assert engine.get_df(term) == expected.get_df(term), term
+    for doc_id in (0, 1, 10, 11, 20, 21):
+        assert engine.get_doc_len(doc_id) == expected.get_doc_len(doc_id)
+        assert engine.doc_name(doc_id) == expected.doc_name(doc_id)
+    assert [engine.doc_name(i) for i in (0, 1, 20, 21)] == ["a", "b", "c", "d"]
+    assert engine.get_tf("eel", 11) == 2 and engine.get_tf("cow", 21) == 2
+    for query in ("cat fish", "eel cow whale", "HTTP"):
+        assert engine.search(query) == pytest.approx(expected.search(query))
+    with NindIndexer(str(tmp_path / "batched"), prefix="corpus").update() as update:
+        with pytest.raises(ValueError):
+            update.add_texts(["x"], doc_ids=[0], names=["b"])                 # b is another document
+        with pytest.raises(ValueError):
+            update.add_texts(["x", "y"], doc_ids=[0])
+
+
 def test_updates_keep_document_names(tmp_path):
     path = write_jsonl(tmp_path / "corpus.jsonl",
                        [{"id": "a", "contents": "cat"}, {"id": "b", "contents": "dog"}, {"id": "c", "contents": "eel"}])

@@ -874,6 +874,47 @@ class IndexUpdate:
         self._check_active()
         return self.add_tokens(self._tokenizing_indexer._default_tokenize(text), doc_id, name)
 
+    def add_texts(self, texts, doc_ids=None, names=None):
+        """Index several texts, as :meth:`add_text` each, tokenized natively in one batch:
+        nothing is done per token in Python (the way to add many documents from memory;
+        :meth:`add_jsonl` from a file).
+
+        :param doc_ids: the documents' identifiers (``None``, or ``None`` items: as
+            :meth:`add_text`'s default).
+        :param names: the documents' names (``None``, or ``None`` items: a replaced
+            document keeps its name).
+        :return: the documents' identifiers, in order.
+        """
+        self._check_active()
+        texts = list(texts)
+        doc_ids = [None] * len(texts) if doc_ids is None else list(doc_ids)
+        names = [None] * len(texts) if names is None else list(names)
+        if not len(doc_ids) == len(names) == len(texts):
+            raise ValueError("texts, doc_ids and names must have the same length")
+        chunk = self._tokenizing_indexer._tokenize_texts(texts)
+        ids, batch_names = array('Q'), []
+        for doc_id, name in zip(doc_ids, names):
+            if name is not None:
+                name = name if isinstance(name, str) else str(name)
+                owner = self._owner(name)
+                if doc_id is None:
+                    doc_id = owner
+                elif owner is not None and owner != _check_doc_id(doc_id):
+                    raise ValueError("another document (%d) is named %r" % (owner, name))
+            doc_id = self._next_id if doc_id is None else _check_doc_id(doc_id)
+            self._next_id = max(self._next_id, doc_id + 1)
+            self._pending[doc_id] = _IN_BATCH
+            if name is not None:
+                self._set_name(doc_id, name)
+            elif doc_id in self._names:
+                name = self._names[doc_id]
+            elif self._max_published is not None and doc_id <= self._max_published:
+                name = self._before().name(doc_id)     # a replaced document keeps its name
+            ids.append(doc_id)
+            batch_names.append(name or "")
+        self._batches.append((ids, chunk, batch_names))
+        return list(ids)
+
     def add_tokens(self, tokens, doc_id=None, name=None):
         """Index an already tokenized document; see :meth:`add_file`.
 
