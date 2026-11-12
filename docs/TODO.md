@@ -128,7 +128,7 @@ of 3.0.0 (format v2).
       fewest that fit, before more shards; the samples count the postings
       (each document's distinct terms). Model refit on shards built alone
       (7M, 14M: within 2%): 4.5 bytes per token, 5 per posting / passes, 35
-      per document, 100 per term, 300 MB per process.
+      per document, 100 per term, 300 MB per process (refit below).
     - [x] **The plan's margin.** Built in a pool, a worker's later shards start
       from what its earlier ones left and equal shards peak together: 23 shards
       planned for 14.2 GiB peaked at 14.0 to 17.8 GiB from run to run (largest
@@ -137,9 +137,20 @@ of 3.0.0 (format v2).
       parse 64 MB pieces (1/32 of the file each was 5 GiB at 138M). 138M, 8
       workers: 16 GiB -> 29 segments, 11.5-12.2 GiB, 268 s; 8 GiB -> 83
       segments, 5.8-6.3 GiB; 44 GiB -> 2 segments, 31.5 GiB, 992 s (a direct
-      build needs ~44: 31 GiB and its workers, in 75%). Why later shards cost
-      more (fragmentation? `max_tasks_per_child` needs spawn) is open: the
-      margin could shrink with it.
+      build needs ~44: 31 GiB and its workers, in 75%).
+    - [x] **Why later shards cost more**: glibc's mmap threshold, raised to the
+      size of each mmapped block freed (up to 32 MiB), so that after a first
+      build a worker's buffers came from its heap, fragmented. The same 4.77M
+      passages again and again in one worker: 1.45 GiB, then ~2.0 each time;
+      with the threshold fixed at its default (`mallopt` in the pool workers'
+      initializer, `_fix_mmap_threshold`), 1.27-1.30 each, as fast. Model refit
+      on shards of 1M to 9.5M built in a worker (0 to 6% over, 1M: 14%): 4.0
+      bytes per token, 250 MiB per process; margin back to 90%. 138M, 8
+      workers: 16 GiB -> 20 segments (29), 12.7-13.0 GiB, 273 s; 8 GiB -> 51
+      (83), 6.4-6.5 GiB, 246-254 s; largest worker 1.8 GiB (2.55).
+      A direct build fixes it in the caller's process too, for good
+      (`NindIndexer.FIX_MMAP_THRESHOLD`, default True): 4.77M passages 2.13 ->
+      1.51 GiB, as fast (model 1.79).
     Left:
     - **Compressed tokens.** Term ids in variable-length bytes: ~2 of the 4
       bytes per token (~9 GiB of a direct 138M build), now the largest part of
@@ -172,8 +183,9 @@ of 3.0.0 (format v2).
       merged through a heap; 138M: 0.01 GiB, 13.9 s instead of 19-27, nothing
       written.
     - **The model is fitted on MS MARCO v2** (shards of 1M to 14M passages). Check it on another
-      kind of corpus (long documents, code); `merge=True`'s memory isn't in the
-      budget; `index_files` has no `memory_gb` yet.
+      kind of corpus (long documents, code: `index_files(memory_gb=...)` now
+      plans too, from runs of consecutive files scaled by their sizes);
+      `merge=True`'s memory isn't in the budget.
     - **The benchmarks page** shows the builds and the search memory before
       these changes: rerun the build phases (direct and segments, 8.8M and
       138M) and stage 5 (memory budgets: nind's 7 GB of its own is 0.9 now).

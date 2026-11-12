@@ -808,13 +808,13 @@ def test_index_jsonl_memory_budget_builds_segments(tmp_path, monkeypatch):
     (tmp_path / "budget").mkdir()
     direct_ids = NindIndexer(str(tmp_path / "direct")).index_jsonl(path, workers=1)
     # 1 MiB per token: 10,600 tokens need 10.35 GiB; 2 builds at a time beside this process, in 2
-    # GiB, 0.29 each for its process: 2 * 10.35 / (2 - 3 * 0.29) -> 19 segments
+    # GiB, 0.24 each for its process: 2 * 10.35 / (2 - 3 * 0.24) -> 17 segments
     monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TOKEN", 1 << 20)
     monkeypatch.setattr(NindIndexer, "MEMORY_GB_MARGIN", 1)
     ids = NindIndexer(str(tmp_path / "budget")).index_jsonl(path, workers=2, memory_gb=2)
     assert ids == direct_ids
     direct, budget = NindEngine(str(tmp_path / "direct")), NindEngine(str(tmp_path / "budget"))
-    assert len(budget._snapshot.index.segments()) == 19
+    assert len(budget._snapshot.index.segments()) == 17
     for query in ["taga", "common pad", "tagj pad"]:
         direct_results, budget_results = direct.search(query, doc_names=True), budget.search(query, doc_names=True)
         assert [name for name, _ in budget_results] == [name for name, _ in direct_results]
@@ -843,6 +843,48 @@ def test_index_jsonl_memory_budget_builds_segments(tmp_path, monkeypatch):
     # (but the lexicon's identification, its time, in the last 8 bytes)
     passes, direct = term_index(str(tmp_path / "passes")), term_index(str(tmp_path / "direct"))
     assert len(passes) == len(direct) and passes[:-8] == direct[:-8]
+
+
+def test_files_sample_counts_or_estimates(tmp_path, monkeypatch):
+    # 40 files of 10 tokens of 1 term (50 bytes each); 1 file of 4 tokens, 3 postings
+    paths = write_texts(tmp_path / "files", ["word " * 10] * 40 + ["a b a c"])
+    indexer = NindIndexer(str(tmp_path))
+    assert indexer._files_sample(paths) == (404, 41, 404, 4, 43)                    # small: counted
+    assert indexer._files_sample(write_texts(tmp_path / "empty", [""] * 3)) == (0, 3, 0, 0, 0)
+    monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_PIECES", 4)
+    monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_BYTES", 120)
+    sample = indexer._files_sample(paths)                       # 4 runs of 3 files
+    assert sample.documents == 41 and sample.sampled_tokens == 120 and sample.sampled_terms == 1
+    # 10 tokens and 1 posting per 50 bytes, over 2,007 bytes
+    assert sample.tokens == pytest.approx(401.4) and sample.postings == pytest.approx(40.14)
+
+
+def test_index_files_memory_budget_builds_segments(tmp_path, monkeypatch):
+    texts = ["tag%s common %s" % ("abcdefghij"[i % 10], "pad " * (i % 50)) for i in range(400)]
+    paths = write_texts(tmp_path / "files", texts)
+    names = ["d%d" % i for i in range(400)]
+    for name in ("direct", "budget", "fits"):
+        (tmp_path / name).mkdir()
+    NindIndexer(str(tmp_path / "direct")).index_files(paths, workers=1, doc_names=names)
+    # 1 MiB per token and per process: 10,600 tokens, 2 builds at a time beside this process in
+    # 2 GiB: 1 + 2 * (1 + 10600 / s) <= 2048 -> 11 segments
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TOKEN", 1 << 20)
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_PROCESS", 1 << 20)
+    monkeypatch.setattr(NindIndexer, "MEMORY_GB_MARGIN", 1)
+    indexer = NindIndexer(str(tmp_path / "budget"))
+    assert indexer._plan_files_memory(paths, 2, 1, 2)[:2] == (11, 2)
+    # 9 tokens in 5 MiB: 1 + 2 * (1 + 9 / s) <= 5 -> 9 shards, at most one a file
+    assert indexer._plan_files_memory(paths[:3], 2, 1, 5 / 1024)[0] == 3
+    indexer.index_files(paths, workers=2, doc_names=names, memory_gb=2)
+    direct, budget = NindEngine(str(tmp_path / "direct")), NindEngine(str(tmp_path / "budget"))
+    assert len(budget._snapshot.index.segments()) == 11
+    for query in ["taga", "common pad", "tagj pad"]:
+        direct_results, budget_results = direct.search(query, doc_names=True), budget.search(query, doc_names=True)
+        assert [name for name, _ in budget_results] == [name for name, _ in direct_results]
+        assert [score for _, score in budget_results] == pytest.approx([score for _, score in direct_results])
+    monkeypatch.undo()
+    NindIndexer(str(tmp_path / "fits")).index_files(paths, workers=2, memory_gb=1)  # within budget: direct
+    assert len(NindEngine(str(tmp_path / "fits"))._snapshot.index.segments()) == 1
 
 
 def test_index_jsonl_rejects_bad_records_and_keeps_previous_index(tmp_path):
@@ -1569,3 +1611,20 @@ def test_blocks_hold_their_shortest_document(tmp_path, kwargs):
         update.remove(10)
         update.add_file(short[1], doc_id=5000)
     assert assert_blocks_hold_their_shortest_document(engine) >= 5
+
+
+def test_direct_builds_fix_the_mmap_threshold_unless_told_not_to(tmp_path, monkeypatch):
+    from nind import nind_engine
+    calls = []
+    monkeypatch.setattr(nind_engine, "_fix_mmap_threshold", lambda: calls.append(1))
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": "a", "contents": "cat"}])
+    files = write_texts(tmp_path / "files", ["cat"])
+    for name in ("on", "off"):
+        (tmp_path / name).mkdir()
+    NindIndexer(str(tmp_path / "on")).index_jsonl(path, workers=1)
+    NindIndexer(str(tmp_path / "on")).index_files(files, workers=1)
+    assert len(calls) == 2
+    monkeypatch.setattr(NindIndexer, "FIX_MMAP_THRESHOLD", False)
+    NindIndexer(str(tmp_path / "off")).index_jsonl(path, workers=1)
+    NindIndexer(str(tmp_path / "off")).index_files(files, workers=1)
+    assert len(calls) == 2
