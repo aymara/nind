@@ -3,34 +3,33 @@
 How nind compares with other indexers when it is used as an index plus BM25 top-k search:
 **Lucene** (through Anserini), **tantivy** and **bm25s**, on the same tokens, the same BM25
 parameters (k1 = 1.2, b = 0.75) and the same machine, from 3,600 documents to **138 million** passages.
-nind 3.2.0 (the same code as 4.0.1), measured on a 48-thread server from 2026-11-05 to 2026-11-10. The laptop results this page
+nind 4.2.0, measured on a 48-thread server from 2026-11-05 to 2026-11-12. nind's results are its search code's, measured at 8ba3ff1 on 2026-11-11 and 12 (its builds and updates too: 4.2.0's builds take less memory since, see `docs/TODO.md`); Lucene's, tantivy's and bm25s's are from 2026-11-05 to 10. The laptop results this page
 showed before are kept at the end.
 
 ```{admonition} In short
 :class: tip
 
-- **Search, 138 million passages** (MS MARCO v2). One query's top 10 takes **20.5 ms** on one
-  thread (median), the same as Lucene (20.6 ms; tantivy 142 ms). An index of 8
-  segments searched with 8 threads per query takes **2.86 ms**. 99th percentile: 365 ms on
-  one thread (Lucene 237 ms), 43.2 ms with 8 segments and 8 threads.
-- **Search, 8.8 million passages** (MS MARCO). **2.66 ms** on one thread (Lucene 2.93 ms,
-  tantivy 10.0 ms), **0.510 ms** with 8 segments and 8 threads.
-- **Stopwords kept** is nind's weak case: very long postings lists. At 138M, 138 ms on one thread
-  against 36.1 ms for Lucene; 17.2 ms with 8 segments and 8 threads.
+- **Search, 138 million passages** (MS MARCO v2). One query's top 10 takes **15.1 ms** on one
+  thread (median), against 20.6 ms for Lucene (tantivy 142 ms). An index of 8
+  segments searched with 8 threads per query takes **2.74 ms**. 99th percentile: 192 ms on
+  one thread (Lucene 237 ms), 28.7 ms with 8 segments and 8 threads.
+- **Search, 8.8 million passages** (MS MARCO). **2.42 ms** on one thread (Lucene 2.93 ms,
+  tantivy 10.0 ms), **0.512 ms** with 8 segments and 8 threads.
+- **Stopwords kept** is nind's weak case: very long postings lists. At 138M, 80.4 ms on one thread
+  against 36.1 ms for Lucene; 5.88 ms with 8 segments and 8 threads.
 - **Many callers at once**, every system: at 8.8M nind serves the most at every load (2,567
   queries/s with 12 callers, Lucene 2,065; 4,847 with 48, Lucene's threads
   2,574). At 138M nind leads with few callers and Lucene with many (786 queries/s
   with 48 callers, nind 519).
-- **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 stays at
-  19.8 ms (it reads about 1 MB per query); Lucene's goes from 20.1 to 103 ms.
-  But nind holds 6.98 GB of its own (document names and lengths, read whole at open), Lucene
-  1.23 GB.
-- **Indexing.** 138M passages in **507 s** in 32 segments (Lucene 883 s,
+- **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 goes from
+  20.9 to 37.2 ms, Lucene's from 20.1 to 103 ms; each holds about 1.2 GB of its
+  own (nind 1.22 GB, Lucene 1.23 GB).
+- **Indexing.** 138M passages in **306 s** in 32 segments (Lucene 883 s,
   tantivy 1,042 s, 8 threads each), **230 s** with 48 threads; one index:
-  1,426 s and 102 GB of memory. 8.8M passages: 31.0 s in 32 segments,
-  104 s for one index (Lucene 67.8 s).
-- **Updates.** Adding 1% more documents writes a new segment: 4.33 s at 8.8M (Lucene
-  3.53 s, tantivy 1.25 s), 59.6 s at 138M (Lucene
+  958 s and 55 GB of memory. 8.8M passages: 20.5 s in 32 segments,
+  60.1 s for one index (Lucene 67.8 s).
+- **Updates.** Adding 1% more documents writes a new segment: 1.06 s at 8.8M (Lucene
+  3.53 s, tantivy 1.25 s), 15.4 s at 138M (Lucene
   11.6 s, tantivy 16.6 s).
 - **Quality.** The same BM25: nDCG@10 0.222 for nind and 0.222 for Lucene at 8.8M,
   0.0790 and 0.0808 at 138M; every nind layout returns the same top 10.
@@ -56,10 +55,10 @@ same results.
 
 | system | 1M | 4M | 8M | 16M | 32M | 64M | 138M |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| nind | 0.468 ms | 1.23 ms | 2.09 ms | 3.53 ms | 5.94 ms | 10.2 ms | 20.5 ms |
-| nind, 8 threads per query | 0.182 ms | 0.609 ms | 0.537 ms | 0.906 ms | 2.20 ms | 5.27 ms | 10.4 ms |
-| nind, 8 segments, 8 threads per query | 0.350 ms | 0.434 ms | 0.517 ms | 0.689 ms | 1.01 ms | 1.71 ms | 2.86 ms |
-| nind, 32 segments, 8 threads per query | 0.558 ms | 0.770 ms | 0.762 ms | 0.970 ms | 1.26 ms | 1.89 ms | 3.10 ms |
+| nind | 0.456 ms | 1.22 ms | 2.05 ms | 3.34 ms | 5.83 ms | 9.94 ms | 15.1 ms |
+| nind, 8 threads per query | 0.331 ms | 0.418 ms | 0.426 ms | 0.603 ms | 1.15 ms | 2.90 ms | 6.37 ms |
+| nind, 8 segments, 8 threads per query | 0.437 ms | 0.451 ms | 0.528 ms | 0.671 ms | 0.965 ms | 1.63 ms | 2.74 ms |
+| nind, 32 segments, 8 threads per query | 0.603 ms | 0.825 ms | 0.780 ms | 0.917 ms | 1.24 ms | 1.89 ms | 3.03 ms |
 | Lucene (Anserini) | 1.37 ms | 2.13 ms | 2.98 ms | 4.54 ms | 7.67 ms | 13.2 ms | 20.6 ms |
 | tantivy | 1.07 ms | 3.76 ms | 7.53 ms | 16.1 ms | 33.0 ms | 63.2 ms | 142 ms |
 
@@ -77,13 +76,13 @@ same results.
 
 | system | top 10, median | top 10, 99th pct | top 100, median | top 1000, median | build | build memory | index | update +1% | nDCG@10 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| nind | 20.5 ms | 365 ms | 32.2 ms | 55.2 ms | 1,426 s | 104,680 MB | 14,177 MB | 59.6 s | 0.079 |
-| nind, 4 threads per query | 9.95 ms | 145 ms | 12.1 ms | 21.2 ms | – | – | – | – | 0.079 |
-| nind, 8 threads per query | 10.4 ms | 111 ms | 12.3 ms | 20.3 ms | – | – | – | – | 0.079 |
-| nind, 8 segments | 20.6 ms | 365 ms | 34.7 ms | 66.6 ms | 630 s | 111,005 MB | 14,640 MB | 76.9 s | 0.079 |
-| nind, 8 segments, 8 threads per query | 2.86 ms | 43.2 ms | 5.06 ms | 10.9 ms | – | – | – | – | 0.079 |
-| nind, 32 segments | 23.7 ms | 407 ms | 41.6 ms | 85.8 ms | 507 s | 30,314 MB | 15,164 MB | 83.5 s | 0.079 |
-| nind, 32 segments, 8 threads per query | 3.10 ms | 43.7 ms | 5.36 ms | 11.8 ms | – | – | – | – | 0.079 |
+| nind | 15.1 ms | 192 ms | 24.4 ms | 44.1 ms | 958 s | 56,355 MB | 14,177 MB | 15.4 s | 0.079 |
+| nind, 4 threads per query | 6.62 ms | 76.5 ms | 10.8 ms | 20.9 ms | – | – | – | – | 0.079 |
+| nind, 8 threads per query | 6.37 ms | 71.9 ms | 8.99 ms | 18.2 ms | – | – | – | – | 0.079 |
+| nind, 8 segments | 15.5 ms | 200 ms | 27.2 ms | 54.6 ms | 319 s | 56,604 MB | 14,640 MB | 14.8 s | 0.079 |
+| nind, 8 segments, 8 threads per query | 2.74 ms | 28.7 ms | 5.06 ms | 11.3 ms | – | – | – | – | 0.079 |
+| nind, 32 segments | 22.5 ms | 273 ms | 41.6 ms | 88.7 ms | 306 s | 20,676 MB | 15,164 MB | 22.2 s | 0.079 |
+| nind, 32 segments, 8 threads per query | 3.03 ms | 29.6 ms | 5.47 ms | 12.3 ms | – | – | – | – | 0.079 |
 | Lucene (Anserini) | 20.6 ms | 237 ms | 40.3 ms | 75.5 ms | 883 s | 26,503 MB | 12,972 MB | 11.6 s | 0.081 |
 | tantivy | 142 ms | 728 ms | 142 ms | 157 ms | 1,042 s | 4,682 MB | 11,187 MB | 16.6 s | 0.079 |
 
@@ -92,10 +91,10 @@ postings lists (a term in most of the 138M passages). Not updated.
 
 | system | top 10, median | top 10, 99th pct | top 100, median | top 1000, median | build | build memory | index | update +1% | nDCG@10 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| nind | 138 ms | 1,835 ms | 152 ms | 191 ms | 1,520 s | 134,430 MB | 15,409 MB | – | 0.077 |
-| nind, 8 threads per query | 109 ms | 798 ms | 106 ms | 119 ms | – | – | – | – | 0.077 |
-| nind, 8 segments | 125 ms | 1,778 ms | 151 ms | 219 ms | 844 s | 140,928 MB | 15,872 MB | – | 0.077 |
-| nind, 8 segments, 8 threads per query | 17.2 ms | 232 ms | 22.5 ms | 34.8 ms | – | – | – | – | 0.077 |
+| nind | 80.4 ms | 699 ms | 101 ms | 153 ms | 973 s | 67,825 MB | 15,409 MB | – | 0.077 |
+| nind, 8 threads per query | 56.5 ms | 547 ms | 65.3 ms | 82.1 ms | – | – | – | – | 0.077 |
+| nind, 8 segments | 38.2 ms | 319 ms | 62.4 ms | 131 ms | 332 s | 70,866 MB | 15,872 MB | – | 0.077 |
+| nind, 8 segments, 8 threads per query | 5.88 ms | 49.7 ms | 10.5 ms | 23.9 ms | – | – | – | – | 0.077 |
 | Lucene (Anserini) | 36.1 ms | 328 ms | 64.2 ms | 134 ms | 870 s | 27,336 MB | 13,905 MB | – | 0.080 |
 | tantivy | 1,096 ms | 2,491 ms | 1,098 ms | 1,110 ms | 1,113 s | 4,590 MB | 12,173 MB | – | 0.078 |
 
@@ -118,14 +117,14 @@ low nDCG@10 for every system. The top 10 of Lucene and nind overlap at 0.993 (ta
 
 | system | top 10, median | top 10, 99th pct | top 100, median | top 1000, median | build | build memory | index | update +1% | nDCG@10 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| nind | 2.66 ms | 44.9 ms | 4.77 ms | 10.0 ms | 104 s | 7,704 MB | 825 MB | 4.33 s | 0.222 |
-| nind, 4 threads per query | 0.864 ms | 9.04 ms | 1.69 ms | 3.96 ms | – | – | – | – | 0.222 |
-| nind, 8 threads per query | 0.625 ms | 5.51 ms | 1.24 ms | 5.37 ms | – | – | – | – | 0.222 |
-| nind, 8 segments | 3.02 ms | 49.1 ms | 6.24 ms | 13.4 ms | 34.6 s | 9,566 MB | 928 MB | 4.47 s | 0.222 |
-| nind, 8 segments, 8 threads per query | 0.510 ms | 4.87 ms | 1.12 ms | 2.98 ms | – | – | – | – | 0.222 |
-| nind, 32 segments | 4.22 ms | 57.9 ms | 9.24 ms | 18.2 ms | 31.0 s | 3,520 MB | 1,071 MB | 96.3 s | 0.222 |
-| nind, 32 segments, 8 threads per query | 0.806 ms | 6.32 ms | 1.46 ms | 3.78 ms | – | – | – | – | 0.222 |
-| nind + local index | 2.65 ms | 46.8 ms | 4.79 ms | 10.0 ms | 118 s | 7,954 MB | 2,985 MB | 5.14 s | 0.222 |
+| nind | 2.42 ms | 24.6 ms | 4.65 ms | 10.5 ms | 60.1 s | 4,150 MB | 825 MB | 1.06 s | 0.222 |
+| nind, 4 threads per query | 0.714 ms | 5.50 ms | 1.64 ms | 4.17 ms | – | – | – | – | 0.222 |
+| nind, 8 threads per query | 0.469 ms | 3.30 ms | 1.14 ms | 5.32 ms | – | – | – | – | 0.222 |
+| nind, 8 segments | 2.95 ms | 30.2 ms | 6.37 ms | 14.0 ms | 21.4 s | 5,776 MB | 928 MB | 1.04 s | 0.222 |
+| nind, 8 segments, 8 threads per query | 0.512 ms | 3.20 ms | 1.16 ms | 3.33 ms | – | – | – | – | 0.222 |
+| nind, 32 segments | 4.29 ms | 39.4 ms | 9.56 ms | 19.4 ms | 20.5 s | 2,537 MB | 1,071 MB | 94.0 s | 0.222 |
+| nind, 32 segments, 8 threads per query | 0.841 ms | 4.31 ms | 1.53 ms | 4.14 ms | – | – | – | – | 0.222 |
+| nind + local index | 2.52 ms | 25.0 ms | 4.78 ms | 10.5 ms | 109 s | 4,216 MB | 2,985 MB | 1.86 s | 0.222 |
 | Lucene (Anserini) | 2.93 ms | 21.6 ms | 6.73 ms | 27.6 ms | 67.8 s | 3,220 MB | 650 MB | 3.53 s | 0.222 |
 | Lucene + positions | 2.98 ms | 22.7 ms | 6.94 ms | 24.1 ms | 130 s | 8,988 MB | 2,525 MB | 3.52 s | 0.222 |
 | tantivy | 10.0 ms | 65.4 ms | 10.7 ms | 17.2 ms | 76.2 s | 1,434 MB | 658 MB | 1.25 s | 0.222 |
@@ -135,14 +134,14 @@ Stopwords kept:
 
 | system | top 10, median | top 10, 99th pct | top 100, median | top 1000, median | build | build memory | index | update +1% | nDCG@10 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| nind | 10.2 ms | 141 ms | 14.4 ms | 25.7 ms | 103 s | 9,895 MB | 915 MB | 5.45 s | 0.222 |
-| nind, 4 threads per query | 3.28 ms | 31.8 ms | 4.76 ms | 10.1 ms | – | – | – | – | 0.222 |
-| nind, 8 threads per query | 4.52 ms | 34.4 ms | 3.49 ms | 8.47 ms | – | – | – | – | 0.222 |
-| nind, 8 segments | 10.8 ms | 144 ms | 17.1 ms | 33.7 ms | 39.3 s | 11,595 MB | 1,018 MB | 5.37 s | 0.222 |
-| nind, 8 segments, 8 threads per query | 1.49 ms | 15.9 ms | 2.62 ms | 6.63 ms | – | – | – | – | 0.222 |
-| nind, 32 segments | 12.5 ms | 152 ms | 22.2 ms | 51.9 ms | 36.2 s | 4,086 MB | 1,161 MB | 109 s | 0.222 |
-| nind, 32 segments, 8 threads per query | 1.73 ms | 18.1 ms | 3.11 ms | 7.82 ms | – | – | – | – | 0.222 |
-| nind + local index | 10.3 ms | 144 ms | 14.8 ms | 26.3 ms | 187 s | 10,149 MB | 3,741 MB | 6.55 s | 0.222 |
+| nind | 4.19 ms | 36.1 ms | 8.53 ms | 21.5 ms | 74.1 s | 5,109 MB | 915 MB | 1.26 s | 0.222 |
+| nind, 4 threads per query | 1.19 ms | 7.48 ms | 2.96 ms | 8.88 ms | – | – | – | – | 0.222 |
+| nind, 8 threads per query | 0.796 ms | 4.08 ms | 2.13 ms | 7.13 ms | – | – | – | – | 0.222 |
+| nind, 8 segments | 5.06 ms | 44.1 ms | 11.9 ms | 30.0 ms | 25.6 s | 6,736 MB | 1,018 MB | 1.23 s | 0.222 |
+| nind, 8 segments, 8 threads per query | 0.866 ms | 4.23 ms | 2.16 ms | 6.70 ms | – | – | – | – | 0.222 |
+| nind, 32 segments | 6.80 ms | 53.9 ms | 16.9 ms | 48.9 ms | 24.6 s | 2,909 MB | 1,161 MB | 105 s | 0.222 |
+| nind, 32 segments, 8 threads per query | 1.20 ms | 5.43 ms | 2.59 ms | 8.10 ms | – | – | – | – | 0.222 |
+| nind + local index | 4.21 ms | 36.3 ms | 8.51 ms | 21.5 ms | 142 s | 5,116 MB | 3,741 MB | 2.32 s | 0.222 |
 | Lucene (Anserini) | 4.02 ms | 29.0 ms | 8.99 ms | 32.0 ms | 73.7 s | 3,954 MB | 716 MB | 3.85 s | 0.222 |
 | Lucene + positions | 4.19 ms | 30.4 ms | 9.31 ms | 28.6 ms | 146 s | 8,131 MB | 3,080 MB | 4.24 s | 0.222 |
 | tantivy | 72.9 ms | 201 ms | 74.1 ms | 83.0 ms | 80.2 s | 1,458 MB | 740 MB | 1.34 s | 0.221 |
@@ -283,8 +282,8 @@ it reads counts. The first 2,000 queries after a warm-up of 500; median ms.
 
 | system | own memory | no limit | 8 GB | 4 GB | 2 GB | 1 GB |
 |---|---:|---:|---:|---:|---:|---:|
-| nind | 6.98 GB | 23.1 | 19.3 | 19.2 | 19.4 | 19.8 |
-| nind, 8 segments, 8 threads per query | 7.81 GB | 3.82 | 10.6 | 11.9 | 16.4 | 19.0 |
+| nind | 1.22 GB | 20.9 | 18.4 | 25.5 | 28.0 | 37.2 |
+| nind, 8 segments, 8 threads per query | 2.07 GB | 3.75 | 16.3 | 22.1 | 28.4 | 37.3 |
 | Lucene (Anserini) | 1.23 GB | 20.1 | 22.9 | 52.3 | 84.3 | 103 |
 | tantivy | 0.795 GB | 151 | 122 | 127 | 143 | 152 |
 
@@ -292,24 +291,27 @@ Top 1000, median ms:
 
 | system | own memory | no limit | 8 GB | 4 GB | 2 GB | 1 GB |
 |---|---:|---:|---:|---:|---:|---:|
-| nind | 6.98 GB | 57.9 | 45.2 | 58.1 | 46.7 | 48.2 |
-| nind, 8 segments, 8 threads per query | 7.81 GB | 12.6 | 12.9 | 13.3 | 19.2 | 24.7 |
+| nind | 1.22 GB | 58.1 | 46.1 | 115 | 359 | 604 |
+| nind, 8 segments, 8 threads per query | 2.07 GB | 12.1 | 18.3 | 92.4 | 311 | 502 |
 | Lucene (Anserini) | 1.23 GB | 88.9 | 78.9 | 595 | 1,383 | 2,022 |
 | tantivy | 0.795 GB | 163 | 132 | 157 | 326 | 478 |
 
-- **One thread on nind's index barely reads.** MaxScore reads only the blocks it needs, with
-  positioned reads: about 1.3 MB per query from disk with a 1 GB budget (1.0 MB from a cold cache
-  without one), which the SSDs serve without changing the median. (Its uncapped run is the slower
-  one: separate processes vary, see "How to read these numbers".)
-- **8 segments with 8 threads per query** read more per query (2.3 MB at 1 GB) in a few
-  milliseconds: the disk shows, from 3.82 ms without a limit to 10.6 ms with 8 GB and 19.0 ms with
-  1 GB, about the single thread's time.
+- **nind reads only what it needs**: MaxScore reads a term's blocks with positioned reads. Its top
+  10 goes from 20.9 ms without a limit to 37.2 ms with 1 GB (Lucene 20.1 to 103 ms).
+- **Every search returns its hits' names** (the harness asks for them, as it has Lucene load each
+  hit's stored id), read in the mapped names file (4.96 GB), whose pages share the budget: a
+  top 1000 reads a thousand names spread over it, from 58.1 ms without a limit to 604 ms with
+  1 GB (Lucene 88.9 to 2,022 ms).
+- **8 segments with 8 threads per query** read more per query in a few milliseconds: the disk
+  shows, from 3.75 ms without a limit to 16.3 ms with 8 GB and 37.3 ms with 1 GB, the
+  single thread's time.
 - **Lucene and tantivy map their files** (`mmap`): with less cache, Lucene's top 10 gets
   5× slower and its top 1000 (which loads each hit's stored id) much more; tantivy's top
   1000 too. Readahead on mapped files is a likely cause, not investigated.
-- **nind's own memory is the limit**: 6.98 GB before any cache. At open it reads the document
-  names (4.96 GB) and lengths (1.66 GB) files whole; Lucene needs 1.23 GB and
-  tantivy 0.795 GB. Reading them on demand (`mmap`) is in `docs/TODO.md`.
+- **nind's own memory**: 1.22 GB, the documents' lengths (1.66 GB on disk, read
+  compactly); Lucene needs 1.23 GB and tantivy 0.795 GB. Up to 4.0.1, nind read the
+  names and lengths whole at open: 6.98 GB of its own, outside the budget, so its runs then had the
+  page cache to the index alone (its top 10 at 1 GB: 19.8 ms, top 1000: 48.2 ms).
 
 ## Smaller corpora (BEIR)
 
@@ -317,9 +319,9 @@ Every query of each dataset; stopwords removed.
 
 | dataset | documents | nind | Lucene (Anserini) | tantivy | bm25s |
 |---|---:|---:|---:|---:|---:|
-| SciFact | 5,183 | 0.114 ms · 0.665 | 1.10 ms · 0.664 | 0.078 ms · 0.664 | 0.117 ms · 0.665 |
-| NFCorpus | 3,633 | 0.033 ms · 0.308 | 0.749 ms · 0.308 | 0.029 ms · 0.307 | 0.140 ms · 0.308 |
-| FiQA | 57,600 | 0.610 ms · 0.238 | 1.53 ms · 0.241 | 0.393 ms · 0.241 | 0.393 ms · 0.238 |
+| SciFact | 5,183 | 0.116 ms · 0.665 | 1.10 ms · 0.664 | 0.078 ms · 0.664 | 0.117 ms · 0.665 |
+| NFCorpus | 3,633 | 0.035 ms · 0.308 | 0.749 ms · 0.308 | 0.029 ms · 0.307 | 0.140 ms · 0.308 |
+| FiQA | 57,600 | 0.448 ms · 0.238 | 1.53 ms · 0.241 | 0.393 ms · 0.241 | 0.393 ms · 0.238 |
 
 Each cell: median top-10 latency · nDCG@10.
 
@@ -335,7 +337,7 @@ Each cell: median top-10 latency · nDCG@10.
   `IndexSearcher` with an executor, over its segments); Anserini's searcher, used here, doesn't.
 - **Segments** are what `index_jsonl(shards=N)` and updates leave (`docs/proposals/segments.md`): a
   build of N shards in parallel, searched as one index with the same results. The first update of a
-  32-segment build merges a tier of them at 8.8M (96.3 s); at 138M segments that large are
+  32-segment build merges a tier of them at 8.8M (94.0 s); at 138M segments that large are
   left alone.
 - **Lucene is called from Python** (pyjnius): its top-1000 latency mostly measures building one Java
   object per hit, so the top 10 and top 100 compare best.
@@ -422,4 +424,5 @@ after a build rewrote every term it touched.
 The scripts are in `bench/retrieval/` (see `bench/README.md`, sections 4 and 7): `prepare.py` writes
 the tokenized corpora, `driver.py` builds, searches and updates every system and writes
 `report.csv`, `concurrency.py` measures throughput, and `site.py` writes this page from them. The
-server runs' raw results and scripts are in `bench/retrieval/results/2026-11-10-server/`.
+server runs' raw results and scripts are in `bench/retrieval/results/2026-11-10-server/`, with nind's
+later runs in `2026-11-11-server/` (several callers) and `2026-11-12-server/` (the rest).

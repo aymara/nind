@@ -106,7 +106,7 @@ An update costs what it changes, whatever the size of the index (88k documents a
 merged now and then. For a large corpus (more than about 10M documents), give the build a memory
 budget: `index_jsonl(path, memory_gb=16)` picks the fewest shards that fit in it (one, a direct
 build, if the corpus fits), builds them in worker processes and keeps them as segments (no merge,
-and faster: 25 s vs 46 s for MS MARCO, 507 s vs 1,426 s for its 138M passages). `shards=N` sets
+and faster: 20.5 s vs 60.1 s for MS MARCO, 306 s vs 958 s for its 138M passages). `shards=N` sets
 their number instead. Results are always those of one index of the live documents;
 `indexer.force_merge()` makes it one index. See `docs/proposals/segments.md`.
 

@@ -415,25 +415,29 @@ Top 1000, median ms:
 
 {top1000}
 
-- **One thread on nind's index barely reads.** MaxScore reads only the blocks it needs, with
-  positioned reads: about 1.3 MB per query from disk with a 1 GB budget (1.0 MB from a cold cache
-  without one), which the SSDs serve without changing the median. (Its uncapped run is the slower
-  one: separate processes vary, see "How to read these numbers".)
-- **8 segments with 8 threads per query** read more per query (2.3 MB at 1 GB) in a few
-  milliseconds: the disk shows, from {s8_all} ms without a limit to {s8_8} ms with 8 GB and {s8_1} ms with
-  {low} GB, about the single thread's time.
+- **nind reads only what it needs**: MaxScore reads a term's blocks with positioned reads. Its top
+  10 goes from {n_all} ms without a limit to {n_low} ms with {low} GB (Lucene {l_all} to {l_low} ms).
+- **Every search returns its hits' names** (the harness asks for them, as it has Lucene load each
+  hit's stored id), read in the mapped names file ({names_gb} GB), whose pages share the budget: a
+  top 1000 reads a thousand names spread over it, from {n1k_all} ms without a limit to {n1k_low} ms with
+  {low} GB (Lucene {l1k_all} to {l1k_low} ms).
+- **8 segments with 8 threads per query** read more per query in a few milliseconds: the disk
+  shows, from {s8_all} ms without a limit to {s8_8} ms with 8 GB and {s8_1} ms with {low} GB, the
+  single thread's time.
 - **Lucene and tantivy map their files** (`mmap`): with less cache, Lucene's top 10 gets
   {lucene_ratio}× slower and its top 1000 (which loads each hit's stored id) much more; tantivy's top
   1000 too. Readahead on mapped files is a likely cause, not investigated.
-- **nind's own memory is the limit**: {nind_own} GB before any cache. At open it reads the document
-  names ({names_gb} GB) and lengths ({lengths_gb} GB) files whole; Lucene needs {lucene_own} GB and
-  tantivy {tantivy_own} GB. Reading them on demand (`mmap`) is in `docs/TODO.md`."""
+- **nind's own memory**: {nind_own} GB, the documents' lengths ({lengths_gb} GB on disk, read
+  compactly); Lucene needs {lucene_own} GB and tantivy {tantivy_own} GB. Up to 4.0.1, nind read the
+  names and lengths whole at open: 6.98 GB of its own, outside the budget, so its runs then had the
+  page cache to the index alone (its top 10 at 1 GB: 19.8 ms, top 1000: 48.2 ms)."""
 
 
 def memory(path):
     rows = jsonl(path) if path else []
     if not rows:
-        return "Not measured.", {k: "–" for k in ("mem_nind_1", "mem_lucene_all", "mem_lucene_1", "mem_nind_own",
+        return "Not measured.", {k: "–" for k in ("mem_nind_1", "mem_nind_all", "mem_lucene_all", "mem_lucene_1",
+                                                  "mem_nind_own",
                                                   "mem_lucene_own")}
     by = {(r["system"], r.get("budget_gb")): r for r in rows}
     budgets = [None] + sorted({r["budget_gb"] for r in rows if r.get("budget_gb")}, reverse=True)
@@ -456,13 +460,22 @@ def memory(path):
         r = by.get((system, budget))
         return r["k10"]["p50_ms"] if r else None
 
+    def k1000(system, budget):
+        r = by.get((system, budget))
+        return r["k1000"]["p50_ms"] if r else None
+
     low = budgets[-1]
     text = MEMORY_TEXT.format(top10=grid_of("k10"), top1000=grid_of("k1000"),
                               lucene_ratio="%.0f" % (k10("lucene", low) / k10("lucene", None)),
                               nind_own=fmt(own("nind")), lucene_own=fmt(own("lucene")), tantivy_own=fmt(own("tantivy")),
                               names_gb="4.96", lengths_gb="1.66", low=low, s8_all=fmt(k10("nind-8s-8t", None)),
-                              s8_8=fmt(k10("nind-8s-8t", budgets[1])), s8_1=fmt(k10("nind-8s-8t", low)))
-    return text, {"mem_nind_1": fmt(k10("nind", low)), "mem_lucene_all": fmt(k10("lucene", None)),
+                              s8_8=fmt(k10("nind-8s-8t", budgets[1])), s8_1=fmt(k10("nind-8s-8t", low)),
+                              n_all=fmt(k10("nind", None)), n_low=fmt(k10("nind", low)),
+                              l_all=fmt(k10("lucene", None)), l_low=fmt(k10("lucene", low)),
+                              n1k_all=fmt(k1000("nind", None)), n1k_low=fmt(k1000("nind", low)),
+                              l1k_all=fmt(k1000("lucene", None)), l1k_low=fmt(k1000("lucene", low)))
+    return text, {"mem_nind_1": fmt(k10("nind", low)), "mem_nind_all": fmt(k10("nind", None)),
+                  "mem_lucene_all": fmt(k10("lucene", None)),
                   "mem_lucene_1": fmt(k10("lucene", low)), "mem_nind_own": fmt(own("nind")),
                   "mem_lucene_own": fmt(own("lucene"))}
 
@@ -472,14 +485,14 @@ PAGE = """# Benchmarks
 How nind compares with other indexers when it is used as an index plus BM25 top-k search:
 **Lucene** (through Anserini), **tantivy** and **bm25s**, on the same tokens, the same BM25
 parameters (k1 = 1.2, b = 0.75) and the same machine, from 3,600 documents to **138 million** passages.
-nind {version}{code_of}, measured on a 48-thread server from 2026-11-05 to {date}. The laptop results this page
+nind {version}{code_of}, measured on a 48-thread server from 2026-11-05 to {date}.{version_note} The laptop results this page
 showed before are kept at the end.
 
 ```{{admonition}} In short
 :class: tip
 
 - **Search, 138 million passages** (MS MARCO v2). One query's top 10 takes **{v2_nind} ms** on one
-  thread (median), the same as Lucene ({v2_lucene} ms; tantivy {v2_tantivy} ms). An index of 8
+  thread (median), against {v2_lucene} ms for Lucene (tantivy {v2_tantivy} ms). An index of 8
   segments searched with 8 threads per query takes **{v2_8s8t} ms**. 99th percentile: {v2_nind_p99} ms on
   one thread (Lucene {v2_lucene_p99} ms), {v2_8s8t_p99} ms with 8 segments and 8 threads.
 - **Search, 8.8 million passages** (MS MARCO). **{v1_nind} ms** on one thread (Lucene {v1_lucene} ms,
@@ -490,10 +503,9 @@ showed before are kept at the end.
   queries/s with 12 callers, Lucene {c_v1_lucene_12}; {c_v1_nind_48} with 48, Lucene's threads
   {c_v1_lucene_48}). At 138M nind leads with few callers and Lucene with many ({c_v2_lucene_48} queries/s
   with 48 callers, nind {c_v2_nind_48}).
-- **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 stays at
-  {mem_nind_1} ms (it reads about 1 MB per query); Lucene's goes from {mem_lucene_all} to {mem_lucene_1} ms.
-  But nind holds {mem_nind_own} GB of its own (document names and lengths, read whole at open), Lucene
-  {mem_lucene_own} GB.
+- **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 goes from
+  {mem_nind_all} to {mem_nind_1} ms, Lucene's from {mem_lucene_all} to {mem_lucene_1} ms; each holds about 1.2 GB of its
+  own (nind {mem_nind_own} GB, Lucene {mem_lucene_own} GB).
 - **Indexing.** 138M passages in **{v2_32s_build} s** in 32 segments (Lucene {v2_lucene_build} s,
   tantivy {v2_tantivy_build} s, 8 threads each), **{v2_32s_build48} s** with 48 threads; one index:
   {v2_nind_build} s and {v2_nind_mem} GB of memory. 8.8M passages: {v1_32s_build} s in 32 segments,
@@ -635,7 +647,8 @@ after a build rewrote every term it touched.
 The scripts are in `bench/retrieval/` (see `bench/README.md`, sections 4 and 7): `prepare.py` writes
 the tokenized corpora, `driver.py` builds, searches and updates every system and writes
 `report.csv`, `concurrency.py` measures throughput, and `site.py` writes this page from them. The
-server runs' raw results and scripts are in `bench/retrieval/results/2026-11-10-server/`.
+server runs' raw results and scripts are in `bench/retrieval/results/2026-11-10-server/`, with nind's
+later runs in `2026-11-11-server/` (several callers) and `2026-11-12-server/` (the rest).
 """
 
 
@@ -655,6 +668,7 @@ def main():
                         help="concurrency.py's run with --mode processes giving each system's memory per process")
     parser.add_argument("--callers-code", default="", help="which nind the several-callers runs used (a sentence)")
     parser.add_argument("--code-of", default=None, help="a later version with the same code as --version")
+    parser.add_argument("--version-note", default=None, help="a sentence after the version's (what was measured with it)")
     parser.add_argument("--laptop-date", required=True)
     parser.add_argument("--laptop-version", default="3.2.0")
     parser.add_argument("--laptop-previous-date", required=True,
@@ -725,6 +739,7 @@ def main():
 
     page = PAGE.format(
         version=args.version, date=args.date, code_of=" (the same code as %s)" % args.code_of if args.code_of else "",
+        version_note=" " + args.version_note if args.version_note else "",
         memory_section=memory_section, **memory_values, laptop_version=args.laptop_version, laptop_date=args.laptop_date,
         laptop_previous_date=args.laptop_previous_date,
         v2_nind=get("v2-stop", "nind", "k10_p50"), v2_lucene=get("v2-stop", "lucene", "k10_p50"),

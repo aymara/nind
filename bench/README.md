@@ -579,7 +579,7 @@ The merged term file takes 71 MB. The run was stopped under system memory pressu
 during `verify_index` (possibly a contributor: it read such a term twice as lists at
 the time; it reads flat now), so the read back and the search weren't measured: rerun it.
 
-## 7. Server runs: 138M documents, 48 threads (2026-11-05 to 2026-11-10)
+## 7. Server runs: 138M documents, 48 threads (2026-11-05 to 2026-11-12)
 
 Section 4's comparison on a larger machine, to the size where it had predicted
 Lucene would overtake nind (~12M documents), and with the threads it couldn't
@@ -675,6 +675,22 @@ and 6 h.
   (batches, tokenized in worker processes) instead of `add_tokens` per document:
   +1% at 138M in 12.4 s (60-84 s before; Lucene 11.6 s), at 16M in 1.6 s
   (`updates.txt` there).
+- **nind again (stage 7, 2026-11-11 to 12).** Stages 1, 2 and 5 for nind only,
+  the same commands, at `8ba3ff1` (4.2.0's search code: names mapped, lengths
+  read compactly, the builder's 5-byte postings and C++ vocabularies, batch
+  updates, MaxScore by windows, block bounds cached; `scripts/stage7.sh`, 18.6 h);
+  the other systems' results stay. 138M on one thread: top 10 20.5 -> 15.1 ms
+  (Lucene 20.6), p99 365 -> 192 ms (237); 8 segments with 8 threads 2.86 -> 2.74
+  ms. 8.8M: 2.66 -> 2.42 ms (Lucene 2.93). Stopwords kept at 138M: 138 -> 80.4 ms
+  (Lucene 36.1), 8 segments with 8 threads 17.2 -> 5.88 ms. Builds at 138M: one
+  index 1,426 s and 102 GB -> 958 s and 55 GB, 32 segments 507 s and 30 GB ->
+  306 s and 20 GB (Lucene 883 s, 26 GB); 8.8M one index 104 -> 60.1 s. +1% at
+  138M: 59.6 -> 15.4 s for one index (Lucene 11.6 s); at 8.8M 4.33 -> 1.06 s
+  (3.53). `verify_index` clean on every segment again. Stage 5: nind's own
+  memory 6.98 -> 1.22 GB, but its names, mapped now, share the page-cache budget
+  (the harness asks for every hit's name): with 1 GB, top 10 37.2 ms (19.8 when
+  the names were outside the budget; Lucene 103), top 1000 604 ms (48.2; Lucene
+  2,022). Results: `bench/retrieval/results/2026-11-12-server`.
 
 ## Notes
 

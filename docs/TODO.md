@@ -186,9 +186,17 @@ of 3.0.0 (format v2).
       kind of corpus (long documents, code: `index_files(memory_gb=...)` now
       plans too, from runs of consecutive files scaled by their sizes);
       `merge=True`'s memory isn't in the budget.
-    - **The benchmarks page** shows the builds and the search memory before
-      these changes: rerun the build phases (direct and segments, 8.8M and
-      138M) and stage 5 (memory budgets: nind's 7 GB of its own is 0.9 now).
+    - [x] **The benchmarks page** showed the builds and the search memory
+      before these changes: stage 7 (`bench/README.md` section 7) reran
+      stages 1, 2 and 5 for nind at `8ba3ff1`. 138M: one index 958 s and 55 GB
+      (1,426 s, 102 GB), 32 segments 306 s and 20 GB (507 s, 30 GB); nind's own
+      search memory 1.22 GB (6.98). Not rerun: 4.2.0's builds (less memory
+      again, above), and the 48-thread builds (stage 3).
+    - **Mapped names under a small page cache.** The harness asks every hit's
+      name: at 138M with 1 GB of cache, top 1000 604 ms (48.2 when nind read
+      the names whole, outside the budget; Lucene 2,022), top 10 37.2 ms
+      (19.8). A name lookup touches the offsets array and the names blob: a
+      few pages per hit, spread over 5 GB.
   - [x] **Updates at 138M**: +1% took 60–84 s (a new segment) against 12 s for
     Lucene and 17 s for tantivy; 12.4 s now (16M: 7.8 -> 1.6 s, Lucene 3.5 s).
     Where it went:
