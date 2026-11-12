@@ -58,6 +58,16 @@ public:
                       const std::vector<NindDocId> &docIdents,
                       const std::vector<std::string> &names);
 
+    /**\brief write() of documents firstDocIdent, firstDocIdent + 1...: their names' bytes one after
+    * the other (document i: lengths[i] bytes after the i before it), no string per name. Memory:
+    * 12 bytes a document besides the given names (the file is streamed)
+    *\throws std::invalid_argument if the lengths don't add up to namesBytes or a name is repeated
+    *\throws OpenFileException or WriteFileException on I/O errors (the file is then removed) */
+    static void write(const std::string &fileName,
+                      const NindDocId firstDocIdent,
+                      const char *names, const size_t namesBytes,
+                      const uint32_t *lengths, const size_t count);
+
     /**\brief Merge the names files of shards into a new file, the same as write() with all their
     * documents, without building the names in memory (shards' files are loaded, the result streamed)
     *\param shardFiles the shards' files, in any order

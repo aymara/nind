@@ -762,6 +762,9 @@ PYBIND11_MODULE(_native, m) {
         .def("write_lexicon", &NindIndexBuilder::writeLexicon, py::arg("lexicon"),
              py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("words_nb", &NindIndexBuilder::wordsNb)
+        // write_term_index builds the postings of a range of terms at a time, at most this many
+        // bytes of them (0: all at once); the same file
+        .def_property("postings_budget", &NindIndexBuilder::postingsBudget, &NindIndexBuilder::setPostingsBudget)
         .def("write_term_index", &NindIndexBuilder::writeTermIndex,
              py::arg("term_index"), py::arg("file_identification"), py::arg("cg") = 0,
              py::call_guard<py::gil_scoped_release>())
@@ -790,6 +793,17 @@ PYBIND11_MODULE(_native, m) {
             py::gil_scoped_release release;
             NindDocNames::write(fileName, ids.values, names);
         }, py::arg("file_name"), py::arg("doc_ids"), py::arg("names"))
+        // documents first_doc_id, first_doc_id + 1...: their names' UTF-8 bytes one after the other
+        // and their lengths (uint32), no string per name
+        .def_static("write_packed", [](const std::string &fileName, uint64_t firstDocId, const py::buffer &names,
+                                       const py::buffer &lengths) {
+            const UIntView nameLengths = uintView(lengths, "lengths");
+            const py::buffer_info bytes = names.request();
+            if (bytes.ndim != 1 || bytes.itemsize != 1) throw py::value_error("names: expected bytes");
+            py::gil_scoped_release release;
+            NindDocNames::write(fileName, firstDocId, static_cast<const char *>(bytes.ptr), (size_t)bytes.size,
+                                nameLengths.data, nameLengths.size);
+        }, py::arg("file_name"), py::arg("first_doc_id"), py::arg("names"), py::arg("lengths"))
         // the shards' files into a new file, without the names in Python; ValueError on documents
         // overlapping between shards or a name in several of them
         .def_static("merge", [](const std::vector<std::string> &shardFiles, const std::string &fileName) {

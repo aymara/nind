@@ -119,6 +119,28 @@ TEST_CASE("NindDocNamesTest.ConsecutiveIdentsRoundTrip") {
     CHECK_EQ(24u + 4 * 5 + 4 * 4 + 2 + 2 + 0 + 5, readFileBytes(file).size());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindDocNamesTest.PackedWritesTheSameFileAsWrite") {
+    TestTempDir tmp;
+    const vector<string> names = {"d3", "b1", "", "\xc3\xa9t\xc3\xa9", "b10"};
+    string packed;
+    vector<uint32_t> lengths;
+    for (const string &name : names) {
+        packed += name;
+        lengths.push_back((uint32_t)name.size());
+    }
+    NindDocNames::write(tmp.file("strings"), {7, 8, 9, 10, 11}, names);
+    NindDocNames::write(tmp.file("packed"), 7, packed.data(), packed.size(), lengths.data(), lengths.size());
+    CHECK(readFileBytes(tmp.file("packed")) == readFileBytes(tmp.file("strings")));
+    checkAll(NindDocNames(tmp.file("packed")), {7, 8, 9, 10, 11}, names);
+    NindDocNames::write(tmp.file("none"), 0, packed.data(), 0, lengths.data(), 0);
+    CHECK_EQ(0u, NindDocNames(tmp.file("none")).size());
+    // lengths not adding up, a name twice: refused, nothing written
+    CHECK_THROWS_AS(NindDocNames::write(tmp.file("short"), 0, packed.data(), packed.size() - 1, lengths.data(), lengths.size()),
+                    invalid_argument);
+    CHECK_THROWS_AS(NindDocNames::write(tmp.file("dup"), 0, "abab", 4, vector<uint32_t>({2, 2}).data(), 2), invalid_argument);
+    CHECK_THROWS_AS(NindDocNames(tmp.file("dup")), OpenFileException);
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindDocNamesTest.SparseIdentsRoundTrip") {
     TestTempDir tmp;
     const string file = tmp.file("sparse.ninddocnames");

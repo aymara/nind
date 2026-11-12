@@ -37,7 +37,7 @@ namespace latecon {
 * given as batches of term ids, in document order (the lexicon written apart, e.g. with
 * NindLexiconIndex::addWords). Memory: about 4 bytes per token plus 16 per document (reserve
 * avoids growing them by copies); writing the term index builds every term's postings (5 bytes
-* per posting, at most one per token) once. At most 2^32 - 1 documents. Each block of the term
+* per posting, at most one per token) once, or a range of terms at a time (setPostingsBudget). At most 2^32 - 1 documents. Each block of the term
 * index gets its shortest document's length (a document's length: its tokens). The writers are
 * best in bulk mode (NindIndex::beginBulk), as nind's NindIndexer uses it; term and local index
 * can be written from two threads (they are different files). */
@@ -77,6 +77,12 @@ public:
 
     /**\brief The batches' distinct words (also after writeLexicon) */
     size_t wordsNb() const { return m_mode == WRITTEN ? m_writtenWordsNb : m_words.size(); }
+
+    /**\brief writeTermIndex builds the postings of a range of terms at a time, at most this many
+    * bytes of them (5 a posting; a term larger than that alone), the tokens scanned again for each
+    * range (a sequential read of 4 bytes a token); 0, the default: all terms at once. The same file */
+    void setPostingsBudget(const size_t bytes) { m_postingsBudget = bytes; }
+    size_t postingsBudget() const { return m_postingsBudget; }
 
     /**\brief Write every term's postings (category cg), terms in increasing id order */
     void writeTermIndex(NindTermIndex &termIndex,
@@ -121,6 +127,7 @@ public:
 
 private:
     static const uint32_t MAX_SMALL_FREQ = 255;     //writeTermIndex: frequencies from it are kept apart
+    static const size_t POSTING_BYTES = 5;          //writeTermIndex: a posting's position and frequency
     std::vector<uint64_t> m_docIds;     //in increasing order (external document ids, 64 bits)
     std::vector<size_t> m_docEnds;      //document d is m_tokens[m_docEnds[d-1]:m_docEnds[d]]
     std::vector<uint32_t> m_tokens;     //term ids (batches: the builder's word ids, until writeLexicon)
@@ -130,6 +137,7 @@ private:
     std::unordered_map<std::string, uint32_t> m_wordIds;
     enum { NO_DOCUMENT, LEXICON_IDS, BATCHES, WRITTEN } m_mode;
     size_t m_writtenWordsNb;            //the words writeLexicon wrote
+    size_t m_postingsBudget;            //writeTermIndex: the postings of a range of terms (0: all)
 };
 ////////////////////////////////////////////////////////////
     } // end namespace

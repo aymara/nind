@@ -55,8 +55,10 @@ except ImportError:
 def _pool_worker_init():
     """Initializer of NindIndexer's worker processes: exit when the parent dies.
 
-    Otherwise a killed indexer leaves its workers behind, idle forever.
+    Otherwise a killed indexer leaves its workers behind, idle forever. Also keeps glibc's mmap
+    threshold fixed (see _fix_mmap_threshold).
     """
+    _fix_mmap_threshold()
     parent = os.getppid()
 
     def watch():
@@ -191,23 +193,47 @@ def _chunk_words(chunk):
     return [words[begin:end] for begin, end in zip([0] + list(ends[:-1]), ends)]
 
 
-_malloc_trim = None
+_glibc = None
+
+
+def _get_glibc():
+    """glibc's malloc tuning functions (malloc_trim, mallopt), or None elsewhere."""
+    global _glibc
+    if _glibc is None:
+        _glibc = False
+        if sys.platform.startswith("linux"):
+            try:
+                import ctypes
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim, libc.mallopt      # AttributeError if not glibc
+                _glibc = libc
+            except (OSError, AttributeError):
+                pass
+    return _glibc or None
+
+
+_M_MMAP_THRESHOLD = -3                      # glibc's mallopt parameter
+_MMAP_THRESHOLD = 128 * 1024                # glibc's default, kept fixed
+
+
+def _fix_mmap_threshold():
+    """Keep glibc's mmap threshold at its default (for good: glibc can't make it dynamic again),
+    in a pool worker or, for a direct build, this process (NindIndexer.FIX_MMAP_THRESHOLD). glibc
+    raises it to the size of each mmapped block freed (up to 32 MiB): a build's later buffers then
+    came from the heap, fragmented, instead of mmap (MS MARCO v2, 4.8M passages: a worker's first
+    shard 1.45 GiB, the next ones ~2.0, fixed 1.27 each; a direct build 2.13 GiB, fixed 1.51; as
+    fast)."""
+    libc = _get_glibc()
+    if libc:
+        libc.mallopt(_M_MMAP_THRESHOLD, _MMAP_THRESHOLD)
 
 
 def _release_freed_memory():
     """Give the memory freed by a build back to the system (glibc keeps it otherwise: 0.4 GiB after
     a shard of 3M documents, which a pool worker's next shard would start from)."""
-    global _malloc_trim
-    if _malloc_trim is None:
-        _malloc_trim = False
-        if sys.platform.startswith("linux"):
-            try:
-                import ctypes
-                _malloc_trim = ctypes.CDLL("libc.so.6").malloc_trim
-            except (OSError, AttributeError):
-                pass
-    if _malloc_trim:
-        _malloc_trim(0)
+    libc = _get_glibc()
+    if libc:
+        libc.malloc_trim(0)
 
 
 def _uint_array(data):
@@ -297,8 +323,30 @@ def _write_doc_names(base, names):
                               [name if isinstance(name, str) else str(name) for name in map(names.__getitem__, doc_ids)])
 
 
+#: Names as their UTF-8 bytes one after the other (``names``) and their lengths (``lengths``,
+#: ``array('I')``): what ``NindDocNames.write_packed`` writes, without a string per name.
+_PackedNames = collections.namedtuple("_PackedNames", "names lengths")
+
+
+def _pack_names(names):
+    """``_PackedNames`` of strings."""
+    encoded = [name.encode() for name in names]
+    return _PackedNames(b''.join(encoded), array('I', map(len, encoded)))
+
+
+def _unpack_names(names):
+    """The strings of ``_PackedNames`` (anything else: as it is)."""
+    if not isinstance(names, _PackedNames):
+        return names
+    unpacked, offset = [], 0
+    for length in names.lengths:
+        unpacked.append(names.names[offset:offset + length].decode())
+        offset += length
+    return unpacked
+
+
 class _RecordNames(Sequence):
-    """The record ids a sharded :meth:`NindIndexer.index_jsonl` returns, as strings: element
+    """The record ids :meth:`NindIndexer.index_jsonl` returns (string ids), as strings: element
     ``n`` is the name of document ``n``, read from the build's names file at the first access
     (hundreds of millions of ids don't fit in a Python list). A later build of the index
     removes that file, and with it any element not read yet."""
@@ -826,6 +874,47 @@ class IndexUpdate:
         self._check_active()
         return self.add_tokens(self._tokenizing_indexer._default_tokenize(text), doc_id, name)
 
+    def add_texts(self, texts, doc_ids=None, names=None):
+        """Index several texts, as :meth:`add_text` each, tokenized natively in one batch:
+        nothing is done per token in Python (the way to add many documents from memory;
+        :meth:`add_jsonl` from a file).
+
+        :param doc_ids: the documents' identifiers (``None``, or ``None`` items: as
+            :meth:`add_text`'s default).
+        :param names: the documents' names (``None``, or ``None`` items: a replaced
+            document keeps its name).
+        :return: the documents' identifiers, in order.
+        """
+        self._check_active()
+        texts = list(texts)
+        doc_ids = [None] * len(texts) if doc_ids is None else list(doc_ids)
+        names = [None] * len(texts) if names is None else list(names)
+        if not len(doc_ids) == len(names) == len(texts):
+            raise ValueError("texts, doc_ids and names must have the same length")
+        chunk = self._tokenizing_indexer._tokenize_texts(texts)
+        ids, batch_names = array('Q'), []
+        for doc_id, name in zip(doc_ids, names):
+            if name is not None:
+                name = name if isinstance(name, str) else str(name)
+                owner = self._owner(name)
+                if doc_id is None:
+                    doc_id = owner
+                elif owner is not None and owner != _check_doc_id(doc_id):
+                    raise ValueError("another document (%d) is named %r" % (owner, name))
+            doc_id = self._next_id if doc_id is None else _check_doc_id(doc_id)
+            self._next_id = max(self._next_id, doc_id + 1)
+            self._pending[doc_id] = _IN_BATCH
+            if name is not None:
+                self._set_name(doc_id, name)
+            elif doc_id in self._names:
+                name = self._names[doc_id]
+            elif self._max_published is not None and doc_id <= self._max_published:
+                name = self._before().name(doc_id)     # a replaced document keeps its name
+            ids.append(doc_id)
+            batch_names.append(name or "")
+        self._batches.append((ids, chunk, batch_names))
+        return list(ids)
+
     def add_tokens(self, tokens, doc_id=None, name=None):
         """Index an already tokenized document; see :meth:`add_file`.
 
@@ -1013,7 +1102,7 @@ class NindIndexer:
         # Do not initialize engine here; files may not exist yet
         self.engine = None
 
-    def index_files(self, file_paths, workers=None, shards=1, doc_names=None, merge=False):
+    def index_files(self, file_paths, workers=None, shards=1, doc_names=None, merge=False, memory_gb=None):
         """Tokenize ``file_paths`` and write the resulting corpus as a nind index.
 
         Each file becomes one document, identified externally by its
@@ -1046,6 +1135,11 @@ class NindIndexer:
         :param doc_names: the documents' names (their identifiers in the
             corpus, unique), in ``file_paths`` order; :meth:`NindEngine.doc_name`
             and ``search(..., doc_names=True)`` return them. Default: none.
+        :param memory_gb: the memory the build may use, in GiB, as in
+            :meth:`index_jsonl`: the tokens and postings estimated from a few
+            runs of consecutive files spread over ``file_paths``, scaled by the
+            files' sizes (not counted: ``doc_names`` and the list of paths,
+            which the caller holds anyway).
         """
         if native is None:
             raise ImportError('nind._native compiled extension is not available (build it via "uv sync")')
@@ -1054,12 +1148,20 @@ class NindIndexer:
             doc_names = list(doc_names)
             if len(doc_names) != len(file_paths):
                 raise ValueError("doc_names and file_paths must have the same length")
+        if workers is None:
+            workers = os.cpu_count() or 1
+        if memory_gb is not None:
+            shards, workers, postings_budget = self._plan_files_memory(file_paths, workers, shards, memory_gb)
+        else:
+            postings_budget = 0
         shards = max(1, min(shards, len(file_paths)))
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             if shards > 1:
-                self._index_sharded(file_paths, workers, shards, base, doc_names, merge)
+                self._index_sharded(file_paths, workers, shards, base, doc_names, merge, postings_budget)
             else:
-                self._write_chunks(self._tokenize_chunks(file_paths, workers), 0, base)
+                if self.FIX_MMAP_THRESHOLD:
+                    _fix_mmap_threshold()
+                self._write_chunks(self._tokenize_chunks(file_paths, workers), 0, base, postings_budget)
                 if doc_names is not None:
                     _write_doc_names(base, dict(enumerate(doc_names)))
             _write_meta(base, self.tokenizer_options, self._with_local_index)
@@ -1084,9 +1186,11 @@ class NindIndexer:
         reading its own line-aligned part of it.
 
         Large corpora (more than about 10M documents): give ``memory_gb``, or
-        ``shards``. A direct build holds the whole corpus in memory (about 9
-        bytes per token, 110 per document and 100 per distinct term: 3.6 GiB
-        for 8M MS MARCO passages) and is slower; shards bound
+        ``shards``. A direct build holds the whole corpus in memory (about 8
+        bytes per token, 35 per document and 100 per distinct term: 2.9 GiB
+        for 8M MS MARCO passages; about 5 per token when its postings are
+        built in 4 passes, as ``memory_gb`` may do; see
+        ``FIX_MMAP_THRESHOLD``) and is slower; shards bound
         the memory and build in parallel, and their segments give the same
         results.
 
@@ -1112,15 +1216,19 @@ class NindIndexer:
             merged index on disk together).
         :param memory_gb: the memory the build may use, in GiB: the fewest
             shards (at least ``shards``; one, a direct build, if it fits) whose
-            builds, ``workers`` at a time beside this process, fit in it,
-            estimated from the tokens, documents and vocabulary of a few samples
-            of the file (``BUILD_BYTES_PER_*``, ``HEAPS_EXPONENT``). Fewer
+            builds, ``workers`` at a time beside this process, fit in
+            ``MEMORY_GB_MARGIN`` of it, estimated from the tokens, postings,
+            documents and vocabulary of a few samples of the file
+            (``BUILD_BYTES_PER_*``, ``HEAPS_EXPONENT``); each build's postings
+            in up to ``MAX_BUILD_PASSES`` ranges of terms, the fewest that fit
+            (a scan of its tokens each, about 2 s for 16M passages). Fewer
             workers if each wouldn't get twice ``BUILD_BYTES_PER_PROCESS``; fewer workers also mean fewer
             shards, i.e. faster searches on one thread.
         :return: the ``id_field`` value of every indexed record: element
-            ``n`` is the identifier of document ``n``. With ``shards > 1``, a
-            read-only sequence of them as strings, read from the index files
-            at the first access (no list of every id in memory).
+            ``n`` is the identifier of document ``n``. A read-only sequence of
+            them as strings, read from the index files at the first access (no
+            list of every id in memory); a list of the values themselves for a
+            direct build with ids that aren't all strings (numbers).
         :raises ValueError: if a line isn't a JSON object with both fields.
         """
         if native is None:
@@ -1131,70 +1239,135 @@ class NindIndexer:
         if workers is None:
             workers = os.cpu_count() or 1
         if memory_gb is not None:
-            shards, workers = self._plan_jsonl_memory(path, end, id_field, text_field, workers, shards, memory_gb)
-        if shards > 1:
-            return self._index_jsonl_sharded(path, end, id_field, text_field, workers, shards, merge)
-        if workers <= 1 or end < self.JSONL_PARALLEL_MIN_BYTES:
-            parts = [self._tokenize_jsonl_range(path, 0, end, id_field, text_field)]
+            shards, workers, postings_budget = self._plan_jsonl_memory(path, end, id_field, text_field, workers,
+                                                                       shards, memory_gb)
         else:
-            ranges = self._jsonl_ranges(path, end, workers * 4)
+            postings_budget = 0
+        if shards > 1:
+            return self._index_jsonl_sharded(path, end, id_field, text_field, workers, shards, merge, postings_budget)
+        if self.FIX_MMAP_THRESHOLD:
+            _fix_mmap_threshold()
+        if workers <= 1 or end < self.JSONL_PARALLEL_MIN_BYTES:
+            parts = [self._tokenize_jsonl_range_packed(path, 0, end, id_field, text_field)]
+        else:
+            # pieces of at most JSONL_SHARD_PIECE_BYTES: what a worker holds (1/32 of 138M passages
+            # was 5 GiB each)
+            ranges = self._jsonl_ranges(path, end, max(workers * 4, -(-end // self.JSONL_SHARD_PIECE_BYTES)))
             with ProcessPoolExecutor(max_workers=min(workers, len(ranges)), initializer=_pool_worker_init) as pool:
-                parts = list(pool.map(self._tokenize_jsonl_range, [path] * len(ranges),
+                parts = list(pool.map(self._tokenize_jsonl_range_packed, [path] * len(ranges),
                                       [start for start, _ in ranges], [stop for _, stop in ranges],
                                       [id_field] * len(ranges), [text_field] * len(ranges)))
-        ids = [doc_ident for record_ids, _ in parts for doc_ident in record_ids]
         chunks = [chunk for _, chunk in parts]
+        names = [record_names for record_names, _ in parts]
         del parts                       # _write_chunks frees each chunk once added
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
-            self._write_chunks(chunks, 0, base)
+            # the records' ids are the documents' names (converted to strings, unique); string
+            # ids, packed by the workers, are written first and read back from the file, not kept
+            # beside the build
+            if all(isinstance(part, _PackedNames) for part in names):
+                count = sum(len(part.lengths) for part in names)
+                packed = _PackedNames(b''.join(part.names for part in names), array('I'))
+                for part in names:
+                    packed.lengths.extend(part.lengths)
+                del names
+                native.NindDocNames.write_packed(base + DOC_NAMES_EXTENSION, 0, packed.names, packed.lengths)
+                del packed
+                ids = None
+            else:
+                ids = [doc_ident for part in names for doc_ident in _unpack_names(part)]
+                del names
+                native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('Q', range(len(ids))),
+                                          [doc_ident if isinstance(doc_ident, str) else str(doc_ident) for doc_ident in ids])
+            self._write_chunks(chunks, 0, base, postings_budget)
             _write_meta(base, self.tokenizer_options, self._with_local_index)
-            # the records' ids are the documents' names (converted to strings, unique)
-            native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('Q', range(len(ids))),
-                                      [doc_ident if isinstance(doc_ident, str) else str(doc_ident) for doc_ident in ids])
-        return ids
+        return _RecordNames(base, count) if ids is None else ids
 
+    #: A direct build (:meth:`index_jsonl`, :meth:`index_files`) fixes glibc's mmap threshold at its
+    #: default in this process, for good (a third less memory: see _fix_mmap_threshold); False
+    #: leaves it dynamic (the planner's model then underestimates a direct build, ~1.4 times).
+    #: Worker processes always fix it.
+    FIX_MMAP_THRESHOLD = True
     #: Below this many bytes of JSON Lines, :meth:`index_jsonl` works in-process.
     JSONL_PARALLEL_MIN_BYTES = 1 << 20
     #: A shard of :meth:`index_jsonl` parses at most this many bytes of the file at a time.
     JSONL_SHARD_PIECE_BYTES = 1 << 26
     #: The memory of one build (direct, or a shard's), as ``index_jsonl(memory_gb=...)`` estimates
-    #: it: bytes per token, per document, per distinct term (``HEAPS_EXPONENT``: a build's
-    #: vocabulary grows as its tokens to this power, from the samples' vocabulary) and per process.
-    #: MS MARCO v2, shards of 1M to 14M passages built alone within 5% of it; 138M in 16 and 8 GiB:
-    #: 35 and 90 shards, peaks 13.7 and 7.1 GiB.
-    BUILD_BYTES_PER_TOKEN = 9
-    BUILD_BYTES_PER_DOCUMENT = 110
+    #: it: bytes per token, per posting (a document's distinct term: the postings built at once,
+    #: the whole build's divided by its passes, see ``IndexBuilder.postings_budget``), per document,
+    #: per distinct term (``HEAPS_EXPONENT``: a build's vocabulary grows as its tokens to this
+    #: power, from the samples' vocabulary) and per process. MS MARCO v2, shards of 1M to 9.5M
+    #: passages built by a pool worker, 1 to 5 passes: 0 to 6% over (1M: 14%).
+    BUILD_BYTES_PER_TOKEN = 4.0
+    BUILD_BYTES_PER_POSTING = 5
+    BUILD_BYTES_PER_DOCUMENT = 35
     BUILD_BYTES_PER_TERM = 100
-    BUILD_BYTES_PER_PROCESS = 300 << 20
+    BUILD_BYTES_PER_PROCESS = 250 << 20
     HEAPS_EXPONENT = 0.7
+    #: At most this many passes over a build's tokens, each building the postings of a range of
+    #: terms: a pass costs a scan of the tokens (2 s for 16M passages), and from about 4 the
+    #: tokenizing phase is the peak.
+    MAX_BUILD_PASSES = 4
+    #: ``index_jsonl(memory_gb=...)`` plans its builds in this part of the budget: equal shards
+    #: started together reach their peaks together (138M, 8 workers, 16 GiB: 20 shards, 12.7 to
+    #: 13.0 GiB from one run to another).
+    MEMORY_GB_MARGIN = 0.9
     #: ``index_jsonl(memory_gb=...)`` counts the tokens, documents and distinct terms of this many
     #: pieces of the file, of this many bytes each, spread over it (the whole file when smaller).
     JSONL_SAMPLE_PIECES = 8
     JSONL_SAMPLE_BYTES = 1 << 21
 
     def _plan_jsonl_memory(self, path, end, id_field, text_field, workers, shards, memory_gb):
-        # (shards, workers) for index_jsonl(memory_gb=...): the fewest shards, at least `shards`,
-        # whose builds, `workers` at a time beside this process, fit in memory_gb by the model
-        # above; fewer workers when each wouldn't have twice a process's own memory
-        budget = memory_gb * 2 ** 30
+        # (shards, workers, postings budget) for index_jsonl(memory_gb=...), see _plan_memory
+        direct_workers = 0 if workers <= 1 or end < self.JSONL_PARALLEL_MIN_BYTES else workers
+        return self._plan_memory(lambda: self._jsonl_sample(path, end, id_field, text_field), workers, shards,
+                                 memory_gb, direct_workers)
+
+    def _plan_files_memory(self, file_paths, workers, shards, memory_gb):
+        # (shards, workers, postings budget) for index_files(memory_gb=...), see _plan_memory
+        direct_workers = 0 if workers <= 1 or len(file_paths) < self.PARALLEL_MIN_FILES else min(workers, len(file_paths))
+        shards, workers, postings_budget = self._plan_memory(lambda: self._files_sample(file_paths), workers, shards,
+                                                             memory_gb, direct_workers)
+        return min(shards, max(1, len(file_paths))), workers, postings_budget
+
+    def _plan_memory(self, sample, workers, shards, memory_gb, direct_workers):
+        # (shards, workers, postings budget) of a build in memory_gb: the fewest shards, at least
+        # `shards`, whose builds, `workers` at a time beside this process, fit in memory_gb by the
+        # model above in at most MAX_BUILD_PASSES passes; fewer workers when each wouldn't have
+        # twice a process's own memory; then the fewest passes (the postings budget: 0 for one).
+        # sample: a function giving the corpus's _Sample; direct_workers: the processes tokenizing
+        # beside a direct build
+        budget = memory_gb * 2 ** 30 * self.MEMORY_GB_MARGIN
         process = self.BUILD_BYTES_PER_PROCESS
         if budget < 3 * process:
-            raise ValueError("memory_gb: at least %.1f to build an index" % (3 * process / 2 ** 30))
-        sample = self._jsonl_sample(path, end, id_field, text_field)
+            raise ValueError("memory_gb: at least %.1f to build an index"
+                             % (3 * process / 2 ** 30 / self.MEMORY_GB_MARGIN))
+        sample = sample()
 
-        def build(parts):
-            # the memory of one build over 1/parts of the file
+        def postings_bytes(parts):
+            return self.BUILD_BYTES_PER_POSTING * sample.postings / parts
+
+        def build(parts, passes):
+            # the memory of one build over 1/parts of the file, its postings in `passes` ranges
             tokens = sample.tokens / parts
             terms = sample.sampled_terms * (tokens / sample.sampled_tokens) ** self.HEAPS_EXPONENT \
                 if sample.sampled_tokens else 0
-            return (self.BUILD_BYTES_PER_TOKEN * tokens + self.BUILD_BYTES_PER_DOCUMENT * sample.documents / parts
+            return (self.BUILD_BYTES_PER_TOKEN * tokens + postings_bytes(parts) / passes
+                    + self.BUILD_BYTES_PER_DOCUMENT * sample.documents / parts
                     + self.BUILD_BYTES_PER_TERM * terms + process)
-        if shards <= 1 and build(1) <= budget:
-            return 1, workers
+
+        def plan(parts, workers, beside):
+            # the fewest passes that fit beside `beside` bytes, the budget they give
+            for passes in range(1, self.MAX_BUILD_PASSES + 1):
+                if beside + min(workers, parts) * build(parts, passes) <= budget:
+                    return parts, workers, 0 if passes == 1 else math.ceil(postings_bytes(parts) / passes)
+            return None
+        # a direct build: its workers tokenize beside it, a process each
+        if shards <= 1 and plan(1, 1, direct_workers * process) is not None:
+            return plan(1, workers, direct_workers * process)
         workers = max(1, min(workers, int((budget - process) // (2 * process))))
 
         def fits(parts):
-            return process + min(workers, parts) * build(parts) <= budget
+            return plan(parts, workers, process) is not None
         # the fewest: doubling, then halving the interval (a build shrinks with its share)
         low, high = max(shards, 2) - 1, max(shards, 2)
         while not fits(high):
@@ -1202,14 +1375,14 @@ class NindIndexer:
         while high - low > 1:
             middle = (low + high) // 2
             low, high = (low, middle) if fits(middle) else (middle, high)
-        return high, workers
+        return plan(high, workers, process)
 
-    _Sample = collections.namedtuple("_Sample", "tokens documents sampled_tokens sampled_terms")
+    _Sample = collections.namedtuple("_Sample", "tokens documents sampled_tokens sampled_terms postings")
 
     def _jsonl_sample(self, path, end, id_field, text_field):
-        # the tokens and documents of [0, end), estimated from
-        # JSONL_SAMPLE_PIECES line-aligned pieces spread over it (counted exactly when it is
-        # smaller than them), and the tokens and distinct terms of those pieces
+        # the tokens, documents and postings (distinct terms of each document) of [0, end),
+        # estimated from JSONL_SAMPLE_PIECES line-aligned pieces spread over it (counted exactly
+        # when it is smaller than them), and the tokens and distinct terms of those pieces
         if end <= self.JSONL_SAMPLE_PIECES * self.JSONL_SAMPLE_BYTES:
             pieces = [(0, end)]
         else:
@@ -1219,20 +1392,56 @@ class NindIndexer:
                     f.seek(start + self.JSONL_SAMPLE_BYTES - 1)
                     f.readline()        # finish the line: the piece ends with it
                     pieces.append((start, min(f.tell(), end)))
-        tokens = documents = sampled = 0
+        tokens = documents = postings = sampled = 0
         terms = set()
         for start, stop in pieces:
             record_ids, chunk = self._tokenize_jsonl_range(path, start, stop, id_field, text_field)
-            tokens += len(chunk[2]) // 4
             documents += len(record_ids)
-            terms.update(_chunk_words(chunk))
+            chunk_tokens, chunk_postings = self._count_chunk(chunk, terms)
+            tokens += chunk_tokens
+            postings += chunk_postings
             sampled += stop - start
         if sampled == 0:
-            return self._Sample(0, 0, 0, 0)
+            return self._Sample(0, 0, 0, 0, 0)
         scale = end / sampled
-        return self._Sample(tokens * scale, documents * scale, tokens, len(terms))
+        return self._Sample(tokens * scale, documents * scale, tokens, len(terms), postings * scale)
 
-    def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards, merge):
+    def _files_sample(self, file_paths):
+        # as _jsonl_sample, for index_files: the documents counted, the tokens and postings
+        # estimated by the files' sizes from JSONL_SAMPLE_PIECES runs of consecutive files spread
+        # over the list, of JSONL_SAMPLE_BYTES each (every file when they are smaller than them)
+        sizes = [os.path.getsize(file_path) for file_path in file_paths]
+        total = sum(sizes)
+        if total <= self.JSONL_SAMPLE_PIECES * self.JSONL_SAMPLE_BYTES:
+            picked = range(len(file_paths))
+        else:
+            picked = set()
+            for piece in range(self.JSONL_SAMPLE_PIECES):
+                i, size = len(file_paths) * piece // self.JSONL_SAMPLE_PIECES, 0
+                while i < len(file_paths) and size < self.JSONL_SAMPLE_BYTES:
+                    picked.add(i)
+                    size += sizes[i]
+                    i += 1
+            picked = sorted(picked)
+        sampled = sum(sizes[i] for i in picked)
+        if sampled == 0:
+            return self._Sample(0, len(file_paths), 0, 0, 0)
+        terms = set()
+        tokens, postings = self._count_chunk(self._tokenize_paths([file_paths[i] for i in picked]), terms)
+        scale = total / sampled
+        return self._Sample(tokens * scale, len(file_paths), tokens, len(terms), postings * scale)
+
+    @staticmethod
+    def _count_chunk(chunk, terms):
+        # (tokens, postings: each document's distinct terms) of a chunk; its words added to terms
+        terms.update(_chunk_words(chunk))
+        term_ids, begin, postings = _uint_array(chunk[2]), 0, 0
+        for document_end in _uint_array(chunk[3]):
+            postings += len(set(term_ids[begin:document_end]))
+            begin = document_end
+        return len(term_ids), postings
+
+    def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards, merge, postings_budget=0):
         ranges = self._jsonl_ranges(path, end, shards)
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
             # inside the new generation, so they go away with it if anything fails
@@ -1252,7 +1461,8 @@ class NindIndexer:
                                            [start for start, _ in ranges], [stop for _, stop in ranges]))
                     firsts = list(accumulate([0] + counts[:-1]))
                     futures = [pool.submit(self._build_jsonl_shard, shard_bases[i], path, ranges[i][0], ranges[i][1],
-                                           id_field, text_field, firsts[i]) for i in range(len(ranges))]
+                                           id_field, text_field, firsts[i], postings_budget)
+                               for i in range(len(ranges))]
                     for future in futures:
                         future.result()
                 if merge:
@@ -1280,21 +1490,23 @@ class NindIndexer:
                     count += 1
         return count
 
-    def _build_jsonl_shard(self, shard_base, path, start, stop, id_field, text_field, first_doc_id):
+    def _build_jsonl_shard(self, shard_base, path, start, stop, id_field, text_field, first_doc_id, postings_budget=0):
         # Runs in a worker process: the index, lengths and names of the lines in [start, stop).
-        self._write_jsonl_shard(shard_base, path, start, stop, id_field, text_field, first_doc_id)
+        self._write_jsonl_shard(shard_base, path, start, stop, id_field, text_field, first_doc_id, postings_budget)
         _release_freed_memory()             # the worker's next shard starts from a clean slate
 
-    def _write_jsonl_shard(self, shard_base, path, start, stop, id_field, text_field, first_doc_id):
+    def _write_jsonl_shard(self, shard_base, path, start, stop, id_field, text_field, first_doc_id, postings_budget=0):
         pieces = max(1, -(-(stop - start) // self.JSONL_SHARD_PIECE_BYTES))
-        record_ids, chunks = [], []
+        names, lengths, chunks = [], array('I'), []
         for piece_start, piece_stop in self._jsonl_ranges(path, stop, pieces, start):
             piece_ids, chunk = self._tokenize_jsonl_range(path, piece_start, piece_stop, id_field, text_field)
-            record_ids.extend(map(str, piece_ids))
+            packed = _pack_names(map(str, piece_ids))
+            names.append(packed.names)
+            lengths.extend(packed.lengths)
             chunks.append(chunk)
-        self._write_chunks(chunks, first_doc_id, shard_base)
-        native.NindDocNames.write(shard_base + DOC_NAMES_EXTENSION,
-                                  array('Q', range(first_doc_id, first_doc_id + len(record_ids))), record_ids)
+        native.NindDocNames.write_packed(shard_base + DOC_NAMES_EXTENSION, first_doc_id, b''.join(names), lengths)
+        del names, lengths
+        self._write_chunks(chunks, first_doc_id, shard_base, postings_budget)
 
     @staticmethod
     def _jsonl_end(path, limit):
@@ -1328,6 +1540,14 @@ class NindIndexer:
                 bounds.append(f.tell())
         bounds.append(end)
         return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+    def _tokenize_jsonl_range_packed(self, path, start, stop, id_field, text_field):
+        # Runs in a worker process: _tokenize_jsonl_range, string record ids packed (_PackedNames:
+        # ~24 bytes a document, a list of str ~80); other ids as they are, a list
+        record_ids, chunk = self._tokenize_jsonl_range(path, start, stop, id_field, text_field)
+        if all(isinstance(doc_ident, str) for doc_ident in record_ids):
+            return _pack_names(record_ids), chunk
+        return record_ids, chunk
 
     def _tokenize_jsonl_range(self, path, start, stop, id_field, text_field):
         # Runs in a worker process: (record ids, chunk) of the lines in [start, stop).
@@ -1423,15 +1643,16 @@ class NindIndexer:
         with self.update() as update:
             return [update.remove(doc_id) for doc_id in doc_ids]
 
-    def _write_chunks(self, chunks, first_doc_id, base):
+    def _write_chunks(self, chunks, first_doc_id, base, postings_budget=0):
         # writes the index files at base (a path without extension), plus the document lengths
         # chunks: (words' bytes, their ends, term ids, ends) of consecutive documents, the first one
         # being document first_doc_id (see native.Tokenizer.tokenize_batch_packed); the list is
         # emptied as they are added (the caller should hold no other reference to them: they would
         # stay in memory). The builder numbers the words (nothing per word in Python) and writes the
-        # lexicon, its words by increasing bytes.
+        # lexicon, its words by increasing bytes; postings_budget: see IndexBuilder.postings_budget.
         builder = native.IndexBuilder()
         builder.reserve(sum(len(chunk[2]) for chunk in chunks) // 4, sum(len(chunk[3]) for chunk in chunks) // 4)
+        builder.postings_budget = postings_budget
         doc_id = first_doc_id
         chunks.reverse()
         while chunks:
@@ -1475,7 +1696,7 @@ class NindIndexer:
         # writes the index of documents given as token lists (first one: document first_doc_id)
         self._write_chunks([_chunk_from_token_lists(token_lists)], first_doc_id, base)
 
-    def _index_sharded(self, file_paths, workers, shards, base, doc_names, merge):
+    def _index_sharded(self, file_paths, workers, shards, base, doc_names, merge, postings_budget=0):
         if workers is None:
             workers = os.cpu_count() or 1
         # contiguous parts, so that each shard's documents keep their global ids
@@ -1492,7 +1713,8 @@ class NindIndexer:
                     os.mkdir(os.path.dirname(shard_base))
             with ProcessPoolExecutor(max_workers=max(1, min(workers, shards)), initializer=_pool_worker_init) as pool:
                 futures = [pool.submit(self._build_shard, shard_bases[i], file_paths[bounds[i]:bounds[i + 1]], bounds[i],
-                                       None if doc_names is None else doc_names[bounds[i]:bounds[i + 1]])
+                                       None if doc_names is None else doc_names[bounds[i]:bounds[i + 1]],
+                                       postings_budget)
                            for i in range(shards)]
                 for future in futures:
                     future.result()
@@ -1524,9 +1746,9 @@ class NindIndexer:
             native.NindDocNames.merge([shard_base + DOC_NAMES_EXTENSION for shard_base in shard_bases],
                                       base + DOC_NAMES_EXTENSION)
 
-    def _build_shard(self, shard_base, file_paths, first_doc_id, doc_names=None):
+    def _build_shard(self, shard_base, file_paths, first_doc_id, doc_names=None, postings_budget=0):
         # Runs in a worker process (self is a copy: keeps an overridden tokenizer).
-        self._write_chunks(self._tokenize_chunks(file_paths, 1), first_doc_id, shard_base)
+        self._write_chunks(self._tokenize_chunks(file_paths, 1), first_doc_id, shard_base, postings_budget)
         if doc_names is not None:
             _write_doc_names(shard_base, dict(enumerate(doc_names, first_doc_id)))
         _release_freed_memory()

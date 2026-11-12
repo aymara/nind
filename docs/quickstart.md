@@ -86,6 +86,14 @@ with it raises `ValueError`); a replaced document keeps its name unless a new
 one is given. `update.doc_id(name)` finds a document by name, changes of the
 update included.
 
+Many documents in memory go faster as one batch, tokenized natively with
+nothing done per token in Python (`add_jsonl(path)` does the same from a file):
+
+```python
+with indexer.update() as update:
+    update.add_texts(texts, doc_ids=ids)      # or names=[...]; as add_text for each
+```
+
 `add_file(path)`, `add_files(paths)` and `remove_documents(ids)` on the
 indexer are one-update shortcuts. An update costs what it changes, whatever
 the size of the index (about 0.25 s to publish, with its `fsync`s, plus the
@@ -101,8 +109,9 @@ A large corpus (more than about 10M documents): `indexer.index_jsonl(path,
 memory_gb=16)` builds the fewest segments that fit in 16 GiB (a direct build if
 the corpus fits), in worker processes, in parallel; `shards=64` asks for 64
 instead, with memory bounded by `workers` of them at a time. A direct build
-holds the whole corpus (about 9 bytes per token, 110 per document and 100 per
-distinct term) and is slower; segments give the same results, and `merge=True`
+holds the whole corpus (about 8 bytes per token, 35 per document and 100 per
+distinct term; `memory_gb` may build its postings in up to 4 passes over the
+tokens, about 5 bytes per token) and is slower; segments give the same results, and `merge=True`
 (or a later `indexer.force_merge()`) makes one index of them.
 
 ## Search it
