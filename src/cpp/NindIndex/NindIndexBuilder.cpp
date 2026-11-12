@@ -31,7 +31,8 @@ NindIndexBuilder::NindIndexBuilder():
     m_words(),
     m_wordIds(),
     m_mode(NO_DOCUMENT),
-    m_writtenWordsNb(0)
+    m_writtenWordsNb(0),
+    m_postingsBudget(0)
 {
 }
 ////////////////////////////////////////////////////////////
@@ -215,54 +216,65 @@ void NindIndexBuilder::writeTermIndex(NindTermIndex &termIndex,
     }
     //2) postings by term (CSR), documents in increasing id order: 5 bytes a posting, the document's
     // position (32 bits, its id is m_docIds[position]) and its frequency (8 bits; 255 and more: in
-    // overflows, at most one per 255 tokens)
+    // overflows, at most one per 255 tokens); a range of terms at a time, its postings within
+    // m_postingsBudget (a term larger than it alone), the tokens scanned again for each range
     for (size_t t = 1; t < postingsNb.size(); t++) postingsNb[t] += postingsNb[t - 1];
-    std::vector<size_t> fill(postingsNb.begin(), postingsNb.end() - 1);
-    std::vector<uint32_t> postingDocs(postingsNb.back());
-    std::vector<uint8_t> postingFreqs(postingsNb.back());
-    std::unordered_map<size_t, uint32_t> overflows;
-    begin = 0;
-    for (size_t d = 0; d < m_docIds.size(); d++) {
-        for (size_t i = begin; i < m_docEnds[d]; i++) {
-            if (counts[m_tokens[i]]++ == 0) touched.push_back(m_tokens[i]);
-        }
-        for (size_t i = 0; i < touched.size(); i++) {
-            const size_t slot = fill[touched[i]]++;
-            const uint32_t count = counts[touched[i]];
-            postingDocs[slot] = (uint32_t)d;
-            if (count < MAX_SMALL_FREQ) postingFreqs[slot] = (uint8_t)count;
-            else {
-                postingFreqs[slot] = (uint8_t)MAX_SMALL_FREQ;
-                overflows[slot] = count;
-            }
-            counts[touched[i]] = 0;
-        }
-        touched.clear();
-        begin = m_docEnds[d];
-    }
-    std::vector<uint32_t>().swap(counts);
-    std::vector<uint32_t>().swap(touched);
-    std::vector<size_t>().swap(fill);
-    //3) the term definitions, flat (documents already in increasing order: added so); consecutive
-    // ids (every batch of addDocuments) without looking them up (scattered reads)
+    const size_t maxPostings = m_postingsBudget == 0 ? std::numeric_limits<size_t>::max()
+                                                     : std::max<size_t>(1, m_postingsBudget / POSTING_BYTES);
     const bool consecutive = m_docIds.empty() || m_docIds.back() - m_docIds.front() == m_docIds.size() - 1;
     const uint64_t firstId = m_docIds.empty() ? 0 : m_docIds.front();
     std::vector<NindTermIndex::Document> documents;
     std::vector<NindTermIndex::CategoryPostings> categories;
-    for (uint32_t t = 1; t <= m_maxTermId; t++) {
-        if (postingsNb[t] == postingsNb[t + 1]) continue;
-        documents.clear();
-        uint64_t total = 0;
-        for (size_t i = postingsNb[t]; i < postingsNb[t + 1]; i++) {
-            const uint32_t frequency = postingFreqs[i] == MAX_SMALL_FREQ ? overflows[i] : postingFreqs[i];
-            documents.push_back(NindTermIndex::Document(consecutive ? firstId + postingDocs[i] : m_docIds[postingDocs[i]],
-                                                        frequency));
-            total += frequency;
+    for (uint32_t first = 1; first <= m_maxTermId; ) {
+        //the range [first, last]: terms of postings [postingsNb[first], postingsNb[last + 1])
+        uint32_t last = first;
+        while (last < m_maxTermId && postingsNb[last + 2] - postingsNb[first] <= maxPostings) last++;
+        const size_t base = postingsNb[first];
+        std::vector<size_t> fill(postingsNb.begin() + first, postingsNb.begin() + last + 1);
+        std::vector<uint32_t> postingDocs(postingsNb[last + 1] - base);
+        std::vector<uint8_t> postingFreqs(postingDocs.size());
+        std::unordered_map<size_t, uint32_t> overflows;
+        const bool allTerms = first == 1 && last == m_maxTermId;
+        begin = 0;
+        for (size_t d = 0; d < m_docIds.size(); d++) {
+            for (size_t i = begin; i < m_docEnds[d]; i++) {
+                const uint32_t term = m_tokens[i];
+                if (!allTerms && (term < first || term > last)) continue;
+                if (counts[term]++ == 0) touched.push_back(term);
+            }
+            for (size_t i = 0; i < touched.size(); i++) {
+                const size_t slot = fill[touched[i] - first]++ - base;
+                const uint32_t count = counts[touched[i]];
+                postingDocs[slot] = (uint32_t)d;
+                if (count < MAX_SMALL_FREQ) postingFreqs[slot] = (uint8_t)count;
+                else {
+                    postingFreqs[slot] = (uint8_t)MAX_SMALL_FREQ;
+                    overflows[slot] = count;
+                }
+                counts[touched[i]] = 0;
+            }
+            touched.clear();
+            begin = m_docEnds[d];
         }
-        if (total > std::numeric_limits<unsigned int>::max())
-            throw std::invalid_argument("frequencies: total term frequency overflows 32 bits");
-        categories.assign(1, NindTermIndex::CategoryPostings(cg, (unsigned int)total, documents.data(), documents.size()));
-        termIndex.setTermPostings(t, categories, identification, noSpecifics);
+        std::vector<size_t>().swap(fill);
+        //3) the range's term definitions, flat (documents already in increasing order: added so);
+        // consecutive ids (every batch of addDocuments) without looking them up (scattered reads)
+        for (uint32_t t = first; t <= last; t++) {
+            if (postingsNb[t] == postingsNb[t + 1]) continue;
+            documents.clear();
+            uint64_t total = 0;
+            for (size_t i = postingsNb[t] - base; i < postingsNb[t + 1] - base; i++) {
+                const uint32_t frequency = postingFreqs[i] == MAX_SMALL_FREQ ? overflows[i] : postingFreqs[i];
+                documents.push_back(NindTermIndex::Document(consecutive ? firstId + postingDocs[i] : m_docIds[postingDocs[i]],
+                                                            frequency));
+                total += frequency;
+            }
+            if (total > std::numeric_limits<unsigned int>::max())
+                throw std::invalid_argument("frequencies: total term frequency overflows 32 bits");
+            categories.assign(1, NindTermIndex::CategoryPostings(cg, (unsigned int)total, documents.data(), documents.size()));
+            termIndex.setTermPostings(t, categories, identification, noSpecifics);
+        }
+        first = last + 1;
     }
 }
 

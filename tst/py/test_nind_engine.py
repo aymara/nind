@@ -6,6 +6,7 @@ This is the same path exercised manually while debugging the original
 AttributeError/format bugs in nind_engine.py; these tests pin that behaviour
 down permanently.
 """
+import math
 import os
 import time
 
@@ -710,17 +711,19 @@ def test_jsonl_ranges_are_line_aligned(tmp_path):
 
 
 def test_jsonl_sample_counts_or_estimates(tmp_path, monkeypatch):
-    records = [{"id": "d%d" % i, "contents": "word " * 10} for i in range(400)]
+    # 10 tokens a document, of 1 term (1 posting); 1 document of 4 tokens, 3 postings
+    records = [{"id": "d%d" % i, "contents": "word " * 10} for i in range(400)] + [{"id": "x", "contents": "a b a c"}]
     path = write_jsonl(tmp_path / "corpus.jsonl", records)
     indexer = NindIndexer(str(tmp_path))
     end = os.path.getsize(path)
-    assert indexer._jsonl_sample(path, end, "id", "contents") == (4000, 400, 4000, 1)     # small: counted
-    assert indexer._jsonl_sample(path, 0, "id", "contents") == (0, 0, 0, 0)
+    assert indexer._jsonl_sample(path, end, "id", "contents") == (4004, 401, 4004, 4, 403)   # small: counted
+    assert indexer._jsonl_sample(path, 0, "id", "contents") == (0, 0, 0, 0, 0)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_PIECES", 4)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_BYTES", 300)
     sample = indexer._jsonl_sample(path, end, "id", "contents")
     assert sample.tokens == pytest.approx(4000, rel=0.05) and sample.documents == pytest.approx(400, rel=0.05)
-    assert sample.sampled_tokens < 4000 and sample.sampled_terms == 1
+    assert sample.postings == pytest.approx(400, rel=0.05)
+    assert sample.sampled_tokens < 4000 and sample.sampled_terms in (1, 4)
 
 
 def test_plan_jsonl_memory(tmp_path, monkeypatch):
@@ -729,13 +732,18 @@ def test_plan_jsonl_memory(tmp_path, monkeypatch):
     path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": "d%d" % i, "contents": "word " * 10} for i in range(400)])
     end = os.path.getsize(path)
     monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TOKEN", 16 << 10)
+    monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_POSTING", 0)
     monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_DOCUMENT", 0)
     monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TERM", 0)
     monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_PROCESS", 1 << 20)
+    monkeypatch.setattr(NindIndexer, "MEMORY_GB_MARGIN", 1)
     indexer = NindIndexer(str(tmp_path))
 
     def plan(workers, shards, mib):
-        return indexer._plan_jsonl_memory(path, end, "id", "contents", workers, shards, mib / 1024)
+        shards, workers, postings_budget = indexer._plan_jsonl_memory(path, end, "id", "contents", workers, shards,
+                                                                      mib / 1024)
+        assert postings_budget == 0                     # nothing per posting: one pass
+        return shards, workers
     need = 62.5
     assert plan(4, 1, 64) == (1, 4)                     # 62.5 + 1 MiB: direct
     assert plan(4, 10, 64) == (10, 4)                   # more shards than needed asked for: kept
@@ -749,7 +757,29 @@ def test_plan_jsonl_memory(tmp_path, monkeypatch):
     assert plan(8, 100, 6) == (100, 2)
     with pytest.raises(ValueError):
         plan(1, 1, 2.5)
+    # the builds planned in a part of the budget
+    monkeypatch.setattr(NindIndexer, "MEMORY_GB_MARGIN", 0.5)
+    assert plan(4, 1, 128) == (1, 4) and plan(4, 1, 126)[0] > 1
     monkeypatch.undo()
+
+
+def test_plan_jsonl_memory_builds_postings_in_passes(tmp_path, monkeypatch):
+    # 1 MiB per posting, 1 MiB per process, nothing else: 400 documents of one term, 400 MiB of
+    # postings, built in up to 4 passes before more shards
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": "d%d" % i, "contents": "word " * 10} for i in range(400)])
+    for name, value in (("BUILD_BYTES_PER_TOKEN", 0), ("BUILD_BYTES_PER_POSTING", 1 << 20),
+                        ("BUILD_BYTES_PER_DOCUMENT", 0), ("BUILD_BYTES_PER_TERM", 0),
+                        ("BUILD_BYTES_PER_PROCESS", 1 << 20), ("MEMORY_GB_MARGIN", 1)):
+        monkeypatch.setattr(NindIndexer, name, value)
+    indexer = NindIndexer(str(tmp_path))
+
+    def plan(mib):
+        return indexer._plan_jsonl_memory(path, os.path.getsize(path), "id", "contents", 4, 1, mib / 1024)
+    assert plan(402) == (1, 4, 0)                               # 400 + 1: direct, one pass
+    assert plan(300) == (1, 4, 200 << 20)                       # 200 + 1: 2 passes
+    assert plan(120) == (1, 4, 100 << 20)                       # 100 + 1: 4 passes
+    # beside this process, 4 shards at a time of 400/s MiB of postings: 5 shards in 4 passes
+    assert plan(90) == (5, 4, 20 << 20)                         # 1 + 4 * (1 + 80/4) = 85
 
 
 def test_plan_jsonl_memory_counts_the_vocabulary(tmp_path, monkeypatch):
@@ -757,11 +787,12 @@ def test_plan_jsonl_memory_counts_the_vocabulary(tmp_path, monkeypatch):
     # which a shard over 1/s of them has 1000 * (1/s)^0.7
     path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": "d%d" % i, "contents": "w%s" % "".join(
         "abcdefghij"[int(c)] for c in str(i))} for i in range(1000)])
-    for name, value in (("BUILD_BYTES_PER_TOKEN", 0), ("BUILD_BYTES_PER_DOCUMENT", 0),
-                        ("BUILD_BYTES_PER_TERM", 1 << 20), ("BUILD_BYTES_PER_PROCESS", 1 << 20)):
+    for name, value in (("BUILD_BYTES_PER_TOKEN", 0), ("BUILD_BYTES_PER_POSTING", 0), ("BUILD_BYTES_PER_DOCUMENT", 0),
+                        ("BUILD_BYTES_PER_TERM", 1 << 20), ("BUILD_BYTES_PER_PROCESS", 1 << 20),
+                        ("MEMORY_GB_MARGIN", 1)):
         monkeypatch.setattr(NindIndexer, name, value)
     indexer = NindIndexer(str(tmp_path))
-    shards, workers = indexer._plan_jsonl_memory(path, os.path.getsize(path), "id", "contents", 2, 1, 400 / 1024)
+    shards, workers, _ = indexer._plan_jsonl_memory(path, os.path.getsize(path), "id", "contents", 2, 1, 400 / 1024)
     assert workers == 2
 
     def peak(parts):
@@ -779,6 +810,7 @@ def test_index_jsonl_memory_budget_builds_segments(tmp_path, monkeypatch):
     # 1 MiB per token: 10,600 tokens need 10.35 GiB; 2 builds at a time beside this process, in 2
     # GiB, 0.29 each for its process: 2 * 10.35 / (2 - 3 * 0.29) -> 19 segments
     monkeypatch.setattr(NindIndexer, "BUILD_BYTES_PER_TOKEN", 1 << 20)
+    monkeypatch.setattr(NindIndexer, "MEMORY_GB_MARGIN", 1)
     ids = NindIndexer(str(tmp_path / "budget")).index_jsonl(path, workers=2, memory_gb=2)
     assert ids == direct_ids
     direct, budget = NindEngine(str(tmp_path / "direct")), NindEngine(str(tmp_path / "budget"))
@@ -792,6 +824,25 @@ def test_index_jsonl_memory_budget_builds_segments(tmp_path, monkeypatch):
     monkeypatch.undo()
     NindIndexer(str(tmp_path / "fits")).index_jsonl(path, workers=2, memory_gb=1)
     assert len(NindEngine(str(tmp_path / "fits"))._snapshot.index.segments()) == 1
+    # only postings, 3.5 times the budget: a direct build in 4 passes, the same files
+    (tmp_path / "passes").mkdir()
+    indexer = NindIndexer(str(tmp_path / "passes"))
+    end = os.path.getsize(path)
+    postings = indexer._jsonl_sample(path, end, "id", "contents").postings
+    for name, value in (("BUILD_BYTES_PER_TOKEN", 0), ("BUILD_BYTES_PER_POSTING", 3.5 * 2 ** 30 / postings),
+                        ("BUILD_BYTES_PER_DOCUMENT", 0), ("BUILD_BYTES_PER_TERM", 0), ("BUILD_BYTES_PER_PROCESS", 0),
+                        ("MEMORY_GB_MARGIN", 1)):
+        monkeypatch.setattr(NindIndexer, name, value)
+    assert indexer._plan_jsonl_memory(path, end, "id", "contents", 2, 1, 1) == (1, 2, math.ceil(3.5 * 2 ** 30 / 4))
+    indexer.index_jsonl(path, workers=2, memory_gb=1)
+
+    def term_index(index_dir):
+        with open(os.path.join(index_dir, "corpus.CURRENT")) as f:
+            with open(os.path.join(index_dir, f.read().strip(), "corpus.nindtermindex"), "rb") as g:
+                return g.read()
+    # (but the lexicon's identification, its time, in the last 8 bytes)
+    passes, direct = term_index(str(tmp_path / "passes")), term_index(str(tmp_path / "direct"))
+    assert len(passes) == len(direct) and passes[:-8] == direct[:-8]
 
 
 def test_index_jsonl_rejects_bad_records_and_keeps_previous_index(tmp_path):

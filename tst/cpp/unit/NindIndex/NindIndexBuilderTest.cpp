@@ -145,6 +145,42 @@ TEST_CASE("NindIndexBuilder.SameAsAnUpdate") {
     CHECK(report.ok());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindIndexBuilder.PostingsBudgetWritesTheSameFile") {
+    //Zipf-like documents, some with frequencies of 255 and more (kept apart), written a range of
+    //terms at a time: each term alone, ranges of a few postings, all at once
+    TestTempDir tmp;
+    uint64_t state = 5;
+    NindIndexBuilder builder;
+    for (unsigned int d = 0; d < 700; d++) {
+        vector<uint32_t> termIds;
+        const unsigned int length = 1 + next(state) % 60;
+        for (unsigned int i = 0; i < length; i++) {
+            const unsigned int rank = (unsigned int)(next(state) % 1000);
+            termIds.push_back(1 + rank * rank / 8400);          //1..119
+        }
+        if (d % 97 == 0) termIds.insert(termIds.end(), 300 + d, 1 + d % 119);
+        builder.addDocument(40 + d, termIds.data(), termIds.size());
+    }
+    const NindIndex::Identification identification(1, 2);
+    const size_t budgets[] = {0, 1, 5, 5 * 37, 5 * 1000, 1 << 30};
+    vector<unsigned char> expected;
+    for (size_t b = 0; b < sizeof(budgets) / sizeof(budgets[0]); b++) {
+        CAPTURE(budgets[b]);
+        builder.setPostingsBudget(budgets[b]);
+        const string base = tmp.file("budget" + to_string(b));
+        {
+            NindTermIndex terms(base, true, identification, 0, 64);
+            terms.beginBulk();
+            builder.writeTermIndex(terms, identification);
+            terms.endBulk();
+        }
+        const vector<unsigned char> bytes = readFileBytes(base + ".nindtermindex");
+        if (b == 0) expected = bytes;
+        else CHECK(bytes == expected);
+    }
+    CHECK(expected.size() > 1000);
+}
+////////////////////////////////////////////////////////////
 TEST_CASE("NindIndexBuilder.LargeFrequencies") {
     //frequencies around the 8-bit postings' limit (255 and more are kept apart)
     TestTempDir tmp;

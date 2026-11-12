@@ -50,11 +50,82 @@ void putOffset(vector<unsigned char> &bytes, const uint64_t value, const bool wi
     else put4(bytes, (uint32_t)value);
 }
 
-struct NameLess {
-    const vector<string> &names;
-    explicit NameLess(const vector<string> &n): names(n) {}
-    bool operator()(const uint32_t a, const uint32_t b) const { return names[a] < names[b]; }
-};
+//byte order (as std::string's)
+int compareNames(const pair<const char *, size_t> &a, const pair<const char *, size_t> &b)
+{
+    const int cmp = memcmp(a.first, b.first, min(a.second, b.second));
+    return cmp != 0 ? cmp : (a.second < b.second ? -1 : (a.second > b.second ? 1 : 0));
+}
+
+//The file of count documents in increasing ident order, document i's ident identAt(i) (dense: the
+//first one's then consecutive), its name nameAt(i) (pointer, bytes): checks the names unique and
+//streams the file, holding 4 bytes a document (their name order)
+template <class IdentAt, class NameAt>
+void writeNames(const string &fileName, const uint32_t count, const bool dense,
+                const IdentAt &identAt, const NameAt &nameAt)
+{
+    //ranks in name order: names are unique
+    vector<uint32_t> byName(count);
+    for (uint32_t i = 0; i < count; i++) byName[i] = i;
+    sort(byName.begin(), byName.end(), [&nameAt](const uint32_t a, const uint32_t b) {
+        return compareNames(nameAt(a), nameAt(b)) < 0; });
+    for (uint32_t i = 1; i < count; i++) {
+        if (compareNames(nameAt(byName[i]), nameAt(byName[i - 1])) == 0) {
+            const pair<const char *, size_t> name = nameAt(byName[i]);
+            throw invalid_argument("NindDocNames::write: duplicate document name: " + string(name.first, name.second));
+        }
+    }
+    uint64_t namesBytes = 0;
+    for (uint32_t i = 0; i < count; i++) namesBytes += nameAt(i).second;
+    const bool wide = namesBytes > 0xFFFFFFFFu;
+    //crejation exclusive : jamais d'ejcrasement d'un fichier existant
+    FILE *file = fopen(fileName.c_str(), "wbx");
+    if (file == 0) throw OpenFileException(fileName);
+    try {
+        vector<unsigned char> bytes;
+        const size_t FLUSH_BYTES = 1 << 20;
+        auto flush = [&]() {
+            if (!bytes.empty() && fwrite(bytes.data(), 1, bytes.size(), file) != bytes.size()) throw WriteFileException(fileName);
+            bytes.clear();
+        };
+        //(NINDDN02: 8-byte idents)
+        const char *magic = wide ? MAGIC_V3 : MAGIC_V2;
+        bytes.assign(magic, magic + sizeof(MAGIC_V2));
+        put4(bytes, dense ? 0 : FLAG_IDENTS);
+        put4(bytes, count);
+        put8(bytes, count ? identAt(0) : 0);
+        for (uint32_t i = 0; i < count && !dense; i++) {
+            put8(bytes, identAt(i));
+            if (bytes.size() >= FLUSH_BYTES) flush();
+        }
+        uint64_t offset = 0;
+        putOffset(bytes, 0, wide);
+        for (uint32_t i = 0; i < count; i++) {
+            offset += nameAt(i).second;
+            putOffset(bytes, offset, wide);
+            if (bytes.size() >= FLUSH_BYTES) flush();
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            put4(bytes, byName[i]);
+            if (bytes.size() >= FLUSH_BYTES) flush();
+        }
+        flush();
+        for (uint32_t i = 0; i < count; i++) {
+            const pair<const char *, size_t> name = nameAt(i);
+            if (name.second != 0 && fwrite(name.first, 1, name.second, file) != name.second)
+                throw WriteFileException(fileName);
+        }
+    }
+    catch (...) {
+        fclose(file);
+        remove(fileName.c_str());
+        throw;
+    }
+    if (fclose(file) != 0) {
+        remove(fileName.c_str());
+        throw WriteFileException(fileName);
+    }
+}
 }
 ////////////////////////////////////////////////////////////
 //brief Write the names of documents into a new file
@@ -72,49 +143,32 @@ void NindDocNames::write(const string &fileName,
     for (uint32_t i = 0; i < count; i++) order[i] = i;
     stable_sort(order.begin(), order.end(), [&docIdents](const uint32_t a, const uint32_t b) {
         return docIdents[a] < docIdents[b]; });
-    vector<string> sortedNames(count);
-    vector<NindDocId> sortedIdents(count);
-    for (uint32_t i = 0; i < count; i++) {
-        sortedIdents[i] = docIdents[order[i]];
-        sortedNames[i] = names[order[i]];
-        if (i > 0 && sortedIdents[i] == sortedIdents[i - 1])
-            throw invalid_argument("NindDocNames::write: document " + to_string(sortedIdents[i]) + " named twice");
-    }
-    //ranks in name order: names are unique
-    vector<uint32_t> byName(count);
-    for (uint32_t i = 0; i < count; i++) byName[i] = i;
-    sort(byName.begin(), byName.end(), NameLess(sortedNames));
     for (uint32_t i = 1; i < count; i++) {
-        if (sortedNames[byName[i]] == sortedNames[byName[i - 1]])
-            throw invalid_argument("NindDocNames::write: duplicate document name: " + sortedNames[byName[i]]);
+        if (docIdents[order[i]] == docIdents[order[i - 1]])
+            throw invalid_argument("NindDocNames::write: document " + to_string(docIdents[order[i]]) + " named twice");
     }
-    const bool dense = count == 0 || sortedIdents.back() - sortedIdents.front() == (uint64_t)count - 1;
-    //the file (NINDDN02: 8-byte idents)
-    uint64_t namesBytes = 0;
-    for (uint32_t i = 0; i < count; i++) namesBytes += sortedNames[i].size();
-    const bool wide = namesBytes > 0xFFFFFFFFu;
-    const char *magic = wide ? MAGIC_V3 : MAGIC_V2;
-    vector<unsigned char> bytes(magic, magic + sizeof(MAGIC_V2));
-    put4(bytes, dense ? 0 : FLAG_IDENTS);
-    put4(bytes, count);
-    put8(bytes, count ? sortedIdents.front() : 0);
-    if (!dense) for (uint32_t i = 0; i < count; i++) put8(bytes, sortedIdents[i]);
-    uint64_t offset = 0;
-    putOffset(bytes, 0, wide);
-    for (uint32_t i = 0; i < count; i++) {
-        offset += sortedNames[i].size();
-        putOffset(bytes, offset, wide);
-    }
-    for (uint32_t i = 0; i < count; i++) put4(bytes, byName[i]);
-    for (uint32_t i = 0; i < count; i++) bytes.insert(bytes.end(), sortedNames[i].begin(), sortedNames[i].end());
-    //crejation exclusive : jamais d'ejcrasement d'un fichier existant
-    FILE *file = fopen(fileName.c_str(), "wbx");
-    if (file == 0) throw OpenFileException(fileName);
-    const bool ok = fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
-    if (fclose(file) != 0 || !ok) {
-        remove(fileName.c_str());
-        throw WriteFileException(fileName);
-    }
+    const bool dense = count == 0 || docIdents[order[count - 1]] - docIdents[order[0]] == (uint64_t)count - 1;
+    writeNames(fileName, count, dense,
+               [&](const uint32_t i) { return docIdents[order[i]]; },
+               [&](const uint32_t i) { const string &name = names[order[i]];
+                                       return make_pair(name.data(), name.size()); });
+}
+////////////////////////////////////////////////////////////
+//brief Write the names of consecutive documents, given packed, into a new file
+void NindDocNames::write(const string &fileName,
+                         const NindDocId firstDocIdent,
+                         const char *names, const size_t namesBytes,
+                         const uint32_t *lengths, const size_t count)
+{
+    if (count > 0xFFFFFFFFu) throw invalid_argument("NindDocNames::write: too many documents");
+    vector<uint64_t> offsets(count + 1);
+    offsets[0] = 0;
+    for (size_t i = 0; i < count; i++) offsets[i + 1] = offsets[i] + lengths[i];
+    if (offsets[count] != namesBytes)
+        throw invalid_argument("NindDocNames::write: the names' lengths don't add up to their bytes");
+    writeNames(fileName, (uint32_t)count, true,
+               [&](const uint32_t i) { return firstDocIdent + i; },
+               [&](const uint32_t i) { return make_pair(names + offsets[i], (size_t)(offsets[i + 1] - offsets[i])); });
 }
 ////////////////////////////////////////////////////////////
 //brief Merge the names files of shards into a new file
