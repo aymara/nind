@@ -28,5 +28,5 @@ See {doc}`../quickstart` for a walk-through.
 
 ```{eval-rst}
 .. autoclass:: nind.nind_engine.IndexUpdate
-   :members: add_file, add_text, add_tokens, remove, doc_id, LEXICON_MIN_BUCKETS, LEXICON_MAX_LOAD, INDIRECTION_BLOC_MIN
+   :members: add_file, add_text, add_texts, add_tokens, add_jsonl, remove, doc_id, stats, MERGE_FACTOR, MAX_MERGED_DOCS
 ```

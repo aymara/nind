@@ -29,6 +29,8 @@ tools) that `nind._native` doesn't expose yet.
 - **Just want the CLI?** See {doc}`cli`.
 - **How fast is it?** See the {doc}`benchmarks` against Lucene, tantivy and
   bm25s.
+- **Using Milvus?** {doc}`milvus` puts nind in place of Milvus's built-in
+  BM25 full text search: same code, same results, faster searches.
 
 ## Installation
 
@@ -50,4 +52,5 @@ architecture
 api/index
 cli
 benchmarks
+milvus
 ```

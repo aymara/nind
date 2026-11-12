@@ -143,6 +143,18 @@ uv run python3 Nind_trouveMotsSansOccurrence.py <fichier>
 See the [command-line tools guide](https://aymara.github.io/nind/cli.html)
 for the full list and usage of each.
 
+## Milvus full text search
+
+`NindMilvusClient` ([`examples/milvus/`](examples/milvus/), one file to copy
+into your project) is a `pymilvus.MilvusClient` in which nind replaces Milvus's
+built-in BM25. Code written for Milvus full text search runs unchanged:
+collections, inserts, upserts, deletes, searches with filters and fields, and
+hybrid searches with vector fields. On BEIR corpora and MS MARCO (8.8M
+passages), it gives the same nDCG@10 and the same top 10 for 99–100% of
+queries as Milvus 3.0's own BM25, and its searches returning ids are 2 to 10
+times faster. It needs nind ≥ 4.2 and pymilvus 3.0. See the
+[Milvus guide](https://aymara.github.io/nind/milvus.html).
+
 ## How it works
 
 nind's binary files are a small fixed header, one or more fixed-size
