@@ -91,22 +91,23 @@ with nind's; each query is searched in both, top 10, one at a time, from Python.
 | scifact | 5,183 | 0.6645 / 0.6645 | 100% | 5.7e-4 |
 | fiqa | 57,600 | 0.2380 / 0.2380 | 99.5% | 1.3e-4 |
 | MS MARCO, 1M passages | 1,000,000 | (no qrels) | 99.1% | 9.8e-4 |
-MSMARCO_ROW
+| MS MARCO (all, no stop words) | 8,841,823 | 0.2317 / 0.2317 | 99.8% (same set: 100%) | 1.6e-2 |
 
 The remaining differences are ties and float rounding.
 
-Latency, p50 / p95 in ms (fiqa; MS MARCO 1M):
+Latency, p50 / p95 in ms:
 
-| | fiqa | MS MARCO 1M |
-|---|---|---|
-| Milvus BM25, ids | 7.19 / 9.01 | 7.43 / 9.77 |
-| nind, ids | **0.46 / 1.06** | **0.72 / 2.75** |
-| Milvus BM25, with `text` | 7.60 / 9.49 | 7.94 / 11.72 |
-| nind, with `text` | 8.60 / 10.99 | 8.81 / 17.13 |
-| nind engine alone (no client) | 0.44 / 1.13 | 0.68 / 2.75 |
+| | fiqa | MS MARCO 1M | MS MARCO 8.8M |
+|---|---|---|---|
+| Milvus BM25, ids | 7.19 / 9.01 | 7.43 / 9.77 | 11.08 / 20.65 |
+| nind, ids | **0.46 / 1.06** | **0.72 / 2.75** | **4.95 / 19.84** |
+| Milvus BM25, with `text` | 7.60 / 9.49 | 7.94 / 11.72 | 11.70 / 20.95 |
+| nind, with `text` | 8.60 / 10.99 | 8.81 / 17.13 | 11.94 / 28.55 |
+| nind engine alone (no client) | 0.44 / 1.13 | 0.68 / 2.75 | 4.88 / 19.53 |
 
 Time to insert and be searchable (index built): fiqa 7.5 s (Milvus) / 7.7 s (nind);
-MS MARCO 1M 56.7 s / 57.6 s. Most of it is the Milvus insert both pay (the nind
+MS MARCO 1M 56.7 s / 57.6 s; MS MARCO 8.8M 572 s / 735 s (nind merging its segments
+as it goes: 500k rows per update). Most of it is the Milvus insert both pay (the nind
 collection still stores the text).
 
 What it says: the BM25 search itself is ~10x faster in nind (a Milvus search costs at
