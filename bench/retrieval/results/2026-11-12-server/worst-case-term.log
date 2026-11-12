@@ -1,0 +1,11 @@
+shard 0: 8.4 s, peak 4.38 GB
+shard 1: 8.4 s, peak 4.38 GB
+shard 2: 8.5 s, peak 4.38 GB
+shard 3: 8.4 s, peak 4.38 GB
+  merged: 1 terms, 1 words
+merge: 27.0 s, peak 17.45 GB
+term index: 0.071 GB
+  <VerifyReport ok, format v2, 1 words, 1 terms, 0 documents>
+verify: 16.3 s, peak 13.59 GB
+  pruned top 10 in 41.114 s: first document 0
+search: 54.6 s, peak 15.50 GB
