@@ -94,6 +94,8 @@ with indexer.update() as update:
     update.add_texts(texts, doc_ids=ids)      # or names=[...]; as add_text for each
 ```
 
+This is how {doc}`milvus` keeps a nind index in step with a Milvus collection.
+
 `add_file(path)`, `add_files(paths)` and `remove_documents(ids)` on the
 indexer are one-update shortcuts. An update costs what it changes, whatever
 the size of the index (about 0.25 s to publish, with its `fsync`s, plus the

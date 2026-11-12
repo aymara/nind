@@ -37,7 +37,17 @@ client.hybrid_search("docs", [AnnSearchRequest(data=["a query"], anns_field="spa
 | `compare.py` | built-in vs nind BM25 on a BEIR-style corpus: nDCG@10, agreement, latency, insertion time |
 | `milvus-standalone.sh` | a Milvus standalone server in Docker (embedded etcd, local storage) |
 
-## Run it
+The guide on the documentation site: https://aymara.github.io/nind/milvus.html
+
+## Use it in a project
+
+`nind_milvus.py` isn't part of the `nind` package: copy it next to your code, with
+
+```
+pip install "nind>=4.2" "pymilvus[milvus-lite]==3.0.3"   # nind 4.2: IndexUpdate.add_texts
+```
+
+## Run it here
 
 ```
 uv pip install "pymilvus[milvus-lite]==3.0.3"     # client 3.0, Milvus Lite (local file) included

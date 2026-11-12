@@ -317,3 +317,16 @@ of 3.0.0 (format v2).
   for the lexicon word `§` alone (undefined behaviour).
 - **CLI for Amose/LIMA multi-process indexing.** A small C++ program running
   `NindAmoseMerge` over shard prefixes.
+- **Milvus integration** (`examples/milvus/`, `docs/milvus.md`; a proof of
+  concept since 4.2.0). Left:
+  - Ship it: a `nind.milvus` module with a `milvus` extra (pymilvus 3.0) instead of a file to copy.
+  - Avoid the Milvus query that fetches `output_fields` and applies filters (one
+    round trip, 5–7 ms: a search with fields is on par with Milvus's own): store
+    chosen fields with nind, or filter values as nind document masks.
+  - Analyzers beyond standard/whitespace/lowercase (stop words, stemming, languages)
+    as nind tokenizer options.
+  - Writes logged so that a failure between Milvus and nind repairs itself
+    (today: `rebuild_bm25`).
+  - Insertion at 8.8M is 28% slower than Milvus's (segment merges during the load:
+    one update per 500k rows); merge only at the end of a bulk load.
+  - `bm25_batch` isn't thread-safe; `using_database` isn't followed.
