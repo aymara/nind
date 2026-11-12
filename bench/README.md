@@ -566,18 +566,21 @@ build's; every sharded index also passes `verify_index(cross_check=True)`.
 The worst term: `worst_case_term.py`, one term in each of 350M documents (over the
 ~306M a term could hold), 4 shards, one phase at a time, without local index:
 
-| phase | time | peak |
-|---|---|---|
-| each shard (87.5M documents) | 7–22 s | 5–6.3 GB |
-| merge | 22.2 s | 18.32 GB |
+| phase | time | peak | again (server, 2026-11-12) |
+|---|---|---|---|
+| each shard (87.5M documents) | 7–22 s | 5–6.3 GB | 8.4 s, 4.38 GB |
+| merge | 22.2 s | 18.32 GB | 27.0 s, 17.45 GB |
+| `verify_index` | – | – | 16.3 s, 13.59 GB |
+| pruned top 10 | – | – | 54.6 s (41.1 s searching), 15.5 GB |
 
 Segments instead of merging (`bench/segments_search.py`, `bench/segments_update.py`;
 results and design in `docs/proposals/segments.md`): at 8.84M passages without stopwords,
 an 8-shard build takes 25 s (46 s direct), +88k documents 2.6 s, top 10 identical.
 
-The merged term file takes 71 MB. The run was stopped under system memory pressure
-during `verify_index` (possibly a contributor: it read such a term twice as lists at
-the time; it reads flat now), so the read back and the search weren't measured: rerun it.
+The merged term file takes 71 MB. The first run was stopped under system memory pressure
+during `verify_index`; on the server (`bench/retrieval/results/2026-11-12-server/worst-case-term.log`)
+the term reads back clean and the top 10 is right. The merge's reserve barely lowered its peak,
+and the search skips nothing when every score is equal: see `docs/TODO.md`.
 
 ## 7. Server runs: 138M documents, 48 threads (2026-11-05 to 2026-11-12)
 

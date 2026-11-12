@@ -14,3 +14,7 @@ driver's last result wins).
   run's driver result, `budget_gb`, and its cgroup's `capped.sh` log), Lucene's and tantivy's from
   `2026-11-10-server`.
 - `stage7.log`: the stage's output; `scripts/`: the stage and its helpers.
+- `worst-case-term.log`: `bench/worst_case_term.py` (one term in 350M documents, 4 shards, merge,
+  `verify_index`, a pruned top 10), after stage 7 on the idle machine.
+- `latency-pinning.jsonl`: one CPU against twelve, 10 processes each, alternated (`scripts/latency_pinning.sh`;
+  8.8M, stopwords removed, top 10 on one thread, 3 passes each).

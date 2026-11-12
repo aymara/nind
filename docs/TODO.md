@@ -62,18 +62,28 @@ of 3.0.0 (format v2).
     section 7): builds direct and in 8 or 32 segments, updates, search with
     threads, `verify_index` on every segment (4.0G and 5.2G postings), the same
     top 10 for every layout.
-  - **Worst-case term.** A synthetic term in 350M documents went through shards
-    and merge (18.3 GB, 71 MB); the run was stopped under system memory pressure
-    during `verify_index` (it then read such a term twice as lists, possibly a
-    contributor; it reads flat now), so reading it back is unverified:
-    `bench/worst_case_term.py` to rerun (the server has the room).
-  - **Merge memory.** Postings vectors grew by doubling (18.3 GB there, ~12
-    possible with a reserve from the shards' directories). Done: a term of a
-    million postings or more in a shard gets its categories reserved from every
-    shard's directory (checked: 1.5M documents in 3 shards, the same index as a
-    direct build, `verify_index` clean); to measure on the worst-case term. The
-    merge is still one thread, and needs the shards and the merged index on disk
-    together.
+  - [x] **Worst-case term.** A synthetic term in 350M documents through 4
+    shards and their merge, read back (`bench/worst_case_term.py`, 2026-11-12,
+    `bench/retrieval/results/2026-11-12-server/worst-case-term.log`): shards
+    8.4 s and 4.38 GB each, merge 27.0 s and 17.45 GB (71 MB), `verify_index`
+    clean in 16.3 s (13.59 GB), the pruned top 10 right (documents 0 to 9).
+  - **Merge memory.** Postings vectors grew by doubling (18.3 GB there). Done: a
+    term of a million postings or more in a shard gets its categories reserved
+    from every shard's directory (1.5M documents in 3 shards: the same index as
+    a direct build); on the worst-case term 18.3 -> 17.45 GB only, the ~12
+    estimated was wrong. What's left, for 350M postings: the merged postings at
+    16 bytes each (`NindTermIndex::Document`: 5.6 GB, 8 would do: 32-bit
+    positions and frequencies), one shard's read before appending (1.4 GB),
+    and the documents' lengths given as `pair<NindDocId, unsigned>` (16 bytes a
+    document, 5.6 GB, freed once the writer has its copy) from the caller's
+    arrays (the script's 4.2 GB). The merge is still one thread, and needs the
+    shards and the merged index on disk together.
+  - **MaxScore on equal scores.** The worst-case term's pruned top 10 took 41 s
+    (15.5 GB): every document scores the same (length 1, frequency 1), so no
+    block's bound falls under theta and nothing is skipped, ~117 ns a posting.
+    Ties go by increasing id: a block whose bound equals theta, after the top
+    k's last document, could be skipped. Synthetic, but a stopword in documents
+    of similar lengths comes close.
   - **Local index readers.** Opening an index no longer reads a header per
     document (0.4 s at 8.8M, was 7.3 s), but the first local index lookup does,
     once (~4 min at 300M, extrapolated): store the id map in the file?
@@ -278,13 +288,17 @@ of 3.0.0 (format v2).
   queries with stopwords, 5 of 637 without): 3 terms 19.9 -> 9.8 ms (Lucene 9.4),
   4 terms 58.6 -> 23.7 (16.4); median 42.4 -> 32.2 ms (28.8), mean 66.6 -> 59.8
   (46.7, 500 queries). Left: queries of 10 terms or more (282 ms against 169).
-- **Latency varies between processes.** The same search, one process per run:
-  2.12 or 2.67 ms (8.8M, one thread), seen again while measuring (runs of a
-  setting 10-20% apart on every kind of query, the code path unchanged). Pinned
-  to one CPU, ten processes agree within 2% (node 1's memory or node 0's), with
-  the same huge pages (14-16 MB): not THP. The benchmarks pin to 12 CPUs, a
-  process free to move among them: try one CPU against twelve when the machine
-  is idle; meanwhile compare settings in alternated runs, several each.
+- **Latency varies over time, not between pinnings.** The same search, one
+  process per run: 2.12 or 2.67 ms (8.8M, one thread), seen again while
+  measuring (runs of a setting 10-20% apart, the code path unchanged); THP
+  ruled out. One CPU against twelve on the idle machine (2026-11-12, 10
+  processes each, alternated, 3 passes of 6,980 queries;
+  `results/2026-11-12-server/latency-pinning.jsonl`): no difference, a process
+  free on 12 CPUs migrates 0-1 times in 3 passes; both at 2.37-2.40 ms, except
+  4 consecutive runs (2 of each) at 2.23-2.25 and the first run's last 2
+  passes at 1.88: a state of the machine, changing within a run (other
+  services on the server; CPU frequency?). So compare settings in alternated
+  runs, several each, as the benchmarks do.
 - [x] **Index larger than memory** (section 7): with 1 GB of page cache for a
   14 GB index, nind's top 10 is unchanged; 8 segments with 8 threads lose
   their lead (3.8 -> 19 ms).
