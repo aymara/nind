@@ -46,6 +46,10 @@ THEMES = {
 SCALING = [("nind", 0), ("nind-8s-8t", 1), ("lucene", 2), ("tantivy", 3)]
 SIZES = [("v2-stop-1M", 1.0), ("v2-stop-4M", 4.0), ("v2-stop-8M", 8.0), ("v2-stop-16M", 16.0),
          ("v2-stop-32M", 32.0), ("v2-stop-64M", 64.0), ("v2-stop", 138.36)]
+DOC_SIZES = [("v21doc-stop-1M", 1.0), ("v21doc-stop-4M", 4.0), ("v21doc-stop", 10.96)]
+#: Anserini's published BM25 (k1=0.9, b=0.4, Porter stemming) nDCG@10 on MS MARCO v2.1 documents
+#: (docs/reproduce/from-document-collection/dl2X-doc-msmarco-v2.1.md): (topics judged, nDCG@10)
+ANSERINI_DL = {"DL21": (57, 0.5183), "DL22": (76, 0.2991), "DL23": (82, 0.2914)}
 LAPTOP_SCALING = [("nind", 0), ("nind-4t", 1), ("lucene", 2), ("tantivy", 3)]
 LAPTOP_SIZES = [("msmarco-stop-1M", 1.0), ("msmarco-stop-2M", 2.0), ("msmarco-stop-4M", 4.0), ("msmarco-stop", 8.84)]
 
@@ -513,6 +517,9 @@ showed before are kept at the end.
 - **Updates.** Adding 1% more documents writes a new segment: {v1_nind_update} s at 8.8M (Lucene
   {v1_lucene_update} s, tantivy {v1_tantivy_update} s), {v2_nind_update} s at 138M (Lucene
   {v2_lucene_update} s, tantivy {v2_tantivy_update} s).
+- **Long documents** (MS MARCO v2.1, 10.96M web pages of 1,191 tokens on average): Lucene's top 10
+  is faster on one thread ({docs_nind} ms for nind, {docs_lucene} ms for Lucene, tantivy {docs_tantivy} ms); nind's
+  top 1000 is faster ({docs_nind_1000} ms against {docs_lucene_1000}), and 8 segments with 8 threads take {docs_8s8t} ms.
 - **Quality.** The same BM25: nDCG@10 {v1_nind_ndcg} for nind and {v1_lucene_ndcg} for Lucene at 8.8M,
   {v2_nind_ndcg} and {v2_lucene_ndcg} at 138M; every nind layout returns the same top 10.
 ```
@@ -544,6 +551,41 @@ The relevance judgments of MS MARCO v2's dev queries are sparse (about one passa
 low nDCG@10 for every system. The top 10 of Lucene and nind overlap at {v2_overlap_lucene} (tantivy
 {v2_overlap_tantivy}). `verify_index` read back every definition of the one-index and 8-segment builds without error
 (4.0G postings; 5.2G with stopwords).
+
+## Long documents: MS MARCO v2.1, 10.96 million web pages
+
+TREC RAG 2024's corpus: web pages (url, title, headings and body, as Anserini indexes them), 1,191
+tokens each on average once stopwords are removed (34 for a v2 passage), 13.1G tokens in all, the
+longest 241,543. The dev queries (4,552), one pass of warm-up, two measured; stopwords removed.
+
+{docs_image}
+
+{docs_table}
+
+As the corpus grows (top 10, median):
+
+{docs_scaling_table}
+
+Stopwords kept (17.2G tokens). Not updated.
+
+{docs_full_table}
+
+**On long documents, Lucene's top 10 is faster than nind's on one thread** from 4M documents on
+({docs_nind} ms against {docs_lucene} ms at 10.96M; nind leads at 1M), where it isn't on passages; nind's top 1000
+stays faster ({docs_nind_1000} ms against {docs_lucene_1000} ms), and so is an index of 8 segments searched with 8
+threads ({docs_8s8t} ms). nind's builds are faster and take three to four times Lucene's memory, its index a third more
+space. Its 32-segment index's first update merged 9.8M documents ({docs_32s_update} s). See `docs/TODO.md`, "Long
+documents". `verify_index` read back every definition of the one-index and 8-segment builds (39.3M terms,
+4.8G postings; 5.1G with stopwords).
+
+The judged TREC Deep Learning 2021-2023 topics (215), nDCG@10, with our BM25 parameters and with
+Anserini's defaults (k1 = 0.9, b = 0.4):
+
+{docs_trec_table}
+
+Anserini's published runs on this corpus, which stem with Porter, give {anserini_dl} over the same
+topics: the harness's Lucene agrees with it, and every system ranks alike (top 10 overlap with
+nind {docs_overlap_lucene}).
 
 ## MS MARCO, 8.8 million passages
 
@@ -669,12 +711,16 @@ def main():
     parser.add_argument("--callers-code", default="", help="which nind the several-callers runs used (a sentence)")
     parser.add_argument("--code-of", default=None, help="a later version with the same code as --version")
     parser.add_argument("--version-note", default=None, help="a sentence after the version's (what was measured with it)")
+    parser.add_argument("--documents", nargs="*", default=[], help="the long documents' report.csv (MS MARCO v2.1)")
+    parser.add_argument("--documents-anserini", nargs="*", default=[],
+                        help="the long documents' TREC topics searched with Anserini's BM25 parameters (report.csv)")
     parser.add_argument("--laptop-date", required=True)
     parser.add_argument("--laptop-version", default="3.2.0")
     parser.add_argument("--laptop-previous-date", required=True,
                         help="when the laptop's other systems were measured")
     args = parser.parse_args()
-    rows = read(args.server)
+    rows = read(args.server + args.documents)
+    anserini = read(args.documents_anserini) if args.documents_anserini else {}
     laptop = read(args.laptop)
     static = os.path.join(args.docs, "_static", "bench")
     os.makedirs(static, exist_ok=True)
@@ -683,6 +729,8 @@ def main():
                       os.path.join(static, "scaling-%s.svg" % theme), theme)
         systems_chart(rows, "v2-stop", SCALING, os.path.join(static, "msmarco-v2-%s.svg" % theme), theme)
         systems_chart(rows, "msmarco-stop", SCALING, os.path.join(static, "msmarco-%s.svg" % theme), theme)
+        if args.documents:
+            systems_chart(rows, "v21doc-stop", SCALING, os.path.join(static, "msmarco-v21doc-%s.svg" % theme), theme)
         scaling_chart(laptop, LAPTOP_SCALING, LAPTOP_SIZES, "documents (MS MARCO passages, stopwords removed)",
                       os.path.join(static, "laptop-scaling-%s.svg" % theme), theme)
         systems_chart(laptop, "msmarco-stop", LAPTOP_SCALING, os.path.join(static, "laptop-msmarco-%s.svg" % theme),
@@ -733,9 +781,26 @@ def main():
         r = builds.get((large, system), {}).get(threads)
         return fmt(r[key] / scale) if r and r.get(key) is not None else "–"
 
-    def overlap(system):
-        value = number(rows.get(("v2-stop", system)), "vs_nind")
+    def overlap(system, dataset="v2-stop"):
+        value = number(rows.get((dataset, system)), "vs_nind")
         return "%.3f" % value if value is not None else "–"
+
+    def trec_table():
+        systems = [s for s, _ in SYSTEMS if s not in SEARCH_ONLY and ("v21doc-stop-trec", s) in rows]
+        lines = ["| system | k1 = 1.2, b = 0.75 | k1 = 0.9, b = 0.4 | stopwords kept, 1.2 / 0.75 | top 10, median |",
+                 "|---|---:|---:|---:|---:|"]
+        for system in systems:
+            ours = number(rows.get(("v21doc-stop-trec", system)), "nDCG@10")
+            theirs = number(anserini.get(("v21doc-stop-trec", system)), "nDCG@10")
+            kept = number(rows.get(("v21doc-trec", system)), "nDCG@10")
+            lines.append("| %s | %s | %s | %s | %s ms |" % (
+                NAMES[system], *("%.4f" % v if v is not None else "–" for v in (ours, theirs, kept)),
+                get("v21doc-stop-trec", system, "k10_p50")))
+        return "\n".join(lines)
+
+    topics = sum(n for n, _ in ANSERINI_DL.values())
+    anserini_dl = "nDCG@10 %.3f (%s)" % (sum(n * v for n, v in ANSERINI_DL.values()) / topics, ", ".join(
+        "%s %.4f" % (name, v) for name, (_, v) in ANSERINI_DL.items()))
 
     page = PAGE.format(
         version=args.version, date=args.date, code_of=" (the same code as %s)" % args.code_of if args.code_of else "",
@@ -764,6 +829,17 @@ def main():
         v1_nind_ndcg=get("msmarco-stop", "nind", "nDCG@10", 3), v1_lucene_ndcg=get("msmarco-stop", "lucene", "nDCG@10", 3),
         v2_nind_ndcg=get("v2-stop", "nind", "nDCG@10", 4), v2_lucene_ndcg=get("v2-stop", "lucene", "nDCG@10", 4),
         v2_overlap_lucene=overlap("lucene"), v2_overlap_tantivy=overlap("tantivy"),
+        docs_nind=get("v21doc-stop", "nind", "k10_p50"), docs_lucene=get("v21doc-stop", "lucene", "k10_p50"),
+        docs_tantivy=get("v21doc-stop", "tantivy", "k10_p50"), docs_8s8t=get("v21doc-stop", "nind-8s-8t", "k10_p50"),
+        docs_nind_1000=get("v21doc-stop", "nind", "k1000_p50"), docs_lucene_1000=get("v21doc-stop", "lucene", "k1000_p50"),
+        docs_32s_update=get("v21doc-stop", "nind-32s", "update_s"),
+        docs_overlap_lucene=overlap("lucene", "v21doc-stop"),
+        docs_image=image("msmarco-v21doc", "MS MARCO v2.1 documents, 10.96M web pages: search latency, build time, "
+                                           "index size and update time per system; the same data is in the table below."),
+        docs_table=table(rows, "v21doc-stop", columns), docs_full_table=table(rows, "v21doc", columns),
+        docs_scaling_table=scaling_table(rows, [(s, None) for s in ("nind", "nind-8t", "nind-8s-8t", "nind-32s-8t",
+                                                                  "lucene", "tantivy")], DOC_SIZES),
+        docs_trec_table=trec_table(), anserini_dl=anserini_dl,
         scaling_image=image("scaling", "Median top-10 latency against corpus size, 1M to 138M passages, for nind, "
                                        "nind in 8 segments with 8 threads, Lucene and tantivy; the same data is in "
                                        "the table below."),

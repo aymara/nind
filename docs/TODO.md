@@ -288,6 +288,19 @@ of 3.0.0 (format v2).
   queries with stopwords, 5 of 637 without): 3 terms 19.9 -> 9.8 ms (Lucene 9.4),
   4 terms 58.6 -> 23.7 (16.4); median 42.4 -> 32.2 ms (28.8), mean 66.6 -> 59.8
   (46.7, 500 queries). Left: queries of 10 terms or more (282 ms against 169).
+- **Long documents** (MS MARCO v2.1, 10.96M web pages, 13.05G tokens; `bench/README.md`
+  section 8). Done: lexicons of over 16.7M words (39.3M here) no longer break the writers
+  (`NindPadFile::MAX_ENTRIES_BLOC_SIZE`). Left, all from stage 8:
+  - **Search on one thread**: 6.73 ms against Lucene's 3.86 (p99 62.6 vs 36.5) where nind led
+    on passages; it leads at 1M documents, trails from 4M. Profile a long-document query: postings
+    of documents of 1,200 tokens (frequencies, lengths spread wider, impacts less selective?).
+  - **Build memory**: 77.5 GB for one index (6 bytes a token, Lucene 20.9 GB); 8 segments 69 GB
+    (8 builds at once, nothing bounds them without `memory_gb`). Check the `memory_gb` model on
+    this corpus (its tokens per document and vocabulary differ from the passages').
+  - **Index size**: 11.2 GB against Lucene's 8.45.
+  - **The 32-segment index's first update** merged a tier of 9.76M documents: 1,689 s for +1%
+    (11.9 s for 8 segments). `MAX_MERGED_DOCS` counts documents, not their tokens: a tier of long
+    documents is many times the work.
 - **Latency varies over time, not between pinnings.** The same search, one
   process per run: 2.12 or 2.67 ms (8.8M, one thread), seen again while
   measuring (runs of a setting 10-20% apart, the code path unchanged); THP

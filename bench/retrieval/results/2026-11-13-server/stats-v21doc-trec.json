@@ -1,0 +1,35 @@
+{
+  "dataset": "msmarco-v2.1-doc/trec-dl-2021-2023 (judged)",
+  "limit": null,
+  "truncated": false,
+  "documents": 10960555,
+  "dropped_empty_documents": 0,
+  "avgdl": 1572.4001129504848,
+  "tokens": 17234377920,
+  "longest_document": 241772,
+  "documents_by_length": {
+    "<=10": 1009,
+    "<=100": 97430,
+    "<=300": 833497,
+    "<=1000": 4611131,
+    "<=3000": 4241393,
+    "<=10000": 1058885,
+    "<=30000": 108721,
+    "<=100000": 7831,
+    ">100000": 658
+  },
+  "postings_over_255": 1344168,
+  "update_documents": 109605,
+  "queries": 215,
+  "dropped_empty_queries": 0,
+  "tokenizer": {
+    "split_camel_case": false,
+    "split_underscore": false,
+    "split_digits": false,
+    "lowercase": false,
+    "min_length": 1,
+    "max_length": 254
+  },
+  "stopwords": null,
+  "stopwords_nb": 0
+}

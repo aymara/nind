@@ -1,0 +1,25 @@
+Fri Nov 13 08:34:53 AM CET 2026
+v21doc-stop-4M / nind / build ... 634.9 s
+v21doc-stop-4M / nind / search ... 170.4 s
+v21doc-stop-4M / nind-4t / search ... 83.7 s
+v21doc-stop-4M / nind-8t / search ... 128.3 s
+v21doc-stop / nind / build ... 1810.1 s
+v21doc-stop / nind / search ... 607.6 s
+v21doc-stop / nind / update ... 1864.5 s
+v21doc-stop / nind-32s / update ... 2379.8 s
+v21doc-stop / nind-4t / search ... 340.6 s
+v21doc-stop / nind-8t / search ... 356.0 s
+v21doc / nind / build ... 2035.0 s
+v21doc / nind / search ... 412.4 s
+v21doc / nind-8t / search ... 264.6 s
+Fri Nov 13 12:11:42 PM CET 2026
+v21doc-stop-trec / nind / search ... 68.1 s
+v21doc-stop-trec / nind / search ... 53.0 s
+v21doc-trec / nind / search ... 78.2 s
+v21doc-trec / nind / search ... 73.8 s
+verify v21doc-stop nind
+{"segment": "work/v21doc/v21doc-stop/nind/index/corpus.gen-000001-41abdd1a/corpus", "seconds": 924.1, "peak_gb": 3.23, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 4822777083, "problems": "[]", "problems_nb": 0, "terms_nb": 39309286, "with_local_index": false, "words_nb": 3930928
+verify v21doc nind
+{"segment": "work/v21doc/v21doc/nind/index/corpus.gen-000001-ee4a2464/corpus", "seconds": 930.3, "peak_gb": 3.23, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 5094127885, "problems": "[]", "problems_nb": 0, "terms_nb": 39309319, "with_local_index": false, "words_nb": 39309319}
+Fri Nov 13 01:04:22 PM CET 2026
+STAGE8B DONE

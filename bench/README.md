@@ -278,7 +278,10 @@ R=bench/retrieval/results
 python bench/retrieval/site.py --docs docs --date YYYY-MM-DD --version X.Y.Z \
     --server $R/2026-11-10-server/v1-report.csv $R/2026-11-10-server/v2-report.csv \
     --threads $R/2026-11-10-server --memory $R/2026-11-10-server/memory-budget.jsonl \
-    [--code-of LATER.VERSION] --laptop $R/2026-11-04/report.csv $R/2026-11-05/report.csv \
+    [--code-of LATER.VERSION] [--version-note SENTENCE] \
+    --documents $R/2026-11-13-server/v21doc-report.csv \
+    --documents-anserini $R/2026-11-13-server/v21doc-anserini-report.csv \
+    --laptop $R/2026-11-04/report.csv $R/2026-11-05/report.csv \
     --laptop-date 2026-11-05 --laptop-previous-date 2026-11-04
 ```
 
@@ -694,6 +697,42 @@ and 6 h.
   (the harness asks for every hit's name): with 1 GB, top 10 37.2 ms (19.8 when
   the names were outside the budget; Lucene 103), top 1000 604 ms (48.2; Lucene
   2,022). Results: `bench/retrieval/results/2026-11-12-server`.
+
+## 8. Long documents: MS MARCO v2.1 (2026-11-12 to 13)
+
+Section 7's harness on a corpus of web pages: MS MARCO v2.1 documents, TREC RAG 2024's corpus
+(10,960,555 documents, deduplicated from v2's 11.96M; `url title headings body` as Anserini's
+`MsMarcoV2DocCollection` indexes them). Raw results: `bench/retrieval/results/2026-11-13-server/`.
+
+**Data.** `scripts/prepare_v21_doc.py` (the same analysis as `prepare.py`), stopwords removed:
+13.05G tokens (2.7 times the 138M passages'), 1,191 per document on average, the longest 241,543;
+64,477 documents over 10,000 tokens; 428k postings with a frequency over 255 (1.34M with
+stopwords: 17.23G tokens). Queries: the dev topics (4,552, with qrels projected onto v2.1 by
+Anserini, `anserini-tools`), and the judged TREC DL 2021-2023 topics (215) as a dataset of their own.
+Prefixes of 1M and 4M documents. nind 4.2.2 (4.2.0's code), the same Lucene and tantivy; bm25s left out.
+
+### Findings
+
+- **Lexicons of over 16.7M words broke nind's writers** ("value over 3 bytes"): an indirection
+  block's entry count takes 3 bytes, and writers asked for one block per word, term or document.
+  The 4M prefix has 23.6M words, all 39.3M. Fixed (`1daae26`: blocks capped and chained); stage 8b
+  reran the one-index builds.
+- **Lucene is faster on long documents.** Top 10 on one thread, all documents: nind 6.73 ms,
+  Lucene 3.86, tantivy 81.6 (p99 62.6, 36.5, 224); nind leads at 1M (1.02 vs 1.34 ms) and trails
+  from 4M (2.98 vs 2.19). With stopwords: 7.61 vs 4.83 ms. Threads: 4 per query 4.87 ms, 8
+  segments with 8 threads 1.48 ms. Top 1000 stays nind's: 25.8 ms vs 36.9.
+- **Builds: faster, three to four times the memory.** One index 1,802 s and 77.5 GB (6 bytes a
+  token), against 1,360 s and 20.9 GB for Lucene, tantivy 528 s and 4.7 GB; 8 segments 626 s and
+  69 GB (8 builds at once), 32 segments 538 s and 20.5 GB. With stopwords: 2,024 s and 94.8 GB.
+- **Indexes a third larger**: 11.2 GB against 8.45 (tantivy 9.06).
+- **Updates of 1%**: 13.8 s for one index (Lucene 13.1, tantivy 6.7), 11.9 s for 8 segments; the
+  32-segment index's first update merged a tier of 9.76M documents: 1,689 s.
+- **The same BM25.** dev nDCG@10 0.2248 (nind, every layout), 0.2240 (Lucene), 0.2237 (tantivy);
+  TREC 0.3654, 0.3665, 0.3666; top 10 overlap with nind 0.968. With Anserini's parameters, Lucene's
+  TREC nDCG@10 is 0.3514 against 0.354 from Anserini's published scores (stemmed): the harness
+  agrees with it; unstemmed tokens do better at k1=1.2, b=0.75.
+- **The format holds**: `verify_index` clean on both one-index builds (39.3M terms, 4.82G and 5.09G
+  postings, 924-930 s, 3.2 GB) and every 8-segment segment.
 
 ## Notes
 

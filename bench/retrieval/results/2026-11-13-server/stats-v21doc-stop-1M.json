@@ -1,0 +1,36 @@
+{
+  "dataset": "msmarco-v2.1-doc/dev",
+  "limit": 1000000,
+  "truncated": true,
+  "documents": 1000000,
+  "dropped_empty_documents": null,
+  "avgdl": 1154.048376,
+  "tokens": 1154048376,
+  "longest_document": 241543,
+  "documents_by_length": {
+    "<=10": 1157,
+    "<=100": 151426,
+    "<=300": 1347470,
+    "<=1000": 5543560,
+    "<=3000": 3187662,
+    "<=10000": 664803,
+    "<=30000": 59847,
+    "<=100000": 4445,
+    ">100000": 185
+  },
+  "postings_over_255": 428127,
+  "update_documents": 10000,
+  "queries": 4552,
+  "dropped_empty_queries": 0,
+  "tokenizer": {
+    "split_camel_case": false,
+    "split_underscore": false,
+    "split_digits": false,
+    "lowercase": false,
+    "min_length": 1,
+    "max_length": 254
+  },
+  "stopwords": "lucene",
+  "stopwords_nb": 33,
+  "subset_of": "/scratch/gdechalendar/Projets/nind-bench/data/v21doc-stop"
+}

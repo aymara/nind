@@ -3,7 +3,7 @@
 How nind compares with other indexers when it is used as an index plus BM25 top-k search:
 **Lucene** (through Anserini), **tantivy** and **bm25s**, on the same tokens, the same BM25
 parameters (k1 = 1.2, b = 0.75) and the same machine, from 3,600 documents to **138 million** passages.
-nind 4.2.0, measured on a 48-thread server from 2026-11-05 to 2026-11-12. nind's results are its search code's, measured at 8ba3ff1 on 2026-11-11 and 12 (its builds and updates too: 4.2.0's builds take less memory since, see `docs/TODO.md`); Lucene's, tantivy's and bm25s's are from 2026-11-05 to 10. The laptop results this page
+nind 4.2.0, measured on a 48-thread server from 2026-11-05 to 2026-11-13. nind's results are its search code's, measured at 8ba3ff1 on 2026-11-11 and 12 (its builds and updates too: 4.2.0's builds take less memory since, see `docs/TODO.md`), and 4.2.0's (with `1daae26` for lexicons of over 16.7M words) for the long documents on 2026-11-12 and 13; Lucene's, tantivy's and bm25s's passages are from 2026-11-05 to 10. The laptop results this page
 showed before are kept at the end.
 
 ```{admonition} In short
@@ -31,6 +31,9 @@ showed before are kept at the end.
 - **Updates.** Adding 1% more documents writes a new segment: 1.06 s at 8.8M (Lucene
   3.53 s, tantivy 1.25 s), 15.4 s at 138M (Lucene
   11.6 s, tantivy 16.6 s).
+- **Long documents** (MS MARCO v2.1, 10.96M web pages of 1,191 tokens on average): Lucene's top 10
+  is faster on one thread (6.73 ms for nind, 3.86 ms for Lucene, tantivy 81.6 ms); nind's
+  top 1000 is faster (25.8 ms against 36.9), and 8 segments with 8 threads take 1.48 ms.
 - **Quality.** The same BM25: nDCG@10 0.222 for nind and 0.222 for Lucene at 8.8M,
   0.0790 and 0.0808 at 138M; every nind layout returns the same top 10.
 ```
@@ -102,6 +105,79 @@ The relevance judgments of MS MARCO v2's dev queries are sparse (about one passa
 low nDCG@10 for every system. The top 10 of Lucene and nind overlap at 0.993 (tantivy
 0.980). `verify_index` read back every definition of the one-index and 8-segment builds without error
 (4.0G postings; 5.2G with stopwords).
+
+## Long documents: MS MARCO v2.1, 10.96 million web pages
+
+TREC RAG 2024's corpus: web pages (url, title, headings and body, as Anserini indexes them), 1,191
+tokens each on average once stopwords are removed (34 for a v2 passage), 13.1G tokens in all, the
+longest 241,543. The dev queries (4,552), one pass of warm-up, two measured; stopwords removed.
+
+```{image} _static/bench/msmarco-v21doc-light.svg
+:class: only-light
+:alt: MS MARCO v2.1 documents, 10.96M web pages: search latency, build time, index size and update time per system; the same data is in the table below.
+```
+
+```{image} _static/bench/msmarco-v21doc-dark.svg
+:class: only-dark
+:alt: MS MARCO v2.1 documents, 10.96M web pages: search latency, build time, index size and update time per system; the same data is in the table below.
+```
+
+| system | top 10, median | top 10, 99th pct | top 100, median | top 1000, median | build | build memory | index | update +1% | nDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| nind | 6.73 ms | 62.6 ms | 11.4 ms | 25.8 ms | 1,802 s | 77,533 MB | 11,227 MB | 13.8 s | 0.225 |
+| nind, 4 threads per query | 4.86 ms | 38.1 ms | 6.34 ms | 12.1 ms | – | – | – | – | 0.225 |
+| nind, 8 threads per query | 5.27 ms | 34.4 ms | 7.48 ms | 14.1 ms | – | – | – | – | 0.225 |
+| nind, 8 segments | 6.12 ms | 58.3 ms | 12.2 ms | 32.3 ms | 626 s | 69,270 MB | 12,640 MB | 11.9 s | 0.225 |
+| nind, 8 segments, 8 threads per query | 1.48 ms | 8.89 ms | 2.62 ms | 7.39 ms | – | – | – | – | 0.225 |
+| nind, 32 segments | 6.34 ms | 59.6 ms | 16.9 ms | 45.1 ms | 538 s | 20,522 MB | 13,915 MB | 1,689 s | 0.225 |
+| nind, 32 segments, 8 threads per query | 1.76 ms | 8.56 ms | 2.67 ms | 7.67 ms | – | – | – | – | 0.225 |
+| Lucene (Anserini) | 3.86 ms | 36.5 ms | 8.92 ms | 36.9 ms | 1,360 s | 20,929 MB | 8,451 MB | 13.1 s | 0.224 |
+| tantivy | 81.6 ms | 224 ms | 82.6 ms | 92.8 ms | 528 s | 4,742 MB | 9,063 MB | 6.71 s | 0.224 |
+
+As the corpus grows (top 10, median):
+
+| system | 1M | 4M | 11M |
+|---|---:|---:|---:|
+| nind | 1.02 ms | 2.98 ms | 6.73 ms |
+| nind, 8 threads per query | 0.330 ms | 2.91 ms | 5.27 ms |
+| nind, 8 segments, 8 threads per query | 0.601 ms | 1.11 ms | 1.48 ms |
+| nind, 32 segments, 8 threads per query | 0.878 ms | 0.991 ms | 1.76 ms |
+| Lucene (Anserini) | 1.33 ms | 2.19 ms | 3.86 ms |
+| tantivy | 7.26 ms | 28.9 ms | 81.6 ms |
+
+Stopwords kept (17.2G tokens). Not updated.
+
+| system | top 10, median | top 10, 99th pct | top 100, median | top 1000, median | build | build memory | index | update +1% | nDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| nind | 7.61 ms | 69.5 ms | 15.5 ms | 35.3 ms | 2,024 s | 94,823 MB | 11,585 MB | – | 0.226 |
+| nind, 8 threads per query | 7.03 ms | 47.8 ms | 10.00 ms | 18.0 ms | – | – | – | – | 0.226 |
+| nind, 8 segments | 6.07 ms | 56.4 ms | 15.6 ms | 42.4 ms | 738 s | 73,403 MB | 12,998 MB | – | 0.226 |
+| nind, 8 segments, 8 threads per query | 2.06 ms | 9.84 ms | 3.20 ms | 9.19 ms | – | – | – | – | 0.226 |
+| Lucene (Anserini) | 4.83 ms | 47.1 ms | 11.2 ms | 44.3 ms | 1,394 s | 20,750 MB | 8,724 MB | – | 0.224 |
+| tantivy | 166 ms | 349 ms | 170 ms | 181 ms | 531 s | 4,736 MB | 9,386 MB | – | 0.224 |
+
+**On long documents, Lucene's top 10 is faster than nind's on one thread** from 4M documents on
+(6.73 ms against 3.86 ms at 10.96M; nind leads at 1M), where it isn't on passages; nind's top 1000
+stays faster (25.8 ms against 36.9 ms), and so is an index of 8 segments searched with 8
+threads (1.48 ms). nind's builds are faster and take three to four times Lucene's memory, its index a third more
+space. Its 32-segment index's first update merged 9.8M documents (1,689 s). See `docs/TODO.md`, "Long
+documents". `verify_index` read back every definition of the one-index and 8-segment builds (39.3M terms,
+4.8G postings; 5.1G with stopwords).
+
+The judged TREC Deep Learning 2021-2023 topics (215), nDCG@10, with our BM25 parameters and with
+Anserini's defaults (k1 = 0.9, b = 0.4):
+
+| system | k1 = 1.2, b = 0.75 | k1 = 0.9, b = 0.4 | stopwords kept, 1.2 / 0.75 | top 10, median |
+|---|---:|---:|---:|---:|
+| nind | 0.3654 | 0.3526 | 0.3627 | 10.7 ms |
+| nind, 8 segments | 0.3654 | 0.3526 | 0.3627 | 8.97 ms |
+| nind, 32 segments | 0.3654 | 0.3526 | – | 11.3 ms |
+| Lucene (Anserini) | 0.3665 | 0.3514 | 0.3618 | 5.36 ms |
+| tantivy | 0.3666 | – | 0.3618 | 101 ms |
+
+Anserini's published runs on this corpus, which stem with Porter, give nDCG@10 0.354 (DL21 0.5183, DL22 0.2991, DL23 0.2914) over the same
+topics: the harness's Lucene agrees with it, and every system ranks alike (top 10 overlap with
+nind 0.968).
 
 ## MS MARCO, 8.8 million passages
 
