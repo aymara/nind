@@ -121,3 +121,19 @@ TEST_CASE("NindLexiconIndexTest.ReaderCannotAddWord") {
     NindLexiconIndex reader(path, false);
     CHECK_THROWS_AS(reader.addWord(words("alpha")), NindLexiconIndexException);
 }
+////////////////////////////////////////////////////////////
+TEST_CASE("NindLexiconIndexTest.ModuloOverThreeBytesIsCapped") {
+    //a lexicon for over 16.7M words: its hash modulo, the first block's size, is capped at
+    //MAX_ENTRIES_BLOC_SIZE (several words a bucket); it threw "value over 3 bytes"
+    TestTempDir tmp;
+    unsigned int idAlpha, idBeta;
+    {
+        NindLexiconIndex lexicon(tmp.file("large"), true, false, NindPadFile::MAX_ENTRIES_BLOC_SIZE + 10);
+        idAlpha = lexicon.addWord(words("alpha"));
+        idBeta = lexicon.addWord(words("beta"));
+    }
+    NindLexiconIndex reader(tmp.file("large"), false, false);
+    CHECK_EQ(idAlpha, reader.getWordId(words("alpha")));
+    CHECK_EQ(idBeta, reader.getWordId(words("beta")));
+    CHECK_EQ(0u, reader.getWordId(words("gamma")));
+}

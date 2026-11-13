@@ -41,6 +41,11 @@ namespace latecon {
 class DLLExportLexicon NindPadFile {
 
 public:
+    /**\brief The most entries in one block (<nombreIndex> takes 3 bytes): a larger dataEntriesBlocSize
+    * asked of a writer gives blocks of this size, chained (a lexicon's hash modulo, the size of its
+    * first block, then has several words per bucket). */
+    static const unsigned int MAX_ENTRIES_BLOC_SIZE = 0xFFFFFFu;
+
     /**\brief Structure to hold files identification */
     struct Identification {
         unsigned int lexiconWordsNb;
@@ -126,7 +131,8 @@ protected:
     *\param referenceIdentification unique identification for checking (if 0, no checks)
     *\param specificsSize size in bytes of specific datas
     *\param dataEntrySize size in bytes of one data entry (for neo writer)
-    *\param dataEntriesBlocSize number of entries in a single block (for neo writer) */
+    *\param dataEntriesBlocSize number of entries in a single block (for neo writer), at most
+    * MAX_ENTRIES_BLOC_SIZE (larger: that) */
     NindPadFile(const std::string &fileName,
                 const bool isWriter,
                 const Identification &referenceIdentification,

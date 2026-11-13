@@ -335,3 +335,48 @@ TEST_CASE("NindTermIndexTest.SecondWriterOnTheSameFileIsRefused") {
     NindTermIndex writer(base, true, kNoCheck, 0, 8);
     writer.setTermDef(2, termDef, kNoCheck, list<unsigned int>());
 }
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.TermPastSeveralBlocksAddsThem") {
+    //blocks of 4 entries: term 20 is 5 blocks past the first; it once threw, one block being added
+    TestTempDir tmp;
+    list<TermCG> written;
+    written.push_back(TermCG(0, 2));
+    written.back().documents.push_back(Document(7, 2));
+    {
+        NindTermIndex index(tmp.file("blocks"), true, kNoCheck, 0, 4);
+        index.setTermDef(20, written, kNoCheck, list<unsigned int>());
+        index.setTermDef(2, written, kNoCheck, list<unsigned int>());
+        list<TermCG> read;
+        REQUIRE(index.getTermDef(20, read));
+        CHECK_EQ(7u, read.front().documents.front().ident);
+    }
+    NindTermIndex reader(tmp.file("blocks"), false, kNoCheck, 0);
+    list<TermCG> read;
+    REQUIRE(reader.getTermDef(20, read));
+    CHECK_EQ(2u, read.front().frequency);
+    REQUIRE(reader.getTermDef(2, read));
+    CHECK_FALSE(reader.getTermDef(9, read));
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindTermIndexTest.BlockOfMoreThan3BytesOfEntriesIsCapped") {
+    //<nombreIndex> takes 3 bytes: more entries per block asked (a build of over 16.7M terms)
+    //gives blocks of MAX_ENTRIES_BLOC_SIZE, chained; it threw "value over 3 bytes"
+    TestTempDir tmp;
+    const unsigned int last = NindPadFile::MAX_ENTRIES_BLOC_SIZE + 5;
+    list<TermCG> written;
+    written.push_back(TermCG(0, 1));
+    written.back().documents.push_back(Document(3, 1));
+    {
+        NindTermIndex index(tmp.file("large"), true, kNoCheck, 0, last + 1);
+        index.beginBulk();
+        index.setTermDef(1, written, kNoCheck, list<unsigned int>());
+        index.setTermDef(last, written, kNoCheck, list<unsigned int>());
+        index.endBulk();
+    }
+    NindTermIndex reader(tmp.file("large"), false, kNoCheck, 0);
+    list<TermCG> read;
+    REQUIRE(reader.getTermDef(last, read));
+    CHECK_EQ(3u, read.front().documents.front().ident);
+    REQUIRE(reader.getTermDef(1, read));
+    CHECK_FALSE(reader.getTermDef(last - 1, read));
+}

@@ -388,12 +388,14 @@ void NindIndex::checkExtendIndirection(const unsigned int ident,
 {
     //si la dejfinition n'a pas d'indirection, ajoute un bloc d'indirection
     uint64_t indirection = getEntryPos(ident);
-    if (indirection == 0) {
-        //la dejfinition est hors des blocs d'indexation actuels, cree un nouveau bloc d'indirection
+    //la dejfinition est hors des blocs d'indexation actuels : des blocs d'indirection jusqu'ah elle
+    //(several when an ident is past the next block: blocks hold at most MAX_ENTRIES_BLOC_SIZE; each
+    //holds one entry at least, so ident + 1 blocks at most)
+    uint64_t blocksLeft = (uint64_t)ident + 1;
+    while (indirection == 0) {
+        if (blocksLeft-- == 0) throw NindIndexException("NindIndex::checkExtendIndirection : " + m_fileName);
         addEntriesBlock(fileIdentification);
-        //redemande l'indirection pour la dejfinition, erreur si hors limite
         indirection = getEntryPos(ident);
-        if (indirection == 0) throw NindIndexException("NindIndex::checkExtendIndirection : " + m_fileName);
     }
 }
 ////////////////////////////////////////////////////////////

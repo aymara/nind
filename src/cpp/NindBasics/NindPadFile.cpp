@@ -89,7 +89,7 @@ NindPadFile::NindPadFile(const string &fileName,
     m_sharedMaps(),
     m_specificsSize(specificsSize),
     m_dataEntrySize(dataEntrySize),
-    m_dataEntriesBlocSize(dataEntriesBlocSize),
+    m_dataEntriesBlocSize(dataEntriesBlocSize < MAX_ENTRIES_BLOC_SIZE ? dataEntriesBlocSize : MAX_ENTRIES_BLOC_SIZE),
     m_nextBlockAddrSize(nextBlockAddrSize)
 {
     //the layout: a file of dataEntrySize entries has <addrBlocSuivant> of nextBlockAddrSize
@@ -316,6 +316,8 @@ uint64_t NindPadFile::getEntryPos(const unsigned int ident)
 //param fileIdentification unique identification of file */
 void NindPadFile::addEntriesBlock(const Identification &fileIdentification)
 {
+    if (m_dataEntriesBlocSize == 0)
+        throw NindPadFileException("NindPadFile::addEntriesBlock no entries per block given " + m_fileName);
     if (m_isBulk) {
         //en mode massif, le bloc est ajoutej ah la fin des donnejes, la queue reste en mejmoire
         const uint64_t entriesBlock = m_bulkEnd;
