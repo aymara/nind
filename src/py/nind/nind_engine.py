@@ -382,12 +382,13 @@ class _RecordNames(Sequence):
 class _Snapshot:
     """One opened generation of an index: every file from the same build."""
 
-    def __init__(self, base, previous=None, map_lengths=False):
+    def __init__(self, base, previous=None, map_lengths=False, directory_cache_mb=None):
         # every file is opened here, while the generation can't be deleted (see _index_store);
         # the segments the previous snapshot had are shared, not read again
         self.base = base
+        options = {} if directory_cache_mb is None else {"directory_cache_mb": directory_cache_mb}
         self.index = native.SegmentedIndex(base, previous.index if previous is not None else None,
-                                           map_lengths=map_lengths)
+                                           map_lengths=map_lengths, **options)
         meta = _read_meta(base)
         # an index written before tokenizer options were stored: the original tokenizer
         self.tokenizer_options = meta["tokenizer"] if meta is not None else LEGACY_TOKENIZER
@@ -454,7 +455,7 @@ class NindEngine:
     methods (``dumpeFichier``, ``afficheTerme``...).
     """
 
-    def __init__(self, index_dir, prefix=None, search_threads=1, map_lengths=False):
+    def __init__(self, index_dir, prefix=None, search_threads=1, map_lengths=False, directory_cache_mb=1024):
         """Open the index in ``index_dir``.
 
         :param index_dir: directory the index was written into by
@@ -476,6 +477,12 @@ class NindEngine:
             this process's memory, 0.5 GB less for MS MARCO v2's 138M passages),
             instead of a copy (searches 3-6% faster). For many search processes
             on one index.
+        :param directory_cache_mb: the most memory, in MiB, the query terms'
+            directories (their blocks' descriptors) take once read, shared by
+            the index's segments; past it the terms used longest ago are
+            dropped and read again when a query needs them. A query set of
+            MS MARCO v2 (138M passages or 10.96M documents) takes ~0.75 GB of
+            them: at 256 MB, searches of long documents took twice as long.
         :raises FileNotFoundError: if there is no index in ``index_dir``.
         :raises ValueError: if there are several and no ``prefix`` is given.
         """
@@ -483,10 +490,14 @@ class NindEngine:
             raise ValueError("search_threads must be a positive integer")
         self.search_threads = search_threads
         self.map_lengths = bool(map_lengths)
+        if not directory_cache_mb >= 0:
+            raise ValueError("directory_cache_mb must be at least 0")
+        self.directory_cache_mb = directory_cache_mb
         self.index_dir = index_dir
         self._store = IndexStore(index_dir, prefix or IndexStore.find_prefix(index_dir))
         # (snapshot, version), replaced as a whole when a new build is published
-        self._state = self._store.open_current(lambda base: _Snapshot(base, None, self.map_lengths))
+        self._state = self._store.open_current(
+            lambda base: _Snapshot(base, None, self.map_lengths, self.directory_cache_mb))
         self._switch_lock = threading.Lock()
         # the snapshot of the outermost public call running in each thread (nested calls reuse it)
         self._calls = threading.local()
@@ -508,7 +519,8 @@ class NindEngine:
             with self._switch_lock:
                 if self._store.current_version() != self._state[1]:
                     previous = self._state[0]
-                    self._state = self._store.open_current(lambda base: _Snapshot(base, previous, self.map_lengths))
+                    self._state = self._store.open_current(
+                        lambda base: _Snapshot(base, previous, self.map_lengths, self.directory_cache_mb))
         calls.snapshot = self._state[0]
         try:
             yield calls.snapshot

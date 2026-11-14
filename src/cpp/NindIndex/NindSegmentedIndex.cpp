@@ -412,7 +412,8 @@ public:
 ////////////////////////////////////////////////////////////
 NindSegmentedIndex::NindSegmentedIndex(const string &base,
                                        const NindSegmentedIndex *previous,
-                                       const bool mapLengths):
+                                       const bool mapLengths,
+                                       const size_t directoryCacheBytes):
     m_impl(new Impl()),
     m_docsNb(0),
     m_avgDocLength(0)
@@ -456,6 +457,14 @@ NindSegmentedIndex::NindSegmentedIndex(const string &base,
     const vector<Impl::Part> &parts = m_impl->m_parts;
     stable_sort(m_impl->m_bySize.begin(), m_impl->m_bySize.end(), [&parts](const size_t a, const size_t b) {
         return parts[a].liveDocsNb() > parts[b].liveDocsNb(); });
+    //the directory cache shared by the segments' scorers, by their documents (1 MiB at least)
+    uint64_t allDocs = 0;
+    for (size_t p = 0; p < parts.size(); p++) allDocs += parts[p].segment->scorer->docsNb();
+    for (size_t p = 0; p < parts.size(); p++) {
+        const NindBm25Scorer &scorer = *parts[p].segment->scorer;
+        const double share = allDocs != 0 ? (double)scorer.docsNb() / (double)allDocs : 1.0 / (double)parts.size();
+        scorer.setDirectoryCacheBytes(std::max<size_t>((size_t)1 << 20, (size_t)(share * (double)directoryCacheBytes)));
+    }
 }
 ////////////////////////////////////////////////////////////
 NindSegmentedIndex::~NindSegmentedIndex()

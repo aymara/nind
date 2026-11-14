@@ -142,6 +142,25 @@ public:
                          NindReadBuffer &buffer,
                          std::vector<Document> &postings) const;
 
+    /**\brief Thread-safe (const) read of the bytes [begin, end) of a term's definition at
+    * definitionOffset (a directory's offset; begin and end: its blocks' offsets and lengths, as
+    * getTermDirectory gave them), for decodeTermBlock: blocks without their directory (a reader
+    * keeping only what it needs of them) */
+    void readDefinitionBytes(const uint64_t definitionOffset,
+                             const uint64_t begin,
+                             const uint64_t end,
+                             NindReadBuffer &buffer) const;
+
+    /**\brief Thread-safe (const) decoding of a block whose bytes readDefinitionBytes read, at
+    * bufferOffset in buffer (its offset minus the read's begin); block: its descriptor (first,
+    * last, docsNb, maxFrequency and length are checked or used; impacts are not); postings
+    * appended to postings */
+    void decodeTermBlock(const unsigned int ident,
+                         const Block &block,
+                         const uint64_t bufferOffset,
+                         NindReadBuffer &buffer,
+                         std::vector<Document> &postings) const;
+
     /**\brief Read a full term definition as a list of structures
     *\param ident ident of term
     *\param termDef structure to receive all datas of the specified term

@@ -163,3 +163,65 @@ TEST_CASE("NindBm25Scorer.ConcurrentSearches") {
     CHECK_EQ(0u, mismatches.load());
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindBm25Scorer.DirectoryCacheEvictsAndReadsAgain") {
+    // a cache of 64 KB (a few terms' directories): terms dropped and read again, their bounds
+    // computed again when the parameters change; the same results as a scorer that keeps them all
+    TestTempDir tmp;
+    const string base = tmp.file("zipf");
+    const Corpus corpus = buildCorpus(base, 20000, 17);
+    NindLexiconIndex lexicon(base, false);
+    NindTermIndex terms(base, false, lexicon.getIdentification(), 0);
+    NindBm25Scorer keeping(corpus.docIds, corpus.lengths, corpus.avgLength);
+    NindBm25Scorer small(corpus.docIds, corpus.lengths, corpus.avgLength);
+    const size_t limit = 64 << 10;
+    small.setDirectoryCacheBytes(limit);
+    uint64_t state = 11;
+    size_t largest = 0;
+    for (unsigned int q = 0; q < 120; q++) {
+        vector<unsigned int> termIds;
+        const unsigned int length = 1 + next(state) % 8;
+        for (unsigned int i = 0; i < length; i++) {
+            const unsigned int rank = (unsigned int)(next(state) % 1000);
+            termIds.push_back(lexicon.getWordId(list<string>(1, corpus.vocabulary[rank * rank / 2500])));
+        }
+        const double k1 = q % 3 == 0 ? 0.9 : 1.2, b = q % 3 == 0 ? 0.4 : 0.75;
+        INFO("query " << q);
+        const vector<pair<NindDocId, double> > expected = keeping.search(terms, termIds, k1, b, 10, true);
+        CHECK(small.search(terms, termIds, k1, b, 10, true) == expected);
+        CHECK(small.search(terms, termIds, k1, b, 10, true, 3) == expected);
+        largest = max(largest, small.directoryCacheBytes());
+    }
+    //(past its limit by one term's directory at most, the one just read)
+    CHECK(largest < limit + (8 << 10));
+    CHECK(keeping.directoryCacheBytes() > largest);
+    small.setDirectoryCacheBytes(0);
+    CHECK(small.directoryCacheBytes() == 0);
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindBm25Scorer.ConcurrentSearchesWithEvictions") {
+    // many threads on a scorer whose cache keeps dropping terms (run under TSan)
+    TestTempDir tmp;
+    const string base = tmp.file("concurrent");
+    const Corpus corpus = buildCorpus(base, 1500, 17);
+    NindLexiconIndex lexicon(base, false);
+    NindTermIndex terms(base, false, lexicon.getIdentification(), 0);
+    NindBm25Scorer scorer(corpus.docIds, corpus.lengths, corpus.avgLength);
+    vector<vector<unsigned int> > queries;
+    for (unsigned int q = 0; q < 40; q++)
+        queries.push_back(vector<unsigned int>{lexicon.getWordId(list<string>(1, corpus.vocabulary[q % 30])),
+                                               lexicon.getWordId(list<string>(1, corpus.vocabulary[(q * 7) % 90]))});
+    vector<vector<pair<NindDocId, double> > > expected;
+    for (size_t q = 0; q < queries.size(); q++) expected.push_back(scorer.search(terms, queries[q], 1.2, 0.75, 10, true));
+    scorer.setDirectoryCacheBytes(4 << 10);
+    atomic<unsigned int> mismatches(0);
+    vector<thread> threads;
+    for (unsigned int t = 0; t < 4; t++)
+        threads.push_back(thread([&]() {
+            for (unsigned int round = 0; round < 5; round++)
+                for (size_t q = 0; q < queries.size(); q++)
+                    if (scorer.search(terms, queries[q], 1.2, 0.75, 10, true, 1 + q % 2) != expected[q]) mismatches++;
+        }));
+    for (size_t t = 0; t < threads.size(); t++) threads[t].join();
+    CHECK_EQ(0u, mismatches.load());
+}
+////////////////////////////////////////////////////////////

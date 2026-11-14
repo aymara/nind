@@ -136,10 +136,14 @@ public:
     *\param mapLengths the documents' lengths read where they are, in their mapped files (shared by
     * the processes searching the index, none of their own memory; MS MARCO v2 138M: 0.5 GB less a
     * process, searches 3-6% slower: 4 KB pages, not the huge pages of a copy) instead of copied
+    *\param directoryCacheBytes the most bytes of term directories the segments' scorers cache, shared
+    * between them by their documents (see NindBm25Scorer::setDirectoryCacheBytes; a segment shared
+    * with previous gets this index's share)
     *\throws FileException if a file is missing or invalid */
     explicit NindSegmentedIndex(const std::string &base,
                                 const NindSegmentedIndex *previous = 0,
-                                const bool mapLengths = false);
+                                const bool mapLengths = false,
+                                const size_t directoryCacheBytes = NindBm25Scorer::DEFAULT_DIRECTORY_CACHE_BYTES);
     ~NindSegmentedIndex();
 
     /**\brief The documents with a positive score for the query's words, by decreasing score, then

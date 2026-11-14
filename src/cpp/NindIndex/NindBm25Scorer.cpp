@@ -214,11 +214,7 @@ public:
 
     // a term's documents in termIndex, every category counted
     uint64_t documentFrequency(const NindTermIndex &termIndex, const unsigned int termId, NindReadBuffer &buffer) const {
-        const std::shared_ptr<const NindTermIndex::TermDirectory> directory = directoryOf(termIndex, termId, buffer);
-        uint64_t df = 0;
-        if (directory)
-            for (size_t c = 0; c < directory->categories.size(); c++) df += directory->categories[c].docsNb;
-        return df;
+        return cachedTerm(termIndex, termId, buffer)->df;
     }
     size_t positionOfDocument(const NindDocId docId) const {
         const uint32_t position = positionOf(docId);
@@ -305,18 +301,26 @@ private:
     static const size_t MIN_WINDOW_SPAN = 4096;         //scanRangeByWindow's windows: at least this many
     static const size_t WINDOWED_TERMS = 5;             //from this many terms, scanRangeByWindow
     static const uint64_t WINDOWED_DENSITY = 8;         //or from this many blocks per MIN_WINDOW_SPAN documents
+    // what a search needs of a block's descriptor (NindTermIndex::Block: 88 bytes, its impacts only
+    // for the bounds, kept apart): 32 bytes, a cached directory's blocks
+    struct CompactBlock {
+        NindDocId first, last;
+        uint32_t offset, length;        //in the definition (under 4 GiB)
+        uint32_t docsNb, maxFrequency;
+    };
+    struct CachedTerm;
     // a query term, as every thread of a search sees it (read only)
     struct TermInfo {
-        std::shared_ptr<const NindTermIndex::TermDirectory> directory;     //(from the scorer's cache)
+        std::shared_ptr<const CachedTerm> entry;    //(from the scorer's cache)
         unsigned int ident;
         double idf;
         unsigned int multiplicity;      //occurrences in the query
         bool inlineList;                //a short list: one pseudo-block, its inline postings
         size_t blocksNb;
-        const NindTermIndex::Block *blocks;     //the directory's blocks, or ownBlock (an inline list)
-        NindTermIndex::Block ownBlock;
+        const CompactBlock *blocks;     //the cached blocks, or ownBlock (an inline list)
+        CompactBlock ownBlock;
         std::shared_ptr<const std::vector<double> > tf;     //per block, its bound without the idf
-        TermInfo(): directory(), ident(0), idf(0), multiplicity(0), inlineList(false), blocksNb(0), blocks(0),
+        TermInfo(): entry(), ident(0), idf(0), multiplicity(0), inlineList(false), blocksNb(0), blocks(0),
             ownBlock(), tf() {}
         NindDocId first(const size_t block) const { return blocks[block].first; }
         NindDocId last(const size_t block) const { return blocks[block].last; }
@@ -357,17 +361,33 @@ private:
         cursor.decoded = b;
         const TermInfo &info = *cursor.info;
         if (info.inlineList) {
-            cursor.docs = info.directory->categories[0].inlinePostings;
+            cursor.docs = info.entry->inlinePostings;
             return;
         }
+        const CompactBlock *blocks = info.blocks;
         if (b < cursor.rawBegin || b >= cursor.rawEnd) {
             cursor.rawBegin = b;
             cursor.rawEnd = std::min(b + RAW_READ_AHEAD, info.blocksNb);
             if (!cursor.raw) cursor.raw.reset(new NindReadBuffer());
-            termIndex.readTermBlocks(info.ident, *info.directory, 0, cursor.rawBegin, cursor.rawEnd, *cursor.raw);
+            //contiguous (as written): one read
+            uint64_t end = blocks[cursor.rawBegin].offset;
+            for (size_t r = cursor.rawBegin; r < cursor.rawEnd; r++) {
+                if (blocks[r].offset != end)
+                    throw NindTermIndexException("NindBm25Scorer blocks not contiguous, term " + std::to_string(info.ident));
+                end += blocks[r].length;
+            }
+            termIndex.readDefinitionBytes(info.entry->definitionOffset, blocks[cursor.rawBegin].offset, end, *cursor.raw);
         }
         cursor.docs.clear();
-        termIndex.decodeTermBlock(info.ident, *info.directory, 0, cursor.rawBegin, b, *cursor.raw, cursor.docs);
+        NindTermIndex::Block block;
+        block.first = blocks[b].first;
+        block.last = blocks[b].last;
+        block.docsNb = blocks[b].docsNb;
+        block.maxFrequency = blocks[b].maxFrequency;
+        block.offset = blocks[b].offset;
+        block.length = blocks[b].length;
+        termIndex.decodeTermBlock(info.ident, block, blocks[b].offset - blocks[cursor.rawBegin].offset, *cursor.raw,
+                                  cursor.docs);
     }
     // what a thread found: its candidates (with their frequencies, termsNb each), its theta
     struct Found {
@@ -634,6 +654,9 @@ private:
                         const NindDocId thisDoc = windowMin + offset;
                         double approximation = windowScores[offset];
                         windowScores[offset] = 0.0;
+                        //(first, before its position and length: most touched documents can't reach
+                        //theta even with every non-essential term, the probes' first test below)
+                        if (approximation + (essential > 0 ? prefix[essential - 1] : 0.0) < threshold) continue;
                         const uint32_t position = positionOf(thisDoc);
                         //(a deleted document never reaches theta, nor the candidates)
                         if (position == NO_POSITION || corpus.isDeleted(position)) continue;
@@ -726,30 +749,30 @@ private:
         for (size_t d = 0; d < distinctIds.size(); d++) {
             terms.push_back(TermInfo());
             TermInfo &term = terms.back();
-            term.directory = directoryOf(termIndex, distinctIds[d], buffer);
-            if (!term.directory) { terms.pop_back(); continue; }
-            if (term.directory->categories.size() != 1) return false;
-            const NindTermIndex::TermDirectory::Category &category = term.directory->categories[0];
+            term.entry = cachedTerm(termIndex, distinctIds[d], buffer, &parameters, shortest);
+            const CachedTerm &entry = *term.entry;
+            if (!entry.found) { terms.pop_back(); continue; }
+            if (entry.categoriesNb != 1) return false;
             term.ident = distinctIds[d];
-            term.idf = idfOf(corpus.dfs.empty() ? category.docsNb : corpus.dfs[d], corpus.docsNb);
+            term.idf = idfOf(corpus.dfs.empty() ? entry.df : corpus.dfs[d], corpus.docsNb);
             if (!(term.idf > 0)) return false;
             //a format v1 file: every list inline, a long one would be read whole as one block
-            if (category.blocks.empty() && category.inlinePostings.size() > NindTermIndex::BLOCK_SIZE) return false;
+            if (entry.blocks.empty() && entry.inlinePostings.size() > NindTermIndex::BLOCK_SIZE) return false;
             for (size_t o = 0; o < occurrences.size(); o++) if (occurrences[o] == d) term.multiplicity++;
-            if (!category.blocks.empty()) {
-                term.blocksNb = category.blocks.size();
-                term.blocks = category.blocks.data();
-                term.tf = blockBounds(termIndex, term.ident, term.directory, parameters, shortest);
+            if (!entry.blocks.empty()) {
+                term.blocksNb = entry.blocks.size();
+                term.blocks = entry.blocks.data();
+                term.tf = blockBounds(termIndex, term.ident, term.entry, parameters, shortest, buffer);
             }
             else {
-                if (category.inlinePostings.empty()) { terms.pop_back(); continue; }
+                if (entry.inlinePostings.empty()) { terms.pop_back(); continue; }
                 term.inlineList = true;
                 term.blocksNb = 1;
-                term.ownBlock.first = category.inlinePostings.front().ident;
-                term.ownBlock.last = category.inlinePostings.back().ident;
+                term.ownBlock.first = entry.inlinePostings.front().ident;
+                term.ownBlock.last = entry.inlinePostings.back().ident;
                 double bound = 0.0;
-                for (size_t i = 0; i < category.inlinePostings.size(); i++) {
-                    const NindTermIndex::Document &posting = category.inlinePostings[i];
+                for (size_t i = 0; i < entry.inlinePostings.size(); i++) {
+                    const NindTermIndex::Document &posting = entry.inlinePostings[i];
                     const uint32_t position = positionOf(posting.ident);
                     if (position == NO_POSITION || posting.frequency == 0) continue;
                     bound = std::max(bound, contribution(1.0, posting.frequency, lengthOf(position), parameters));
@@ -833,72 +856,35 @@ private:
 
     mutable NindThreadPool m_threadPool;
 
-    // A term's parsed directory, from the cache (read and parsed once per term: the scorer serves
-    // one immutable index); null if the index hasn't the term. The cache is emptied when it holds
-    // more than DIRECTORY_CACHE_BYTES, and when the scorer is used with another term index.
-    static const size_t DIRECTORY_CACHE_BYTES = 256u << 20;
-    // a cached directory, and its blocks' bounds without the idf for the last parameters asked
+    // A term's cached directory (read and parsed once per term: the scorer serves one immutable
+    // index): what a search needs of it, its blocks compact (CompactBlock: 32 bytes where a
+    // descriptor takes 88, its impacts used only for the bounds), and its blocks' bounds without the
+    // idf for the last parameters asked (computed from the full directory's impacts, read again when
+    // the parameters change). The cache holds at most m_cacheLimit bytes (setDirectoryCacheBytes):
+    // past it, the terms used longest ago are dropped until it holds 3/4 of that (it was emptied,
+    // whole, at 256 MB: a query set's directories take ~1.7 GB on MS MARCO v2's 138M passages as on
+    // its 10.96M documents, and queries then parsed directories and computed bounds again, as much
+    // time as the rest of a search on long documents). Emptied when used with another term index.
     struct CachedTerm {
-        std::shared_ptr<const NindTermIndex::TermDirectory> directory;
-        std::mutex mutex;
-        double k1Plus1, base, perLength, shortest;
-        std::shared_ptr<const std::vector<double> > tf;
-        explicit CachedTerm(const std::shared_ptr<const NindTermIndex::TermDirectory> &d):
-            directory(d), mutex(), k1Plus1(0), base(0), perLength(0), shortest(0), tf() {}
+        bool found;
+        uint64_t definitionOffset;
+        uint64_t df;                    //every category's documents
+        size_t categoriesNb;
+        std::vector<CompactBlock> blocks;                       //the first category's
+        std::vector<NindTermIndex::Document> inlinePostings;    //the first category's, a short list
+        size_t bytes;
+        mutable std::atomic<uint64_t> lastUse;
+        mutable std::mutex mutex;
+        mutable double k1Plus1, base, perLength, shortest;
+        mutable std::shared_ptr<const std::vector<double> > tf;
+        CachedTerm(): found(false), definitionOffset(0), df(0), categoriesNb(0), blocks(), inlinePostings(), bytes(0),
+            lastUse(0), mutex(), k1Plus1(0), base(0), perLength(0), shortest(0), tf() {}
     };
-    std::shared_ptr<CachedTerm> cachedTerm(const NindTermIndex &termIndex,
-                                           const unsigned int ident,
-                                           NindReadBuffer &buffer) const {
-        {
-            std::shared_lock<std::shared_timed_mutex> lock(m_cacheMutex);
-            if (m_cachedIndex == &termIndex) {
-                const auto it = m_directories.find(ident);
-                if (it != m_directories.end()) return it->second;
-            }
-        }
-        std::shared_ptr<NindTermIndex::TermDirectory> directory(new NindTermIndex::TermDirectory());
-        if (!termIndex.getTermDirectory(ident, *directory, buffer)) directory.reset();
-        size_t bytes = sizeof(NindTermIndex::TermDirectory) + 64;
-        if (directory)
-            for (size_t c = 0; c < directory->categories.size(); c++)
-                bytes += directory->categories[c].blocks.size() * (sizeof(NindTermIndex::Block) + sizeof(double))
-                         + directory->categories[c].inlinePostings.size() * sizeof(NindTermIndex::Document);
-        std::shared_ptr<CachedTerm> entry(new CachedTerm(directory));
-        std::unique_lock<std::shared_timed_mutex> lock(m_cacheMutex);
-        if (m_cachedIndex != &termIndex || m_cacheBytes + bytes > DIRECTORY_CACHE_BYTES) {
-            m_directories.clear();
-            m_cacheBytes = 0;
-            m_cachedIndex = &termIndex;
-        }
-        const auto inserted = m_directories.insert(std::make_pair(ident, entry));
-        if (inserted.second) m_cacheBytes += bytes;
-        return inserted.first->second;
-    }
-    std::shared_ptr<const NindTermIndex::TermDirectory> directoryOf(const NindTermIndex &termIndex,
-                                                                    const unsigned int ident,
-                                                                    NindReadBuffer &buffer) const {
-        return cachedTerm(termIndex, ident, buffer)->directory;
-    }
-    // a term's blocks' bounds without the idf (its first category's), computed once for the same
-    // parameters (each search computed them again: 5% of a search at 138M, a frequent term's
-    // hundreds of thousands of blocks)
-    std::shared_ptr<const std::vector<double> > blockBounds(const NindTermIndex &termIndex, const unsigned int ident,
-                                                           const std::shared_ptr<const NindTermIndex::TermDirectory> &directory,
-                                                           const Params &parameters, const double shortest) const {
-        std::shared_ptr<CachedTerm> entry;
-        {
-            std::shared_lock<std::shared_timed_mutex> lock(m_cacheMutex);
-            if (m_cachedIndex == &termIndex) {
-                const auto it = m_directories.find(ident);
-                if (it != m_directories.end() && it->second->directory == directory) entry = it->second;
-            }
-        }
-        if (entry) {
-            std::lock_guard<std::mutex> lock(entry->mutex);
-            if (entry->tf && entry->k1Plus1 == parameters.k1Plus1 && entry->base == parameters.base &&
-                entry->perLength == parameters.perLength && entry->shortest == shortest) return entry->tf;
-        }
-        const std::vector<NindTermIndex::Block> &blocks = directory->categories[0].blocks;
+    // a directory's first category's blocks' bounds without the idf: their competitive (frequency,
+    // length) pairs' largest contribution, else their largest frequency at their shortest length
+    std::shared_ptr<const std::vector<double> > boundsOf(const NindTermIndex::TermDirectory &directory,
+                                                        const Params &parameters, const double shortest) const {
+        const std::vector<NindTermIndex::Block> &blocks = directory.categories[0].blocks;
         std::shared_ptr<std::vector<double> > tf(new std::vector<double>(blocks.size()));
         for (size_t i = 0; i < blocks.size(); i++) {
             const NindTermIndex::Block &block = blocks[i];
@@ -912,20 +898,129 @@ private:
             else bound = contribution(1.0, block.maxFrequency, std::max((double)block.minLength, shortest), parameters);
             (*tf)[i] = bound;
         }
-        if (entry) {
-            std::lock_guard<std::mutex> lock(entry->mutex);
-            entry->tf = tf;
-            entry->k1Plus1 = parameters.k1Plus1;
-            entry->base = parameters.base;
-            entry->perLength = parameters.perLength;
-            entry->shortest = shortest;
-        }
         return tf;
     }
+    static void setParameters(const CachedTerm &entry, const Params &parameters, const double shortest,
+                              const std::shared_ptr<const std::vector<double> > &tf) {
+        entry.tf = tf;
+        entry.k1Plus1 = parameters.k1Plus1;
+        entry.base = parameters.base;
+        entry.perLength = parameters.perLength;
+        entry.shortest = shortest;
+    }
+    // A term's cache entry (found false: the index hasn't the term); its bounds computed at once
+    // for parameters if given
+    std::shared_ptr<const CachedTerm> cachedTerm(const NindTermIndex &termIndex,
+                                                 const unsigned int ident,
+                                                 NindReadBuffer &buffer,
+                                                 const Params *parameters = 0,
+                                                 const double shortest = 0) const {
+        {
+            std::shared_lock<std::shared_timed_mutex> lock(m_cacheMutex);
+            if (m_cachedIndex == &termIndex) {
+                const auto it = m_directories.find(ident);
+                if (it != m_directories.end()) {
+                    it->second->lastUse.store(++m_useClock, std::memory_order_relaxed);
+                    return it->second;
+                }
+            }
+        }
+        std::shared_ptr<CachedTerm> entry(new CachedTerm());
+        NindTermIndex::TermDirectory directory;
+        entry->found = termIndex.getTermDirectory(ident, directory, buffer);
+        if (entry->found) {
+            entry->definitionOffset = directory.offset;
+            entry->categoriesNb = directory.categories.size();
+            for (size_t c = 0; c < directory.categories.size(); c++) entry->df += directory.categories[c].docsNb;
+            if (!directory.categories.empty()) {
+                const NindTermIndex::TermDirectory::Category &category = directory.categories[0];
+                entry->inlinePostings = category.inlinePostings;
+                entry->blocks.resize(category.blocks.size());
+                for (size_t b = 0; b < category.blocks.size(); b++) {
+                    const NindTermIndex::Block &block = category.blocks[b];
+                    //(within a definition of less than 4 GiB, a block of at most BLOCK_SIZE documents)
+                    if (block.offset > 0xFFFFFFFFull || block.length > 0xFFFFFFFFull || block.docsNb > 0xFFFFFFFFull)
+                        throw NindTermIndexException("NindBm25Scorer bad block, term " + std::to_string(ident));
+                    CompactBlock &compact = entry->blocks[b];
+                    compact.first = block.first;
+                    compact.last = block.last;
+                    compact.offset = (uint32_t)block.offset;
+                    compact.length = (uint32_t)block.length;
+                    compact.docsNb = (uint32_t)block.docsNb;
+                    compact.maxFrequency = block.maxFrequency;
+                }
+                if (parameters != 0 && !category.blocks.empty())
+                    setParameters(*entry, *parameters, shortest, boundsOf(directory, *parameters, shortest));
+            }
+        }
+        entry->bytes = sizeof(CachedTerm) + 64 + entry->blocks.size() * (sizeof(CompactBlock) + sizeof(double))
+                       + entry->inlinePostings.size() * sizeof(NindTermIndex::Document);
+        entry->lastUse.store(++m_useClock, std::memory_order_relaxed);
+        std::unique_lock<std::shared_timed_mutex> lock(m_cacheMutex);
+        if (m_cachedIndex != &termIndex) {
+            m_directories.clear();
+            m_cacheBytes = 0;
+            m_cachedIndex = &termIndex;
+        }
+        const auto inserted = m_directories.insert(std::make_pair(ident, entry));
+        if (!inserted.second) return inserted.first->second;   //(another thread's, meanwhile)
+        m_cacheBytes += entry->bytes;
+        if (m_cacheBytes > m_cacheLimit) evict(ident);
+        return entry;
+    }
+    // (under m_cacheMutex, exclusive) the terms used longest ago dropped, but kept, until the cache
+    // holds 3/4 of its limit (searches holding an entry keep it alive)
+    void evict(const unsigned int kept) const {
+        std::vector<std::pair<uint64_t, unsigned int> > byUse;
+        byUse.reserve(m_directories.size());
+        for (const auto &it : m_directories)
+            if (it.first != kept) byUse.push_back(std::make_pair(it.second->lastUse.load(std::memory_order_relaxed), it.first));
+        std::sort(byUse.begin(), byUse.end());
+        const size_t target = m_cacheLimit / 4 * 3;
+        for (size_t i = 0; i < byUse.size() && m_cacheBytes > target; i++) {
+            const auto it = m_directories.find(byUse[i].second);
+            m_cacheBytes -= it->second->bytes;
+            m_directories.erase(it);
+        }
+    }
+    // a term's blocks' bounds without the idf for parameters: computed once for the same
+    // parameters (each search computed them again: 5% of a search at 138M, a frequent term's
+    // hundreds of thousands of blocks), else from its directory read again
+    std::shared_ptr<const std::vector<double> > blockBounds(const NindTermIndex &termIndex, const unsigned int ident,
+                                                           const std::shared_ptr<const CachedTerm> &entry,
+                                                           const Params &parameters, const double shortest,
+                                                           NindReadBuffer &buffer) const {
+        {
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            if (entry->tf && entry->k1Plus1 == parameters.k1Plus1 && entry->base == parameters.base &&
+                entry->perLength == parameters.perLength && entry->shortest == shortest) return entry->tf;
+        }
+        NindTermIndex::TermDirectory directory;
+        if (!termIndex.getTermDirectory(ident, directory, buffer) || directory.categories.empty()
+            || directory.categories[0].blocks.size() != entry->blocks.size())
+            throw NindTermIndexException("NindBm25Scorer directory changed, term " + std::to_string(ident));
+        const std::shared_ptr<const std::vector<double> > tf = boundsOf(directory, parameters, shortest);
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        setParameters(*entry, parameters, shortest, tf);
+        return tf;
+    }
+public:
+    void setDirectoryCacheBytes(const size_t bytes) const {
+        std::unique_lock<std::shared_timed_mutex> lock(m_cacheMutex);
+        m_cacheLimit = bytes;
+        if (m_cacheBytes > m_cacheLimit) evict(0);
+    }
+    size_t directoryCacheBytes() const {
+        std::shared_lock<std::shared_timed_mutex> lock(m_cacheMutex);
+        return m_cacheBytes;
+    }
+private:
     mutable std::shared_timed_mutex m_cacheMutex;
     mutable std::unordered_map<unsigned int, std::shared_ptr<CachedTerm> > m_directories;
     mutable const NindTermIndex *m_cachedIndex = 0;
     mutable size_t m_cacheBytes = 0;
+    mutable size_t m_cacheLimit = NindBm25Scorer::DEFAULT_DIRECTORY_CACHE_BYTES;
+    mutable std::atomic<uint64_t> m_useClock{0};
 
     uint32_t positionOf(const uint64_t docId) const {
         //(an id below m_first wraps to a large offset)
@@ -1050,6 +1145,16 @@ std::vector<std::pair<NindDocId, double> > NindBm25Scorer::search(const NindTerm
                                                                   const SearchContext &context) const
 {
     return m_impl->search(termIndex, termIds, k1, b, topK, prune, threads, &context);
+}
+////////////////////////////////////////////////////////////
+void NindBm25Scorer::setDirectoryCacheBytes(const size_t bytes) const
+{
+    m_impl->setDirectoryCacheBytes(bytes);
+}
+////////////////////////////////////////////////////////////
+size_t NindBm25Scorer::directoryCacheBytes() const
+{
+    return m_impl->directoryCacheBytes();
 }
 ////////////////////////////////////////////////////////////
 uint64_t NindBm25Scorer::documentFrequency(const NindTermIndex &termIndex,

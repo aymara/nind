@@ -114,6 +114,17 @@ public:
                                                       const unsigned int threads,
                                                       const SearchContext &context) const;
 
+    /**\brief The default of setDirectoryCacheBytes: 1 GiB */
+    static const size_t DEFAULT_DIRECTORY_CACHE_BYTES = (size_t)1 << 30;
+
+    /**\brief At most this many bytes of the query terms' directories cached (their blocks' descriptors,
+    * 40 bytes each, and short lists), the terms used longest ago dropped past it (a query set of MS
+    * MARCO v2 takes ~0.75 GB: 18.4M blocks). Thread-safe. */
+    void setDirectoryCacheBytes(const size_t bytes) const;
+
+    /**\brief The bytes the directory cache holds now */
+    size_t directoryCacheBytes() const;
+
     /**\brief A term's documents in termIndex, every category counted (its directory only, cached) */
     uint64_t documentFrequency(const NindTermIndex &termIndex,
                                const unsigned int termId,

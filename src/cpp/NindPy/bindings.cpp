@@ -852,10 +852,13 @@ PYBIND11_MODULE(_native, m) {
         .def_readonly("docs_nb", &NindSegmentedIndex::SegmentInfo::docsNb)
         .def_readonly("deleted_nb", &NindSegmentedIndex::SegmentInfo::deletedNb);
     py::class_<NindSegmentedIndex>(m, "SegmentedIndex")
-        .def(py::init([](const std::string &base, const NindSegmentedIndex *previous, bool mapLengths) {
+        .def(py::init([](const std::string &base, const NindSegmentedIndex *previous, bool mapLengths,
+                         double directoryCacheMb) {
+            if (!(directoryCacheMb >= 0)) throw std::invalid_argument("directory_cache_mb: at least 0");
             py::gil_scoped_release release;
-            return new NindSegmentedIndex(base, previous, mapLengths);
-        }), py::arg("base"), py::arg("previous") = nullptr, py::arg("map_lengths") = false)
+            return new NindSegmentedIndex(base, previous, mapLengths, (size_t)(directoryCacheMb * (1 << 20)));
+        }), py::arg("base"), py::arg("previous") = nullptr, py::arg("map_lengths") = false,
+           py::arg("directory_cache_mb") = (double)(NindBm25Scorer::DEFAULT_DIRECTORY_CACHE_BYTES >> 20))
         .def("search", [](const NindSegmentedIndex &self, const std::vector<std::string> &words, double k1, double b,
                           long topK, bool prune, unsigned int threads) {
             std::vector<std::list<std::string> > query;
@@ -979,7 +982,10 @@ PYBIND11_MODULE(_native, m) {
         }, py::arg("term_index"), py::arg("term_ids"),
              py::arg("k1") = 1.5, py::arg("b") = 0.75, py::arg("top_k") = -1,
              py::arg("prune") = false, py::arg("threads") = 1)
-        .def_property_readonly("docs_nb", &NindBm25Scorer::docsNb);
+        .def_property_readonly("docs_nb", &NindBm25Scorer::docsNb)
+        // the term directories cached (NindBm25Scorer::setDirectoryCacheBytes)
+        .def("set_directory_cache_bytes", &NindBm25Scorer::setDirectoryCacheBytes, py::arg("bytes"))
+        .def_property_readonly("directory_cache_bytes", &NindBm25Scorer::directoryCacheBytes);
 
     py::class_<NindRetrolexicon::RetroWord>(m, "RetroWord")
         .def(py::init<>())

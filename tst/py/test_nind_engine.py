@@ -1673,3 +1673,18 @@ def test_direct_builds_fix_the_mmap_threshold_unless_told_not_to(tmp_path, monke
     NindIndexer(str(tmp_path / "off")).index_jsonl(path, workers=1)
     NindIndexer(str(tmp_path / "off")).index_files(files, workers=1)
     assert len(calls) == 2
+
+
+def test_directory_cache_size_changes_no_result(tmp_path):
+    # the term directories cached (NindBm25Scorer::setDirectoryCacheBytes): any size, the same results
+    records = [{"id": "d%d" % i, "contents": " ".join("w%d" % ((i * j) % 97) for j in range(1, 40))}
+               for i in range(3000)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    (tmp_path / "index").mkdir()
+    NindIndexer(str(tmp_path / "index")).index_jsonl(path, workers=1, shards=3)
+    default, small = NindEngine(str(tmp_path / "index")), NindEngine(str(tmp_path / "index"), directory_cache_mb=0)
+    for query in ["w1 w2 w3", "w5 w7 w11 w13 w17", "w96"]:
+        for top_k in (10, 100):
+            assert small.search(query, top_k=top_k) == default.search(query, top_k=top_k)
+    with pytest.raises(ValueError):
+        NindEngine(str(tmp_path / "index"), directory_cache_mb=-1)

@@ -688,6 +688,32 @@ void NindTermIndex::decodeTermBlock(const unsigned int ident,
     decodeBlock(ident, blocks[block], buffer, postings);
 }
 ////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of bytes [begin, end) of a definition (blocks without their directory)
+void NindTermIndex::readDefinitionBytes(const uint64_t definitionOffset,
+                                        const uint64_t begin,
+                                        const uint64_t end,
+                                        NindReadBuffer &buffer) const
+{
+    //(a definition takes less than 4 GiB: its length is 4 bytes)
+    if (end < begin || end - begin > 0xFFFFFFFFull || definitionOffset > UINT64_MAX - end)
+        throw NindTermIndexException("NindTermIndex::readDefinitionBytes bad range : " + m_fileName);
+    m_file.readAt(definitionOffset + begin, (unsigned int)(end - begin), buffer);
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) decoding of a block read by readDefinitionBytes
+void NindTermIndex::decodeTermBlock(const unsigned int ident,
+                                    const Block &block,
+                                    const uint64_t bufferOffset,
+                                    NindReadBuffer &buffer,
+                                    vector<Document> &postings) const
+{
+    if (bufferOffset > 0xFFFFFFFFull || block.length > 0xFFFFFFFFull)
+        throw NindTermIndexException("NindTermIndex::decodeTermBlock bad block : " + m_fileName);
+    buffer.setInBufferPtr((unsigned int)bufferOffset);
+    buffer.setEndInBuffer((unsigned int)block.length);
+    decodeBlock(ident, block, buffer, postings);
+}
+////////////////////////////////////////////////////////////
 //format v2: forme la dejfinition (rejpertoire, puis blocs) dans le buffer d'ejcriture
 void NindTermIndex::writeTermDefV2(const unsigned int ident,
                                    const vector<CategoryPostings> &categories,

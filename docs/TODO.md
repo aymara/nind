@@ -106,7 +106,7 @@ of 3.0.0 (format v2).
     their own generation?
   - **Writer memory.** An update needing a lookup (removal, replacement, name)
     opens the whole index, ~40 bytes per document (~12 GB at 300M): lookups in
-    the files instead? The scorer's 256 MB directory cache is per segment.
+    the files instead? (The scorers' directory caches share one budget, see "Term directories".)
   - [x] **Search at 100M+ with threads** (section 7): one index stops gaining at
     4 threads (2.6×), 8 segments reach 7× on 8–12. An exhaustive search takes 12
     bytes per document of scratch per concurrent search (per segment, so at most
@@ -257,7 +257,7 @@ of 3.0.0 (format v2).
   753–770 (`scale-repeat.txt`; stage 6b's 519 was a low run). perf at 12 and 48
   threads: the same profile, no lock; per-core efficiency with hardware threads,
   memory traffic (each search decodes its blocks into its own buffers)?
-- **Term directories at 138M.** The scorer's directory cache (256 MB, emptied
+- [x] **Term directories at 138M.** The scorer's directory cache (256 MB, emptied
   when full) holds a fifth of what 2,000 queries need: their 3,737 terms have
   15M blocks of 88 bytes (1.3 GB; "you": 286k blocks, 25 MB). With 2 GB, the
   138M mean is 6% lower (34.8 -> 32.8 ms), 8.8M unchanged; and each query also
@@ -267,17 +267,27 @@ of 3.0.0 (format v2).
   bounds without the idf cached with their directory for the parameters last
   asked (a bound: multiplicity * (idf * tf), the same value), the blocks read in
   the directory instead of copied each query, parsing reserving its blocks:
-  138M mean -3.5%, 8.8M -2–4%, medians -2–4%, identical results. Left: a
-  smaller cached block (its impacts dropped once its bounds are known: exact
-  only while the parameters stay), or a larger cache for large indexes.
+  138M mean -3.5%, 8.8M -2–4%, medians -2–4%, identical results. Then, with
+  long documents (see "Long documents"): a cached block takes 32 bytes and its
+  bound 8 (first, last, offset, length, count, largest frequency: what a scan
+  reads; the impacts only for the bounds, from the directory read again when the
+  parameters change), the terms used longest ago dropped past the limit (down to
+  3/4 of it) instead of everything, the limit 1 GB by default
+  (`NindBm25Scorer::setDirectoryCacheBytes`, `NindEngine(directory_cache_mb=)`),
+  shared by an index's segments by their documents. A query set's directories:
+  ~0.43 GiB of a search process's own memory after a pass (MS MARCO v2 138M
+  passages 0.80 -> 1.22 GiB, 10.96M documents 0.31 -> 0.74). Top 10 medians:
+  138M passages 19.4 -> 16.8 ms, long documents 6.65 -> 4.55 ms (the server
+  busy, timed alternately; identical results on every dev query).
 - [x] **A search process's own memory**, 138M: nind 1.06 GB, Lucene 0.83 (its JVM),
   tantivy 0.04 (both map their index). `NindEngine(map_lengths=True)` reads the
   documents' lengths in their mapped files (none of the process's memory: 0.33
   GiB after queries instead of 0.85, opened in 0.6 s instead of 1.0) for 3-6%
   slower searches (4 KB pages, not a copy's huge pages: lengths on fewer bytes
   wouldn't help, see "Search, what's left"); copied by default. Update lookups
-  map them. Left: the 256 MB directory cache (above), the term index's and
-  lexicon's indirection maps.
+  map them. Left: the term index's and lexicon's indirection maps; the directory
+  cache takes up to 1 GB since (its default, see "Term directories": ~0.4 GiB
+  for a query set).
 - [x] **Top 100** in the comparison benchmark.
 - **Stopwords kept at scale.** MS MARCO v2 138M, top 10 on one thread: 138 ms vs
   36 ms for Lucene (16M: 15.5 vs 6.1 ms) with 3.2.0. With the windowed scan
@@ -292,8 +302,38 @@ of 3.0.0 (format v2).
   section 8). Done: lexicons of over 16.7M words (39.3M here) no longer break the writers
   (`NindPadFile::MAX_ENTRIES_BLOC_SIZE`). Left, all from stage 8:
   - **Search on one thread**: 6.73 ms against Lucene's 3.86 (p99 62.6 vs 36.5) where nind led
-    on passages; it leads at 1M documents, trails from 4M. Profile a long-document query: postings
-    of documents of 1,200 tokens (frequencies, lengths spread wider, impacts less selective?).
+    on passages; it leads at 1M documents, trails from 4M. Measured (`nind-bench/scripts`:
+    `per_query.py`, `block_bounds.py`, `profile_queries.py`; socket 1, the other busy):
+    - every query of 3 terms or more is slower, by 2.4 times at the median (1.6 to 3.6 for 80%
+      of them); 4 terms 6.00 ms against 2.21;
+    - not the bounds: a block's bound (its largest frequency with its shortest length) is 4%
+      over its best posting's weight at the median, 14% at the 90th percentile (passages: alike);
+    - not the windows: 3 and 4 terms are windowed here (dense lists), and slower document at
+      a time (4.90 and 8.83 ms against 3.96 and 5.95);
+    - not the lengths on 4 bytes (some documents over 65,535 tokens): on 2 bytes, the same times;
+    - the work per posting: counted in the window scan, ~70 ns per essential posting on both
+      corpora (5 terms: 129,900 postings a query here, 478,200 on the 138M passages, which also
+      have 12 times the windows and 16 times the blocks: the overheads Lucene pays more for);
+      2.63 instructions per cycle, 1.4% branch misses, ~390 instructions per essential posting.
+      Lucene does the same work at ~25 ns: blocks decoded and scored in batches, with vectors
+      (Panama, 512 bits here). nind's wheel is compiled for generic x86-64 (no AVX), its loop
+      scalar and per posting: the bitset, the window's posting list, a prefetch, the position,
+      the length, BM25 with a division; then a second pass over the touched documents.
+    Tried, all with identical results (`exact_results.py`: every dev query's top 10 and top 100,
+    ids and scores, on both corpora), timed alternately against HEAD (`ab.sh`; the server busy):
+    - a block's postings weighed at once (`bm25Weights`, in its own file, `-ffp-contract=off
+      -fno-trapping-math`, `target_clones` AVX-512/AVX2/default: vectorized): slower, 6.55 ->
+      6.87 ms here, 5 terms on passages 31.9 -> 36.6: a window has ~16 postings of an essential
+      term here, ~5 on passages, too few for the call, the gathers and a second pass. Dropped;
+    - a touched document rejected before its position and length are read: kept, exact;
+    - **the directory cache**: at 4 GB instead of 256 MB, 6.55 -> 3.65 ms (round 2: 4.93) here,
+      19.3 -> 17.1 ms on passages. A query set's directories take ~1.7 GB on both corpora (18.4M
+      blocks of 88 bytes and a bound), so the cache empties and refills, and queries parse their
+      terms' directories and recompute their bounds again (the profile's ~15% understated it).
+    Done: compact cached blocks, eviction of the terms used longest ago, 1 GB by default (see
+    "Term directories at 138M"): 6.65 -> 4.55 ms here (Lucene 3.86 on the idle server; the
+    stage to run again), 19.4 -> 16.8 on passages. Left: the rest of the gap, per window and
+    per block (decoding 17%, the bounds of each window's blocks, the touched documents' pass).
   - **Build memory**: 77.5 GB for one index (6 bytes a token, Lucene 20.9 GB); 8 segments 69 GB
     (8 builds at once, nothing bounds them without `memory_gb`). Check the `memory_gb` model on
     this corpus (its tokens per document and vocabulary differ from the passages').
