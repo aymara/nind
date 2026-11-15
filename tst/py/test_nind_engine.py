@@ -1688,3 +1688,22 @@ def test_directory_cache_size_changes_no_result(tmp_path):
             assert small.search(query, top_k=top_k) == default.search(query, top_k=top_k)
     with pytest.raises(ValueError):
         NindEngine(str(tmp_path / "index"), directory_cache_mb=-1)
+
+
+def test_builds_without_local_index_write_the_same_term_index(tmp_path):
+    # without a local index the builder keeps documents compact (their distinct terms): the same
+    # term index, from batches (index_jsonl) as from token lists (index_files), with passes too
+    records = [{"id": "d%d" % i, "contents": " ".join(["w%d" % ((i * j) % 89) for j in range(1, 30)]
+                                                       + ["often"] * (300 if i % 50 == 0 else i % 3))}
+               for i in range(1500)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+
+    def term_index(name, **kwargs):
+        index_dir = tmp_path / name
+        index_dir.mkdir()
+        NindIndexer(str(index_dir), **kwargs).index_jsonl(path, workers=1)
+        with open(index_dir / "corpus.CURRENT") as f:
+            with open(index_dir / f.read().strip() / "corpus.nindtermindex", "rb") as g:
+                return g.read()
+    with_local, without = term_index("local"), term_index("compact", local_index=False)
+    assert len(with_local) == len(without) and with_local[:-8] == without[:-8]

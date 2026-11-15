@@ -1266,6 +1266,22 @@ class NindIndexer:
             # was 5 GiB each)
             ranges = self._jsonl_ranges(path, end, max(workers * 4, -(-end // self.JSONL_SHARD_PIECE_BYTES)))
             with ProcessPoolExecutor(max_workers=min(workers, len(ranges)), initializer=_pool_worker_init) as pool:
+                if not self._with_local_index:
+                    # compact documents: each tokenizer batch added as it comes, not all of them
+                    # held first (4 bytes a token: 19 GiB of MS MARCO v2.1's first 4M documents)
+                    with IndexStore(self.index_dir, self.prefix).new_generation() as base:
+                        builder, names, doc_id = self._new_builder(postings_budget), [], 0
+                        for record_names, chunk in pool.map(
+                                self._tokenize_jsonl_range_packed, [path] * len(ranges), [start for start, _ in ranges],
+                                [stop for _, stop in ranges], [id_field] * len(ranges), [text_field] * len(ranges)):
+                            names.append(record_names)
+                            doc_id = self._add_chunk(builder, doc_id, chunk)
+                            del record_names, chunk
+                        count, ids = self._write_record_names(base, names)
+                        self._write_built(builder, base)
+                        del builder
+                        _write_meta(base, self.tokenizer_options, self._with_local_index)
+                    return _RecordNames(base, count) if ids is None else ids
                 parts = list(pool.map(self._tokenize_jsonl_range_packed, [path] * len(ranges),
                                       [start for start, _ in ranges], [stop for _, stop in ranges],
                                       [id_field] * len(ranges), [text_field] * len(ranges)))
@@ -1273,26 +1289,29 @@ class NindIndexer:
         names = [record_names for record_names, _ in parts]
         del parts                       # _write_chunks frees each chunk once added
         with IndexStore(self.index_dir, self.prefix).new_generation() as base:
-            # the records' ids are the documents' names (converted to strings, unique); string
-            # ids, packed by the workers, are written first and read back from the file, not kept
-            # beside the build
-            if all(isinstance(part, _PackedNames) for part in names):
-                count = sum(len(part.lengths) for part in names)
-                packed = _PackedNames(b''.join(part.names for part in names), array('I'))
-                for part in names:
-                    packed.lengths.extend(part.lengths)
-                del names
-                native.NindDocNames.write_packed(base + DOC_NAMES_EXTENSION, 0, packed.names, packed.lengths)
-                del packed
-                ids = None
-            else:
-                ids = [doc_ident for part in names for doc_ident in _unpack_names(part)]
-                del names
-                native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('Q', range(len(ids))),
-                                          [doc_ident if isinstance(doc_ident, str) else str(doc_ident) for doc_ident in ids])
+            count, ids = self._write_record_names(base, names)
             self._write_chunks(chunks, 0, base, postings_budget)
             _write_meta(base, self.tokenizer_options, self._with_local_index)
         return _RecordNames(base, count) if ids is None else ids
+
+    @staticmethod
+    def _write_record_names(base, names):
+        # the records' ids, the documents' names (converted to strings, unique), from the workers'
+        # parts (emptied): (their count, None) for string ids, packed by the workers, written and read
+        # back from the file, not kept beside the build; (count, the ids) otherwise
+        if all(isinstance(part, _PackedNames) for part in names):
+            count = sum(len(part.lengths) for part in names)
+            packed = _PackedNames(b''.join(part.names for part in names), array('I'))
+            for part in names:
+                packed.lengths.extend(part.lengths)
+            names.clear()
+            native.NindDocNames.write_packed(base + DOC_NAMES_EXTENSION, 0, packed.names, packed.lengths)
+            return count, None
+        ids = [doc_ident for part in names for doc_ident in _unpack_names(part)]
+        names.clear()
+        native.NindDocNames.write(base + DOC_NAMES_EXTENSION, array('Q', range(len(ids))),
+                                  [doc_ident if isinstance(doc_ident, str) else str(doc_ident) for doc_ident in ids])
+        return len(ids), ids
 
     #: A direct build (:meth:`index_jsonl`, :meth:`index_files`) fixes glibc's mmap threshold at its
     #: default in this process, for good (a third less memory: see _fix_mmap_threshold); False
@@ -1662,17 +1681,32 @@ class NindIndexer:
         # emptied as they are added (the caller should hold no other reference to them: they would
         # stay in memory). The builder numbers the words (nothing per word in Python) and writes the
         # lexicon, its words by increasing bytes; postings_budget: see IndexBuilder.postings_budget.
-        builder = native.IndexBuilder()
+        builder = self._new_builder(postings_budget)
         builder.reserve(sum(len(chunk[2]) for chunk in chunks) // 4, sum(len(chunk[3]) for chunk in chunks) // 4)
-        builder.postings_budget = postings_budget
         doc_id = first_doc_id
         chunks.reverse()
         while chunks:
-            words, word_ends, term_ids, ends = chunks.pop()
-            ends = _uint_array(ends)
-            builder.add_batch(doc_id, ends, _uint_array(term_ids), words, _uint_array(word_ends))
-            doc_id += len(ends)
-            del words, word_ends, term_ids, ends
+            doc_id = self._add_chunk(builder, doc_id, chunks.pop())
+        self._write_built(builder, base)
+
+    def _new_builder(self, postings_budget=0):
+        # an IndexBuilder for this indexer: without a local index, its documents compact (their
+        # distinct terms and frequencies, not their tokens: IndexBuilder.keep_tokens)
+        builder = native.IndexBuilder()
+        builder.keep_tokens = self._with_local_index
+        builder.postings_budget = postings_budget
+        return builder
+
+    @staticmethod
+    def _add_chunk(builder, doc_id, chunk):
+        # one tokenizer batch (see _write_chunks) of documents from doc_id on: the next document's id
+        words, word_ends, term_ids, ends = chunk
+        ends = _uint_array(ends)
+        builder.add_batch(doc_id, ends, _uint_array(term_ids), words, _uint_array(word_ends))
+        return doc_id + len(ends)
+
+    def _write_built(self, builder, base):
+        # the index files of a builder's documents at base, and their lengths
         terms_nb = builder.words_nb
         lexicon_writer = native.NindLexiconIndex(base, is_writer=True, indirection_bloc_size=max(1, terms_nb))
         lexicon_writer.begin_bulk()

@@ -27,6 +27,13 @@ NindIndexBuilder::NindIndexBuilder():
     m_docIds(),
     m_docEnds(),
     m_tokens(),
+    m_keepTokens(true),
+    m_tokensNb(0),
+    m_entries(),
+    m_frequencies(),
+    m_lengths(),
+    m_counts(),
+    m_touched(),
     m_maxTermId(0),
     m_words(),
     m_wordIds(),
@@ -36,11 +43,91 @@ NindIndexBuilder::NindIndexBuilder():
 {
 }
 ////////////////////////////////////////////////////////////
+void NindIndexBuilder::setKeepTokens(const bool keep)
+{
+    if (!m_docIds.empty()) throw std::invalid_argument("setKeepTokens: before any document");
+    m_keepTokens = keep;
+}
+////////////////////////////////////////////////////////////
 void NindIndexBuilder::reserve(const size_t tokensNb, const size_t docsNb)
 {
-    m_tokens.reserve(m_tokens.size() + tokensNb);
+    //(compact: the postings aren't known yet, the entries grow by chunks)
+    if (m_keepTokens) m_tokens.reserve(m_tokens.size() + tokensNb);
+    else m_lengths.reserve(m_lengths.size() + docsNb);
     m_docIds.reserve(m_docIds.size() + docsNb);
     m_docEnds.reserve(m_docEnds.size() + docsNb);
+}
+////////////////////////////////////////////////////////////
+template <class TermOf>
+void NindIndexBuilder::appendDocument(const size_t tokensNb, TermOf termOf)
+{
+    m_tokensNb += tokensNb;
+    if (m_keepTokens) {
+        for (size_t i = 0; i < tokensNb; i++) {
+            const uint32_t term = termOf(i);
+            m_tokens.push_back(term);
+            if (term > m_maxTermId) m_maxTermId = term;
+        }
+        m_docEnds.push_back(m_tokens.size());
+        return;
+    }
+    //compact: the document's distinct terms, in their first occurrences' order, each with its frequency
+    for (size_t i = 0; i < tokensNb; i++) {
+        const uint32_t term = termOf(i);
+        if (term >= FREQUENCY_FOLLOWS) throw std::invalid_argument("too many terms for a compact build (2^31)");
+        if (term >= m_counts.size()) m_counts.resize(std::max<size_t>((size_t)term + 1, m_counts.size() * 2), 0);
+        if (m_counts[term]++ == 0) m_touched.push_back(term);
+        if (term > m_maxTermId) m_maxTermId = term;
+    }
+    for (size_t i = 0; i < m_touched.size(); i++) {
+        const uint32_t term = m_touched[i], count = m_counts[term];
+        m_counts[term] = 0;
+        if (count == 1) m_entries.push_back(term);
+        else {
+            m_entries.push_back(term | FREQUENCY_FOLLOWS);
+            m_frequencies.push_back(count);
+        }
+    }
+    m_touched.clear();
+    if (tokensNb > std::numeric_limits<uint32_t>::max()) throw std::invalid_argument("a document of over 2^32 tokens");
+    m_lengths.push_back((uint32_t)tokensNb);
+    m_docEnds.push_back(m_entries.size());
+}
+////////////////////////////////////////////////////////////
+template <class F>
+void NindIndexBuilder::scanDocuments(const uint32_t first, const uint32_t last, F f) const
+{
+    const bool allTerms = first <= 1 && last >= m_maxTermId;
+    size_t begin = 0;
+    if (!m_keepTokens) {
+        size_t frequency = 0;           //the next of m_frequencies
+        for (size_t d = 0; d < m_docIds.size(); d++) {
+            for (size_t i = begin; i < m_docEnds[d]; i++) {
+                const uint32_t entry = m_entries[i];
+                const uint32_t term = entry & ~FREQUENCY_FOLLOWS;
+                const uint32_t count = (entry & FREQUENCY_FOLLOWS) != 0 ? m_frequencies[frequency++] : 1;
+                if (allTerms || (term >= first && term <= last)) f(d, term, count);
+            }
+            begin = m_docEnds[d];
+        }
+        return;
+    }
+    //tokens: counted per document
+    std::vector<uint32_t> counts(m_maxTermId + 1, 0);
+    std::vector<uint32_t> touched;
+    for (size_t d = 0; d < m_docIds.size(); d++) {
+        for (size_t i = begin; i < m_docEnds[d]; i++) {
+            const uint32_t term = m_tokens[i];
+            if (!allTerms && (term < first || term > last)) continue;
+            if (counts[term]++ == 0) touched.push_back(term);
+        }
+        for (size_t i = 0; i < touched.size(); i++) {
+            f(d, touched[i], counts[touched[i]]);
+            counts[touched[i]] = 0;
+        }
+        touched.clear();
+        begin = m_docEnds[d];
+    }
 }
 ////////////////////////////////////////////////////////////
 void NindIndexBuilder::addDocument(const NindDocId docId,
@@ -54,11 +141,9 @@ void NindIndexBuilder::addDocument(const NindDocId docId,
         throw std::invalid_argument("too many documents for one build (at most 2^32 - 1)");
     for (size_t i = 0; i < tokensNb; i++) {
         if (termIds[i] == 0) throw std::invalid_argument("0 is not a valid term id");
-        if (termIds[i] > m_maxTermId) m_maxTermId = termIds[i];
     }
-    m_tokens.insert(m_tokens.end(), termIds, termIds + tokensNb);
+    appendDocument(tokensNb, [termIds](const size_t i) { return termIds[i]; });
     m_docIds.push_back(docId);
-    m_docEnds.push_back(m_tokens.size());
 }
 ////////////////////////////////////////////////////////////
 
@@ -91,16 +176,11 @@ void NindIndexBuilder::addDocuments(const NindDocId firstDocId,
         throw std::invalid_argument("too many documents for one build (at most 2^32 - 1)");
     if (m_mode == BATCHES || m_mode == WRITTEN) throw std::invalid_argument("lexicon ids after batches");
     m_mode = LEXICON_IDS;
-    const size_t base = m_tokens.size();
     //no exact reserve here: it would copy the whole buffer at every batch (see reserve)
-    for (size_t i = 0; i < tokensNb; i++) {
-        const uint32_t termId = idMap[localIds[i]];
-        m_tokens.push_back(termId);
-        if (termId > m_maxTermId) m_maxTermId = termId;
-    }
-    for (size_t i = 0; i < docsNb; i++) {
+    for (size_t i = 0, begin = 0; i < docsNb; begin = ends[i], i++) {
+        const uint32_t *document = localIds + begin;
+        appendDocument(ends[i] - begin, [document, idMap](const size_t j) { return idMap[document[j]]; });
         m_docIds.push_back(firstDocId + (uint64_t)i);
-        m_docEnds.push_back(base + ends[i]);
     }
 }
 
@@ -143,15 +223,11 @@ void NindIndexBuilder::addBatch(const NindDocId firstDocId,
     for (size_t i = 0; i < tokensNb; i++)
         if (localIds[i] >= wordsNb) throw std::invalid_argument("term_ids: local id beyond the words");
     m_mode = BATCHES;
-    const size_t base = m_tokens.size();
-    for (size_t i = 0; i < tokensNb; i++) {
-        const uint32_t id = ids[localIds[i]];
-        m_tokens.push_back(id);
-        if (id > m_maxTermId) m_maxTermId = id;
-    }
-    for (size_t i = 0; i < docsNb; i++) {
+    for (size_t i = 0, begin = 0; i < docsNb; begin = ends[i], i++) {
+        const uint32_t *document = localIds + begin;
+        const uint32_t *wordIds = ids.data();
+        appendDocument(ends[i] - begin, [document, wordIds](const size_t j) { return wordIds[document[j]]; });
         m_docIds.push_back(firstDocId + (uint64_t)i);
-        m_docEnds.push_back(base + ends[i]);
     }
 }
 ////////////////////////////////////////////////////////////
@@ -178,6 +254,13 @@ void NindIndexBuilder::writeLexicon(NindLexiconIndex &lexicon)
         m_tokens[i] = identOf[m_tokens[i]];
         if (m_tokens[i] > m_maxTermId) m_maxTermId = m_tokens[i];
     }
+    for (size_t i = 0; i < m_entries.size(); i++) {
+        const uint32_t entry = m_entries[i], term = identOf[entry & ~FREQUENCY_FOLLOWS];
+        if (term >= FREQUENCY_FOLLOWS) throw std::invalid_argument("too many terms for a compact build (2^31)");
+        m_entries[i] = term | (entry & FREQUENCY_FOLLOWS);
+        if (term > m_maxTermId) m_maxTermId = term;
+    }
+    std::vector<uint32_t>().swap(m_counts);
     m_writtenWordsNb = order.size();
     m_mode = WRITTEN;
 }
@@ -190,30 +273,18 @@ void NindIndexBuilder::writeTermIndex(NindTermIndex &termIndex,
     const std::list<unsigned int> noSpecifics;
     //0) the documents' lengths (their tokens: what NindEngine scores with), for the blocks
     {
-        std::vector<std::pair<NindDocId, unsigned int> > lengths(m_docIds.size());
-        size_t previous = 0;
-        for (size_t d = 0; d < m_docIds.size(); d++) {
-            lengths[d] = std::make_pair((NindDocId)m_docIds[d], (unsigned int)(m_docEnds[d] - previous));
-            previous = m_docEnds[d];
-        }
-        termIndex.setDocumentLengths(lengths);
+        std::vector<NindDocId> docIds;
+        std::vector<uint32_t> lengths;
+        docLengths(docIds, lengths);
+        std::vector<std::pair<NindDocId, unsigned int> > pairs(docIds.size());
+        for (size_t d = 0; d < docIds.size(); d++) pairs[d] = std::make_pair(docIds[d], (unsigned int)lengths[d]);
+        termIndex.setDocumentLengths(pairs);
     }
-    //1) occurrences of each term in each document, counted per document
-    std::vector<uint32_t> counts(m_maxTermId + 1, 0);
-    std::vector<uint32_t> touched;
+    //1) each term's documents
     std::vector<size_t> postingsNb(m_maxTermId + 2, 0);
-    size_t begin = 0;
-    for (size_t d = 0; d < m_docIds.size(); d++) {
-        for (size_t i = begin; i < m_docEnds[d]; i++) {
-            if (counts[m_tokens[i]]++ == 0) touched.push_back(m_tokens[i]);
-        }
-        for (size_t i = 0; i < touched.size(); i++) {
-            postingsNb[touched[i] + 1]++;
-            counts[touched[i]] = 0;
-        }
-        touched.clear();
-        begin = m_docEnds[d];
-    }
+    scanDocuments(1, m_maxTermId, [&postingsNb](const size_t, const uint32_t term, const uint32_t) {
+        postingsNb[term + 1]++;
+    });
     //2) postings by term (CSR), documents in increasing id order: 5 bytes a posting, the document's
     // position (32 bits, its id is m_docIds[position]) and its frequency (8 bits; 255 and more: in
     // overflows, at most one per 255 tokens); a range of terms at a time, its postings within
@@ -234,28 +305,15 @@ void NindIndexBuilder::writeTermIndex(NindTermIndex &termIndex,
         std::vector<uint32_t> postingDocs(postingsNb[last + 1] - base);
         std::vector<uint8_t> postingFreqs(postingDocs.size());
         std::unordered_map<size_t, uint32_t> overflows;
-        const bool allTerms = first == 1 && last == m_maxTermId;
-        begin = 0;
-        for (size_t d = 0; d < m_docIds.size(); d++) {
-            for (size_t i = begin; i < m_docEnds[d]; i++) {
-                const uint32_t term = m_tokens[i];
-                if (!allTerms && (term < first || term > last)) continue;
-                if (counts[term]++ == 0) touched.push_back(term);
+        scanDocuments(first, last, [&](const size_t d, const uint32_t term, const uint32_t count) {
+            const size_t slot = fill[term - first]++ - base;
+            postingDocs[slot] = (uint32_t)d;
+            if (count < MAX_SMALL_FREQ) postingFreqs[slot] = (uint8_t)count;
+            else {
+                postingFreqs[slot] = (uint8_t)MAX_SMALL_FREQ;
+                overflows[slot] = count;
             }
-            for (size_t i = 0; i < touched.size(); i++) {
-                const size_t slot = fill[touched[i] - first]++ - base;
-                const uint32_t count = counts[touched[i]];
-                postingDocs[slot] = (uint32_t)d;
-                if (count < MAX_SMALL_FREQ) postingFreqs[slot] = (uint8_t)count;
-                else {
-                    postingFreqs[slot] = (uint8_t)MAX_SMALL_FREQ;
-                    overflows[slot] = count;
-                }
-                counts[touched[i]] = 0;
-            }
-            touched.clear();
-            begin = m_docEnds[d];
-        }
+        });
         std::vector<size_t>().swap(fill);
         //3) the range's term definitions, flat (documents already in increasing order: added so);
         // consecutive ids (every batch of addDocuments) without looking them up (scattered reads)
@@ -284,6 +342,7 @@ void NindIndexBuilder::writeLocalIndex(NindLocalIndex &localIndex,
                                        const unsigned char cg) const
 {
     if (m_mode == BATCHES) throw std::invalid_argument("writeLocalIndex: writeLexicon first");
+    if (!m_keepTokens) throw std::invalid_argument("writeLocalIndex: the documents' tokens weren't kept (setKeepTokens)");
     size_t maxLength = 0, begin = 0;
     for (size_t d = 0; d < m_docIds.size(); d++) {
         maxLength = std::max(maxLength, m_docEnds[d] - begin);
@@ -308,6 +367,10 @@ void NindIndexBuilder::docLengths(std::vector<NindDocId> &docIds,
                                   std::vector<uint32_t> &lengths) const
 {
     docIds.assign(m_docIds.begin(), m_docIds.end());
+    if (!m_keepTokens) {
+        lengths.assign(m_lengths.begin(), m_lengths.end());
+        return;
+    }
     lengths.resize(m_docIds.size());
     size_t begin = 0;
     for (size_t d = 0; d < m_docIds.size(); d++) {

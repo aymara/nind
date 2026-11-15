@@ -332,8 +332,14 @@ of 3.0.0 (format v2).
       terms' directories and recompute their bounds again (the profile's ~15% understated it).
     Done: compact cached blocks, eviction of the terms used longest ago, 1 GB by default (see
     "Term directories at 138M"): 6.65 -> 4.55 ms here (Lucene 3.86 on the idle server; the
-    stage to run again), 19.4 -> 16.8 on passages. Left: the rest of the gap, per window and
-    per block (decoding 17%, the bounds of each window's blocks, the touched documents' pass).
+    stage to run again), 19.4 -> 16.8 on passages. Then, each exact, timed alternately:
+    - decoding (a quarter of a search's samples): a block's bits unpacked from a zero-padded copy,
+      one 64-bit load a value, then with the width a constant (a template per width), postings
+      constructed in place (no zeroing resize): 1% at most, dropped;
+    - the touched documents filtered without a branch (a list of those that may reach theta,
+      then the probes on them; the test's outcome was unpredictable): 4.45 -> 4.18 ms, kept.
+    Left: what remains is spread over each window (its blocks' bounds, the essential terms'
+    postings one at a time, their lengths read).
   - **Build memory**: 77.5 GB for one index (6 bytes a token, Lucene 20.9 GB); 8 segments 69 GB
     (8 builds at once, nothing bounds them without `memory_gb`). Check the `memory_gb` model on
     this corpus (its tokens per document and vocabulary differ from the passages').

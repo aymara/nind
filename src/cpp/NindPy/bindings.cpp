@@ -738,6 +738,8 @@ PYBIND11_MODULE(_native, m) {
     py::class_<NindIndexBuilder>(m, "IndexBuilder")
         .def(py::init<>())
         .def("reserve", &NindIndexBuilder::reserve, py::arg("tokens_nb"), py::arg("docs_nb"))
+        // documents as tokens (True: a local index can be written) or, compact, their distinct terms
+        .def_property("keep_tokens", &NindIndexBuilder::keepTokens, &NindIndexBuilder::setKeepTokens)
         .def("add_documents", [](NindIndexBuilder &self, uint64_t firstDocId, const py::buffer &ends,
                                  const py::buffer &termIds, const py::buffer &idMap) {
             const UIntView documentEnds = uintView(ends, "ends");

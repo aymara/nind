@@ -570,6 +570,9 @@ private:
         for (size_t t = 0; t < termsNb; t++) sorted[t] = t;
         // a window's approximations, by document, and the documents touched (at most WINDOW_SPAN)
         std::vector<double> windowScores(WINDOW_SPAN, 0.0);
+        // a window's touched documents that may reach theta: their offsets and approximations
+        std::vector<uint32_t> keptOffsets(WINDOW_SPAN);
+        std::vector<double> keptScores(WINDOW_SPAN);
         std::vector<uint64_t> touched(WINDOW_SPAN / 64, 0);
         std::vector<bool> essentialTerm(termsNb, false);
         std::vector<std::vector<std::pair<NindDocId, uint32_t> > > windowPostings(termsNb);   //an essential term's, in the window
@@ -646,17 +649,30 @@ private:
                     }
                 }
                 bool flagged = false;           //essentialTerm set for this window (at its first candidate)
-                // the touched documents, in order
+                // the touched documents, in order: those that may reach theta even with every
+                // non-essential term (the probes' first test below, most of them don't), kept
+                // without a branch (the test's outcome is unpredictable: 7% of a search)
+                const double nonEssential = essential > 0 ? prefix[essential - 1] : 0.0;
                 const size_t words = (size_t)(windowMax - windowMin) / 64 + 1;
+                size_t keptNb = 0;
                 for (size_t w = 0; w < words; w++) {
                     for (uint64_t bits = touched[w]; bits != 0; bits &= bits - 1) {
                         const size_t offset = w * 64 + (size_t)__builtin_ctzll(bits);
-                        const NindDocId thisDoc = windowMin + offset;
-                        double approximation = windowScores[offset];
+                        const double approximation = windowScores[offset];
                         windowScores[offset] = 0.0;
-                        //(first, before its position and length: most touched documents can't reach
-                        //theta even with every non-essential term, the probes' first test below)
-                        if (approximation + (essential > 0 ? prefix[essential - 1] : 0.0) < threshold) continue;
+                        keptOffsets[keptNb] = (uint32_t)offset;
+                        keptScores[keptNb] = approximation;
+                        keptNb += !(approximation + nonEssential < threshold);
+                    }
+                    touched[w] = 0;
+                }
+                for (size_t kept = 0; kept < keptNb; kept++) {
+                    {
+                        const size_t offset = keptOffsets[kept];
+                        const NindDocId thisDoc = windowMin + offset;
+                        double approximation = keptScores[kept];
+                        //(theta may have risen since: the same test, as the documents come)
+                        if (approximation + nonEssential < threshold) continue;
                         const uint32_t position = positionOf(thisDoc);
                         //(a deleted document never reaches theta, nor the candidates)
                         if (position == NO_POSITION || corpus.isDeleted(position)) continue;
@@ -710,7 +726,6 @@ private:
                         }
                         //(a higher theta: fewer non-essential terms needed from the next document on)
                     }
-                    touched[w] = 0;
                 }
             }
             if (windowMax >= hi) break;

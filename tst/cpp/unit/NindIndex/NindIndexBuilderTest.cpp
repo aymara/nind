@@ -357,3 +357,51 @@ TEST_CASE("NindIndexBuilder.BatchesWriteWhatLexiconIdsWrite") {
     }
 }
 ////////////////////////////////////////////////////////////
+TEST_CASE("NindIndexBuilder.CompactDocumentsWriteTheSameFile") {
+    //documents kept as their distinct terms and frequencies (setKeepTokens(false)): the same term
+    //index as from their tokens, at every postings budget, the same lengths; no local index
+    TestTempDir tmp;
+    uint64_t state = 9;
+    NindIndexBuilder tokens, compact;
+    compact.setKeepTokens(false);
+    for (unsigned int d = 0; d < 700; d++) {
+        vector<uint32_t> termIds;
+        const unsigned int length = next(state) % 60;           //(empty documents too)
+        for (unsigned int i = 0; i < length; i++) {
+            const unsigned int rank = (unsigned int)(next(state) % 1000);
+            termIds.push_back(1 + rank * rank / 8400);
+        }
+        if (d % 97 == 0) termIds.insert(termIds.end(), 300 + d, 1 + d % 119);
+        tokens.addDocument(40 + 2 * d, termIds.data(), termIds.size());
+        compact.addDocument(40 + 2 * d, termIds.data(), termIds.size());
+    }
+    CHECK_EQ(tokens.tokensNb(), compact.tokensNb());
+    CHECK_EQ(tokens.maxTermId(), compact.maxTermId());
+    vector<NindDocId> tokenIds, compactIds;
+    vector<uint32_t> tokenLengths, compactLengths;
+    tokens.docLengths(tokenIds, tokenLengths);
+    compact.docLengths(compactIds, compactLengths);
+    CHECK(tokenIds == compactIds);
+    CHECK(tokenLengths == compactLengths);
+    const NindIndex::Identification identification(1, 2);
+    for (const size_t budget : {(size_t)0, (size_t)1, (size_t)5 * 37, (size_t)1 << 30}) {
+        CAPTURE(budget);
+        vector<vector<unsigned char> > files;
+        for (NindIndexBuilder *builder : {&tokens, &compact}) {
+            builder->setPostingsBudget(budget);
+            const string base = tmp.file("compact" + to_string(files.size()) + "-" + to_string(budget));
+            {
+                NindTermIndex terms(base, true, identification, 0, 64);
+                terms.beginBulk();
+                builder->writeTermIndex(terms, identification);
+                terms.endBulk();
+            }
+            files.push_back(readFileBytes(base + ".nindtermindex"));
+        }
+        CHECK(files[0] == files[1]);
+    }
+    NindLocalIndex local(tmp.file("local"), true, identification, 64);
+    CHECK_THROWS_AS(compact.writeLocalIndex(local, identification), std::invalid_argument);
+    CHECK_THROWS_AS(compact.setKeepTokens(true), std::invalid_argument);
+}
+////////////////////////////////////////////////////////////
