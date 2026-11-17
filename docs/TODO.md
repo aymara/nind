@@ -340,13 +340,34 @@ of 3.0.0 (format v2).
       then the probes on them; the test's outcome was unpredictable): 4.45 -> 4.18 ms, kept.
     Left: what remains is spread over each window (its blocks' bounds, the essential terms'
     postings one at a time, their lengths read).
-  - **Build memory**: 77.5 GB for one index (6 bytes a token, Lucene 20.9 GB); 8 segments 69 GB
-    (8 builds at once, nothing bounds them without `memory_gb`). Check the `memory_gb` model on
-    this corpus (its tokens per document and vocabulary differ from the passages').
-  - **Index size**: 11.2 GB against Lucene's 8.45.
-  - **The 32-segment index's first update** merged a tier of 9.76M documents: 1,689 s for +1%
+  - [x] **Build memory**: 77.5 GB for one index (6 bytes a token, Lucene 20.9 GB); 8 segments 69
+    GB (8 builds at once, nothing bounds them without `memory_gb`). Done: without a local index the
+    builder keeps documents compact (`IndexBuilder.keep_tokens`, `NindIndexBuilder::setKeepTokens`:
+    their distinct terms, 4 bytes each, and frequencies above 1 apart, 4 more, in chunks of 2^20,
+    nothing copied as they grow; the same term index, tested), and `index_jsonl` adds each
+    tokenizer batch as it comes (direct) or each piece once tokenized (shards) instead of holding
+    them all. Here 2.7 tokens a posting: MS MARCO v2.1's first 4M documents, direct, 31.05 ->
+    23.14 GiB (586 -> 473 s), with a 2 GiB postings budget 16.85; v2 passages (1.2 tokens a
+    posting): the same. The `memory_gb` model of a compact build counts postings
+    (`BUILD_BYTES_PER_KEPT_POSTING` 5, `BUILD_BYTES_PER_REPEATED` 4: the samples count the postings
+    of a frequency above 1), refit on shards built by a pool worker: long documents 0.98 to 1.08
+    of the model, passages 1.04 to 1.21.
+  - **Index size**: 11.2 GB against Lucene's 8.45 (`nind-bench/scripts/term_index_parts.py`,
+    `postings_bytes.py`). The term index, 10,235 MB: blocks 7,655 MB for 4.69G postings (1.63 bytes
+    each; Lucene's `.doc` 7,668 MB for all of them: the same), their directories 1,044 MB (28 bytes a
+    block: first, last, count, largest frequency, shortest length, offset, length, impacts), 38.9M
+    terms of 128 postings or fewer inline, 129M postings, ~1,143 MB (29 bytes a term: its header,
+    a gap and a frequency byte a posting, where Lucene folds a frequency of 1 into the gap) and
+    their indirections, 393 MB (10 bytes a term). Packing the widest 10% of a block's values apart
+    (Lucene's PFor) would save ~6% of the blocks. What's left is in the format (a v3): smaller
+    directories (offsets from the lengths, impacts on fewer bytes), short lists with frequencies of
+    1 folded, rare terms' postings in the lexicon.
+  - [x] **The 32-segment index's first update** merged a tier of 9.76M documents: 1,689 s for +1%
     (11.9 s for 8 segments). `MAX_MERGED_DOCS` counts documents, not their tokens: a tier of long
-    documents is many times the work.
+    documents is many times the work. Done: a second limit, the merged segments' term index bytes
+    (`NindSegmentedUpdate::Options::maxMergedBytes`, `IndexUpdate.MAX_MERGED_BYTES`: 512 MiB, ~5M
+    passages; a segment at half of it full). The 32 segments here (~350 MB each) are full: the
+    update writes its segment.
 - **Latency varies over time, not between pinnings.** The same search, one
   process per run: 2.12 or 2.67 ms (8.8M, one thread), seen again while
   measuring (runs of a setting 10-20% apart, the code path unchanged); THP

@@ -12,6 +12,7 @@
 #include "doctest.h"
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <list>
 #include <map>
 #include <stdexcept>
@@ -378,5 +379,45 @@ TEST_CASE("NindSegmentedUpdate.BatchesWriteWhatOneByOneWrites") {
         CHECK(one.search(query, 1.2, 0.75, 20, false) == batch.search(query, 1.2, 0.75, 20, false));
     }
     CHECK(NindIndexVerify::verify(batches, true).ok());
+}
+////////////////////////////////////////////////////////////
+TEST_CASE("NindSegmentedUpdate.SegmentsLargeInBytesAreNotMerged") {
+    // 6 segments of 30 documents, factor 5, no limit of documents: each of them full by its term
+    // index's bytes (half the limit), then merged when the limit is large enough
+    TestTempDir tmp;
+    const string base = tmp.file("index");
+    uint64_t state = 9;
+    NindSegmentedUpdate::Options options;
+    options.mergeFactor = 0;
+    for (unsigned int s = 0; s < 6; s++) {
+        NindSegmentedUpdate update(base, options);
+        for (unsigned int d = 0; d < 30; d++) update.addDocument(100 * s + d, randomDocument(state));
+        update.commit();
+    }
+    uint64_t smallest = UINT64_MAX;
+    for (const NindSegmentedIndex::SegmentInfo &segment : NindSegmentedIndex(base).segments()) {
+        ifstream file((segment.base + ".nindtermindex").c_str(), ios::binary | ios::ate);
+        smallest = min(smallest, (uint64_t)file.tellg());
+    }
+    REQUIRE(smallest > 100);
+    options.mergeFactor = 5;
+    options.maxMergedDocs = 0;
+    options.maxMergedBytes = 2 * smallest;
+    {
+        NindSegmentedUpdate update(base, options);
+        update.addDocument(1000, randomDocument(state));
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_EQ(0u, stats.mergesNb);
+        CHECK_EQ(7u, stats.segmentsNb);
+    }
+    options.maxMergedBytes = 1000 * smallest;
+    {
+        NindSegmentedUpdate update(base, options);
+        update.addDocument(1001, randomDocument(state));
+        const NindSegmentedUpdate::Stats stats = update.commit();
+        CHECK_GE(stats.mergesNb, 1u);
+        CHECK_LT(stats.segmentsNb, 8u);
+    }
+    CHECK_EQ(6u * 30 + 2, NindSegmentedIndex(base).docsNb());
 }
 ////////////////////////////////////////////////////////////

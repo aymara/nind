@@ -25,6 +25,7 @@
 #include "NindTermIndex.h"
 #include "NindBasics/NindReadBuffer.h"
 #include <algorithm>
+#include <fstream>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -332,18 +333,35 @@ vector<NindSegmentedIndex::SegmentInfo> segmentCounts(const string &base, const 
     }
     return infos;
 }
+// each segment's term index bytes (its file's size): what merging it costs
+vector<uint64_t> segmentTermBytes(const vector<NindSegmentedIndex::SegmentInfo> &infos)
+{
+    vector<uint64_t> bytes(infos.size(), 0);
+    for (size_t s = 0; s < infos.size(); s++) {
+        ifstream file((infos[s].base + ".nindtermindex").c_str(), ios::binary | ios::ate);
+        if (file) bytes[s] = (uint64_t)file.tellg();
+    }
+    return bytes;
+}
 // what the tiered policy merges now (empty: nothing)
 vector<size_t> segmentsToMerge(const vector<NindSegmentedIndex::SegmentInfo> &infos, const unsigned int mergeFactor,
-                               const uint64_t maxMergedDocs)
+                               const uint64_t maxMergedDocs, const uint64_t maxMergedBytes)
 {
+    const vector<uint64_t> termBytes = maxMergedBytes != 0 ? segmentTermBytes(infos) : vector<uint64_t>(infos.size(), 0);
+    //a segment's live share of its term index
+    auto liveBytes = [&infos, &termBytes](const size_t s) {
+        const uint64_t docs = infos[s].docsNb;
+        return docs == 0 ? 0 : (uint64_t)((double)termBytes[s] * (double)(docs - infos[s].deletedNb) / (double)docs);
+    };
     map<unsigned int, vector<size_t> > tiers;
     for (size_t s = 0; s < infos.size(); s++) {
         const uint64_t live = infos[s].docsNb - infos[s].deletedNb;
         //over half deleted: rewritten alone
         if (infos[s].deletedNb * 2 > infos[s].docsNb) return vector<size_t>(1, s);
-        //at half the limit, a segment is full: without this, such segments would pile up in a tier
+        //at half a limit, a segment is full: without this, such segments would pile up in a tier
         //that can't be merged, and two others always fit under the limit
         if (maxMergedDocs != 0 && live * 2 >= maxMergedDocs) continue;
+        if (maxMergedBytes != 0 && liveBytes(s) * 2 >= maxMergedBytes) continue;
         unsigned int tier = 0;
         for (uint64_t limit = mergeFactor; live >= limit; limit *= mergeFactor) tier++;
         tiers[tier].push_back(s);
@@ -354,11 +372,13 @@ vector<size_t> segmentsToMerge(const vector<NindSegmentedIndex::SegmentInfo> &in
         vector<size_t> chosen = t->second;
         stable_sort(chosen.begin(), chosen.end(), [&infos](const size_t a, const size_t b) {
             return infos[a].docsNb - infos[a].deletedNb < infos[b].docsNb - infos[b].deletedNb; });
-        uint64_t live = 0;
+        uint64_t live = 0, bytes = 0;
         size_t kept = 0;
         for (; kept < chosen.size(); kept++) {
             live += infos[chosen[kept]].docsNb - infos[chosen[kept]].deletedNb;
+            bytes += liveBytes(chosen[kept]);
             if (maxMergedDocs != 0 && live > maxMergedDocs) break;
+            if (maxMergedBytes != 0 && bytes > maxMergedBytes) break;
         }
         chosen.resize(kept);
         //(mergeSegments puts the new segment at the first one's place, in manifest order)
@@ -514,7 +534,7 @@ NindSegmentedUpdate::Stats NindSegmentedUpdate::commit()
     //3) the merges
     while (m_options.mergeFactor >= 2) {
         const vector<size_t> chosen = segmentsToMerge(segmentCounts(m_base, segments), m_options.mergeFactor,
-                                                      m_options.maxMergedDocs);
+                                                      m_options.maxMergedDocs, m_options.maxMergedBytes);
         if (chosen.empty()) break;
         mergeSegments(m_base, segments, chosen, stats);
         NindSegmentedIndex::writeManifest(m_base, segments);

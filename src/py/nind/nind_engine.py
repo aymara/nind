@@ -768,6 +768,11 @@ class IndexUpdate:
     #: stays as it is (rewriting it costs more than it gains: a large build's segments are left
     #: alone). ``0``: no limit.
     MAX_MERGED_DOCS = 5000000
+    #: Nor into a segment of more term index bytes than this (its live share): a merge's cost is its
+    #: postings, and long documents make large segments of few documents (MS MARCO v2.1, 32 segments
+    #: of 342k web pages: the first update of 1% merged 9.8M of them, in 1,689 s). 512 MiB: ~5M MS
+    #: MARCO passages. ``0``: no limit.
+    MAX_MERGED_BYTES = 512 << 20
 
     def __init__(self, indexer):
         self._indexer = indexer
@@ -1040,7 +1045,7 @@ class IndexUpdate:
         # the changes, written by the C++ API (nind._native.SegmentedUpdate): a new segment, the
         # replaced and removed documents masked in theirs, the merges the policy asks for
         update = native.SegmentedUpdate(self._base, with_local_index=self._local, merge_factor=self.MERGE_FACTOR,
-                                        max_merged_docs=self.MAX_MERGED_DOCS)
+                                        max_merged_docs=self.MAX_MERGED_DOCS, max_merged_bytes=self.MAX_MERGED_BYTES)
         # the batches first: a later change of one of their documents is in _pending
         for doc_ids, (words, word_ends, term_ids, ends), names in self._batches:
             update.add_batch(doc_ids, _uint_array(ends), _uint_array(term_ids), words, _uint_array(word_ends), names)
@@ -1329,6 +1334,13 @@ class NindIndexer:
     #: power, from the samples' vocabulary) and per process. MS MARCO v2, shards of 1M to 9.5M
     #: passages built by a pool worker, 1 to 5 passes: 0 to 6% over (1M: 14%).
     BUILD_BYTES_PER_TOKEN = 4.0
+    #: Without a local index, a build keeps its documents compact (``IndexBuilder.keep_tokens``):
+    #: per posting (each document's distinct terms) and per posting of a frequency above 1, in
+    #: place of ``BUILD_BYTES_PER_TOKEN``. Shards built by a pool worker, 1 and 4 passes: MS MARCO
+    #: v2.1 documents (0.2M to 1.2M) 0.98 to 1.08 of the model, v2 passages (1M to 9.5M) 1.04 to
+    #: 1.21 (1M passages, one pass: 1.43)
+    BUILD_BYTES_PER_KEPT_POSTING = 5.0
+    BUILD_BYTES_PER_REPEATED = 4.0
     BUILD_BYTES_PER_POSTING = 5
     BUILD_BYTES_PER_DOCUMENT = 35
     BUILD_BYTES_PER_TERM = 100
@@ -1382,7 +1394,12 @@ class NindIndexer:
             tokens = sample.tokens / parts
             terms = sample.sampled_terms * (tokens / sample.sampled_tokens) ** self.HEAPS_EXPONENT \
                 if sample.sampled_tokens else 0
-            return (self.BUILD_BYTES_PER_TOKEN * tokens + postings_bytes(parts) / passes
+            if self._with_local_index:
+                kept = self.BUILD_BYTES_PER_TOKEN * tokens          # the documents' tokens
+            else:                                                   # their distinct terms (compact)
+                kept = (self.BUILD_BYTES_PER_KEPT_POSTING * sample.postings
+                        + self.BUILD_BYTES_PER_REPEATED * sample.repeated) / parts
+            return (kept + postings_bytes(parts) / passes
                     + self.BUILD_BYTES_PER_DOCUMENT * sample.documents / parts
                     + self.BUILD_BYTES_PER_TERM * terms + process)
 
@@ -1408,7 +1425,8 @@ class NindIndexer:
             low, high = (low, middle) if fits(middle) else (middle, high)
         return plan(high, workers, process)
 
-    _Sample = collections.namedtuple("_Sample", "tokens documents sampled_tokens sampled_terms postings")
+    #: repeated: the postings of a frequency above 1 (a compact build keeps their frequency apart)
+    _Sample = collections.namedtuple("_Sample", "tokens documents sampled_tokens sampled_terms postings repeated")
 
     def _jsonl_sample(self, path, end, id_field, text_field):
         # the tokens, documents and postings (distinct terms of each document) of [0, end),
@@ -1423,19 +1441,20 @@ class NindIndexer:
                     f.seek(start + self.JSONL_SAMPLE_BYTES - 1)
                     f.readline()        # finish the line: the piece ends with it
                     pieces.append((start, min(f.tell(), end)))
-        tokens = documents = postings = sampled = 0
+        tokens = documents = postings = repeated = sampled = 0
         terms = set()
         for start, stop in pieces:
             record_ids, chunk = self._tokenize_jsonl_range(path, start, stop, id_field, text_field)
             documents += len(record_ids)
-            chunk_tokens, chunk_postings = self._count_chunk(chunk, terms)
+            chunk_tokens, chunk_postings, chunk_repeated = self._count_chunk(chunk, terms)
             tokens += chunk_tokens
             postings += chunk_postings
+            repeated += chunk_repeated
             sampled += stop - start
         if sampled == 0:
-            return self._Sample(0, 0, 0, 0, 0)
+            return self._Sample(0, 0, 0, 0, 0, 0)
         scale = end / sampled
-        return self._Sample(tokens * scale, documents * scale, tokens, len(terms), postings * scale)
+        return self._Sample(tokens * scale, documents * scale, tokens, len(terms), postings * scale, repeated * scale)
 
     def _files_sample(self, file_paths):
         # as _jsonl_sample, for index_files: the documents counted, the tokens and postings
@@ -1456,21 +1475,24 @@ class NindIndexer:
             picked = sorted(picked)
         sampled = sum(sizes[i] for i in picked)
         if sampled == 0:
-            return self._Sample(0, len(file_paths), 0, 0, 0)
+            return self._Sample(0, len(file_paths), 0, 0, 0, 0)
         terms = set()
-        tokens, postings = self._count_chunk(self._tokenize_paths([file_paths[i] for i in picked]), terms)
+        tokens, postings, repeated = self._count_chunk(self._tokenize_paths([file_paths[i] for i in picked]), terms)
         scale = total / sampled
-        return self._Sample(tokens * scale, len(file_paths), tokens, len(terms), postings * scale)
+        return self._Sample(tokens * scale, len(file_paths), tokens, len(terms), postings * scale, repeated * scale)
 
     @staticmethod
     def _count_chunk(chunk, terms):
-        # (tokens, postings: each document's distinct terms) of a chunk; its words added to terms
+        # (tokens, postings: each document's distinct terms, those of a frequency above 1) of a
+        # chunk; its words added to terms
         terms.update(_chunk_words(chunk))
-        term_ids, begin, postings = _uint_array(chunk[2]), 0, 0
+        term_ids, begin, postings, repeated = _uint_array(chunk[2]), 0, 0, 0
         for document_end in _uint_array(chunk[3]):
-            postings += len(set(term_ids[begin:document_end]))
+            counts = collections.Counter(term_ids[begin:document_end])
+            postings += len(counts)
+            repeated += sum(1 for count in counts.values() if count > 1)
             begin = document_end
-        return len(term_ids), postings
+        return len(term_ids), postings, repeated
 
     def _index_jsonl_sharded(self, path, end, id_field, text_field, workers, shards, merge, postings_budget=0):
         ranges = self._jsonl_ranges(path, end, shards)
@@ -1529,15 +1551,25 @@ class NindIndexer:
     def _write_jsonl_shard(self, shard_base, path, start, stop, id_field, text_field, first_doc_id, postings_budget=0):
         pieces = max(1, -(-(stop - start) // self.JSONL_SHARD_PIECE_BYTES))
         names, lengths, chunks = [], array('I'), []
+        # compact documents: each piece added once tokenized, not all of them held first
+        builder = None if self._with_local_index else self._new_builder(postings_budget)
+        doc_id = first_doc_id
         for piece_start, piece_stop in self._jsonl_ranges(path, stop, pieces, start):
             piece_ids, chunk = self._tokenize_jsonl_range(path, piece_start, piece_stop, id_field, text_field)
             packed = _pack_names(map(str, piece_ids))
             names.append(packed.names)
             lengths.extend(packed.lengths)
-            chunks.append(chunk)
+            if builder is None:
+                chunks.append(chunk)
+            else:
+                doc_id = self._add_chunk(builder, doc_id, chunk)
+            del piece_ids, chunk, packed
         native.NindDocNames.write_packed(shard_base + DOC_NAMES_EXTENSION, first_doc_id, b''.join(names), lengths)
         del names, lengths
-        self._write_chunks(chunks, first_doc_id, shard_base, postings_budget)
+        if builder is None:
+            self._write_chunks(chunks, first_doc_id, shard_base, postings_budget)
+        else:
+            self._write_built(builder, shard_base)
 
     @staticmethod
     def _jsonl_end(path, limit):

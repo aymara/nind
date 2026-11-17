@@ -918,14 +918,16 @@ PYBIND11_MODULE(_native, m) {
         .def_readonly("merges_nb", &NindSegmentedUpdate::Stats::mergesNb)
         .def_readonly("merged_docs_nb", &NindSegmentedUpdate::Stats::mergedDocsNb);
     py::class_<NindSegmentedUpdate>(m, "SegmentedUpdate")
-        .def(py::init([](const std::string &base, bool withLocalIndex, unsigned int mergeFactor, uint64_t maxMergedDocs) {
+        .def(py::init([](const std::string &base, bool withLocalIndex, unsigned int mergeFactor, uint64_t maxMergedDocs,
+                         uint64_t maxMergedBytes) {
             NindSegmentedUpdate::Options options;
             options.withLocalIndex = withLocalIndex;
             options.mergeFactor = mergeFactor;
             options.maxMergedDocs = maxMergedDocs;
+            options.maxMergedBytes = maxMergedBytes;
             return new NindSegmentedUpdate(base, options);
         }), py::arg("base"), py::arg("with_local_index") = true, py::arg("merge_factor") = 10,
-           py::arg("max_merged_docs") = 5000000)
+           py::arg("max_merged_docs") = 5000000, py::arg("max_merged_bytes") = (uint64_t)512 << 20)
         .def("add_document", &NindSegmentedUpdate::addDocument, py::arg("doc_id"), py::arg("words"), py::arg("name") = std::string())
         // a tokenizer's batch (Tokenizer.tokenize_batch's vocabulary, term ids and ends) at once
         .def("add_documents", [](NindSegmentedUpdate &self, const py::buffer &docIds, const py::buffer &ends,

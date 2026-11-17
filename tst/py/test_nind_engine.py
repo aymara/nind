@@ -716,8 +716,8 @@ def test_jsonl_sample_counts_or_estimates(tmp_path, monkeypatch):
     path = write_jsonl(tmp_path / "corpus.jsonl", records)
     indexer = NindIndexer(str(tmp_path))
     end = os.path.getsize(path)
-    assert indexer._jsonl_sample(path, end, "id", "contents") == (4004, 401, 4004, 4, 403)   # small: counted
-    assert indexer._jsonl_sample(path, 0, "id", "contents") == (0, 0, 0, 0, 0)
+    assert indexer._jsonl_sample(path, end, "id", "contents") == (4004, 401, 4004, 4, 403, 401)   # small: counted
+    assert indexer._jsonl_sample(path, 0, "id", "contents") == (0, 0, 0, 0, 0, 0)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_PIECES", 4)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_BYTES", 300)
     sample = indexer._jsonl_sample(path, end, "id", "contents")
@@ -849,8 +849,8 @@ def test_files_sample_counts_or_estimates(tmp_path, monkeypatch):
     # 40 files of 10 tokens of 1 term (50 bytes each); 1 file of 4 tokens, 3 postings
     paths = write_texts(tmp_path / "files", ["word " * 10] * 40 + ["a b a c"])
     indexer = NindIndexer(str(tmp_path))
-    assert indexer._files_sample(paths) == (404, 41, 404, 4, 43)                    # small: counted
-    assert indexer._files_sample(write_texts(tmp_path / "empty", [""] * 3)) == (0, 3, 0, 0, 0)
+    assert indexer._files_sample(paths) == (404, 41, 404, 4, 43, 41)                # small: counted
+    assert indexer._files_sample(write_texts(tmp_path / "empty", [""] * 3)) == (0, 3, 0, 0, 0, 0)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_PIECES", 4)
     monkeypatch.setattr(NindIndexer, "JSONL_SAMPLE_BYTES", 120)
     sample = indexer._files_sample(paths)                       # 4 runs of 3 files
@@ -1707,3 +1707,49 @@ def test_builds_without_local_index_write_the_same_term_index(tmp_path):
                 return g.read()
     with_local, without = term_index("local"), term_index("compact", local_index=False)
     assert len(with_local) == len(without) and with_local[:-8] == without[:-8]
+
+
+def test_compact_builds_stream_their_batches(tmp_path, monkeypatch):
+    # workers' batches added as they come (direct) and pieces as tokenized (shards) when documents
+    # are compact: the same indexes and record ids as builds holding them first (local index)
+    records = [{"id": "d%d" % i, "contents": " ".join("w%d" % ((i * j) % 97) for j in range(1, 25 + i % 7))}
+               for i in range(2000)]
+    path = write_jsonl(tmp_path / "corpus.jsonl", records)
+    monkeypatch.setattr(NindIndexer, "JSONL_PARALLEL_MIN_BYTES", 0)
+    monkeypatch.setattr(NindIndexer, "JSONL_SHARD_PIECE_BYTES", 20000)
+
+    def build(name, **kwargs):
+        index_dir = tmp_path / name
+        index_dir.mkdir()
+        local_index = kwargs.pop("local_index", None)
+        ids = list(NindIndexer(str(index_dir), local_index=local_index).index_jsonl(path, workers=3, **kwargs))
+        with open(index_dir / "corpus.CURRENT") as f:
+            generation = index_dir / f.read().strip()
+        files = sorted(generation.rglob("*.nindtermindex"))
+        return ids, [g.read_bytes()[:-8] for g in files], NindEngine(str(index_dir))
+    for kwargs in ({}, {"shards": 3}):
+        local_ids, local_files, local = build("local%d" % len(kwargs), **kwargs)
+        ids, files, compact = build("compact%d" % len(kwargs), local_index=False, **kwargs)
+        assert ids == local_ids == [record["id"] for record in records]
+        assert files == local_files and len(files) == (3 if kwargs else 1)
+        for query in ["w1 w2", "w3 w5 w7 w11 w13", "w96"]:
+            assert compact.search(query, top_k=10, doc_names=True) == local.search(query, top_k=10, doc_names=True)
+
+
+def test_plan_jsonl_memory_of_compact_builds_counts_postings(tmp_path, monkeypatch):
+    # without a local index, a build keeps its postings, not its tokens: 1 MiB a posting and 1 MiB a
+    # posting of a frequency above 1, nothing else but 1 MiB a process; 400 documents of 10 tokens of
+    # one term: 400 postings, all repeated, 800 MiB
+    path = write_jsonl(tmp_path / "corpus.jsonl", [{"id": "d%d" % i, "contents": "word " * 10} for i in range(400)])
+    for name, value in (("BUILD_BYTES_PER_TOKEN", 1 << 30), ("BUILD_BYTES_PER_KEPT_POSTING", 1 << 20),
+                        ("BUILD_BYTES_PER_REPEATED", 1 << 20), ("BUILD_BYTES_PER_POSTING", 0),
+                        ("BUILD_BYTES_PER_DOCUMENT", 0), ("BUILD_BYTES_PER_TERM", 0),
+                        ("BUILD_BYTES_PER_PROCESS", 1 << 20), ("MEMORY_GB_MARGIN", 1)):
+        monkeypatch.setattr(NindIndexer, name, value)
+    indexer = NindIndexer(str(tmp_path), local_index=False)
+
+    def plan(mib):
+        return indexer._plan_jsonl_memory(path, os.path.getsize(path), "id", "contents", 4, 1, mib / 1024)[:2]
+    assert plan(802) == (1, 4)                                  # 800 + 1: direct (tokens not counted)
+    shards, workers = plan(300)
+    assert workers == 4 and 1 + 4 * (1 + 800 / shards) <= 300 < 1 + 4 * (1 + 800 / (shards - 1))

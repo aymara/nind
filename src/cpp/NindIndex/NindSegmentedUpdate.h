@@ -38,7 +38,9 @@ namespace latecon {
 * - Merges, at the end of commit(): log-structured, as with Lucene's tiers. Segments are in the
 *   tier of their number of live documents, tiers growing by mergeFactor; mergeFactor segments in
 *   a tier are merged into one, or those of them that fit if that would make a segment of more than
-*   maxMergedDocs. A segment of at least half of it is full: it stays as it is (rewriting it costs
+*   maxMergedDocs live documents or maxMergedBytes of term index (a merge's cost: its postings; long
+*   documents make large segments of few documents). A segment of at least half of either is full:
+*   it stays as it is (rewriting it costs
 *   more than it gains; a large build's segments are searched in parallel). So, however many
 *   updates, at most about 2 N / maxMergedDocs full segments and mergeFactor per tier below them. A
 *   segment over half deleted is rewritten alone. A document is rewritten about log(N) times over
@@ -49,7 +51,8 @@ public:
         bool withLocalIndex;            //new segments with a local index (the index's segments: all or none)
         unsigned int mergeFactor;       //segments of a tier merged at once; 0: no merge
         uint64_t maxMergedDocs;         //no merge into a segment of more live documents; 0: no limit
-        Options(): withLocalIndex(true), mergeFactor(10), maxMergedDocs(5000000) {}
+        uint64_t maxMergedBytes;        //nor of more term index bytes (a segment's live share); 0: no limit
+        Options(): withLocalIndex(true), mergeFactor(10), maxMergedDocs(5000000), maxMergedBytes((uint64_t)512 << 20) {}
     };
     /**\brief What commit() did */
     struct Stats {
