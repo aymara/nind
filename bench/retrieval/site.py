@@ -432,7 +432,8 @@ Top 1000, median ms:
   {lucene_ratio}× slower and its top 1000 (which loads each hit's stored id) much more; tantivy's top
   1000 too. Readahead on mapped files is a likely cause, not investigated.
 - **nind's own memory**: {nind_own} GB, the documents' lengths ({lengths_gb} GB on disk, read
-  compactly); Lucene needs {lucene_own} GB and tantivy {tantivy_own} GB. Up to 4.0.1, nind read the
+  compactly) and the query terms' directories, cached (up to 1 GB, `directory_cache_mb`); Lucene
+  needs {lucene_own} GB and tantivy {tantivy_own} GB. Up to 4.0.1, nind read the
   names and lengths whole at open: 6.98 GB of its own, outside the budget, so its runs then had the
   page cache to the index alone (its top 10 at 1 GB: 19.8 ms, top 1000: 48.2 ms)."""
 
@@ -501,15 +502,15 @@ showed before are kept at the end.
   one thread (Lucene {v2_lucene_p99} ms), {v2_8s8t_p99} ms with 8 segments and 8 threads.
 - **Search, 8.8 million passages** (MS MARCO). **{v1_nind} ms** on one thread (Lucene {v1_lucene} ms,
   tantivy {v1_tantivy} ms), **{v1_8s8t} ms** with 8 segments and 8 threads.
-- **Stopwords kept** is nind's weak case: very long postings lists. At 138M, {v2f_nind} ms on one thread
-  against {v2f_lucene} ms for Lucene; {v2f_8s8t} ms with 8 segments and 8 threads.
+- **Stopwords kept**: very long postings lists (a term in most of the passages). At 138M, {v2f_nind} ms on
+  one thread against {v2f_lucene} ms for Lucene; {v2f_8s8t} ms with 8 segments and 8 threads.
 - **Many callers at once**, every system: at 8.8M nind serves the most at every load ({c_v1_nind_12}
   queries/s with 12 callers, Lucene {c_v1_lucene_12}; {c_v1_nind_48} with 48, Lucene's threads
   {c_v1_lucene_48}). At 138M nind leads with few callers and Lucene with many ({c_v2_lucene_48} queries/s
   with 48 callers, nind {c_v2_nind_48}).
 - **Index larger than memory.** With 1 GB of page cache for a 14 GB index, nind's top 10 goes from
-  {mem_nind_all} to {mem_nind_1} ms, Lucene's from {mem_lucene_all} to {mem_lucene_1} ms; each holds about 1.2 GB of its
-  own (nind {mem_nind_own} GB, Lucene {mem_lucene_own} GB).
+  {mem_nind_all} to {mem_nind_1} ms, Lucene's from {mem_lucene_all} to {mem_lucene_1} ms; nind holds {mem_nind_own} GB of
+  its own (lengths, cached term directories), Lucene {mem_lucene_own} GB.
 - **Indexing.** 138M passages in **{v2_32s_build} s** in 32 segments (Lucene {v2_lucene_build} s,
   tantivy {v2_tantivy_build} s, 8 threads each), **{v2_32s_build48} s** with 48 threads; one index:
   {v2_nind_build} s and {v2_nind_mem} GB of memory. 8.8M passages: {v1_32s_build} s in 32 segments,
@@ -517,9 +518,9 @@ showed before are kept at the end.
 - **Updates.** Adding 1% more documents writes a new segment: {v1_nind_update} s at 8.8M (Lucene
   {v1_lucene_update} s, tantivy {v1_tantivy_update} s), {v2_nind_update} s at 138M (Lucene
   {v2_lucene_update} s, tantivy {v2_tantivy_update} s).
-- **Long documents** (MS MARCO v2.1, 10.96M web pages of 1,191 tokens on average): Lucene's top 10
-  is faster on one thread ({docs_nind} ms for nind, {docs_lucene} ms for Lucene, tantivy {docs_tantivy} ms); nind's
-  top 1000 is faster ({docs_nind_1000} ms against {docs_lucene_1000}), and 8 segments with 8 threads take {docs_8s8t} ms.
+- **Long documents** (MS MARCO v2.1, 10.96M web pages of 1,191 tokens on average): top 10 on one
+  thread {docs_nind} ms for nind, {docs_lucene} ms for Lucene, {docs_tantivy} ms for tantivy; top 1000
+  {docs_nind_1000} ms against {docs_lucene_1000}; 8 segments with 8 threads {docs_8s8t} ms.
 - **Quality.** The same BM25: nDCG@10 {v1_nind_ndcg} for nind and {v1_lucene_ndcg} for Lucene at 8.8M,
   {v2_nind_ndcg} and {v2_lucene_ndcg} at 138M; every nind layout returns the same top 10.
 ```
@@ -570,12 +571,13 @@ Stopwords kept (17.2G tokens). Not updated.
 
 {docs_full_table}
 
-**On long documents, Lucene's top 10 is faster than nind's on one thread** from 4M documents on
-({docs_nind} ms against {docs_lucene} ms at 10.96M; nind leads at 1M), where it isn't on passages; nind's top 1000
-stays faster ({docs_nind_1000} ms against {docs_lucene_1000} ms), and so is an index of 8 segments searched with 8
-threads ({docs_8s8t} ms). nind's builds are faster and take three to four times Lucene's memory, its index a third more
-space. Its 32-segment index's first update merged 9.8M documents ({docs_32s_update} s). See `docs/TODO.md`, "Long
-documents". `verify_index` read back every definition of the one-index and 8-segment builds (39.3M terms,
+On one thread, nind's top 10 takes {docs_nind} ms at 10.96M documents, Lucene's {docs_lucene} ms; its top 1000
+{docs_nind_1000} ms against {docs_lucene_1000} ms; an index of 8 segments searched with 8 threads, {docs_8s8t} ms. On the
+judged TREC topics below, Lucene's top 10 is the faster one ({docs_trec_lucene} ms against {docs_trec_nind}). nind's
+builds are faster and take more memory than Lucene's ({docs_nind_mem} GB for one index without local index, Lucene
+{docs_lucene_mem} GB), its index a third more space (its block directories and its rare terms' definitions: see
+`docs/TODO.md`, "Long documents"). The first update of its 32-segment index writes one segment ({docs_32s_update} s;
+it merged 9.8M documents, in 1,689 s, before merges were limited by their term index's bytes). `verify_index` read back every definition of the one-index and 8-segment builds (39.3M terms,
 4.8G postings; 5.1G with stopwords).
 
 The judged TREC Deep Learning 2021-2023 topics (215), nDCG@10, with our BM25 parameters and with
@@ -833,6 +835,9 @@ def main():
         docs_tantivy=get("v21doc-stop", "tantivy", "k10_p50"), docs_8s8t=get("v21doc-stop", "nind-8s-8t", "k10_p50"),
         docs_nind_1000=get("v21doc-stop", "nind", "k1000_p50"), docs_lucene_1000=get("v21doc-stop", "lucene", "k1000_p50"),
         docs_32s_update=get("v21doc-stop", "nind-32s", "update_s"),
+        docs_trec_nind=get("v21doc-stop-trec", "nind", "k10_p50"), docs_trec_lucene=get("v21doc-stop-trec", "lucene", "k10_p50"),
+        docs_nind_mem=get("v21doc-stop", "nind", "build_mem", 0, 1024),
+        docs_lucene_mem=get("v21doc-stop", "lucene", "build_mem", 0, 1024),
         docs_overlap_lucene=overlap("lucene", "v21doc-stop"),
         docs_image=image("msmarco-v21doc", "MS MARCO v2.1 documents, 10.96M web pages: search latency, build time, "
                                            "index size and update time per system; the same data is in the table below."),

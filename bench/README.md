@@ -733,6 +733,15 @@ Prefixes of 1M and 4M documents. nind 4.2.2 (4.2.0's code), the same Lucene and 
   agrees with it; unstemmed tokens do better at k1=1.2, b=0.75.
 - **The format holds**: `verify_index` clean on both one-index builds (39.3M terms, 4.82G and 5.09G
   postings, 924-930 s, 3.2 GB) and every 8-segment segment.
+- **nind again, with what long documents taught (stage 9, 2026-11-17 and 18).** nind at `3a37604`
+  (the directory cache, compact builds, merges limited by bytes, touched documents filtered), every
+  run of stages 7 and 8 for it (`scripts/stage9.sh`, 22.7 h), `verify_index` clean on every
+  segment. Long documents, one thread: 6.73 -> 3.21 ms (Lucene 3.86; 1M 0.90 vs 1.33, 4M 2.15 vs
+  2.19), top 1000 25.8 -> 16.9 ms (36.9), 8 segments with 8 threads 1.48 -> 1.20 ms; stopwords
+  kept 7.61 -> 4.47 ms (4.83); the TREC topics 6.31 ms (Lucene 5.36). One index built in 1,241 s
+  and 55 GB (77.5), 32 segments 14.8 GB (20.5); their first update 1,689 -> 14.7 s. 138M passages:
+  15.0 ms (20.6), stopwords kept 80.4 -> 22.6 ms (36.1). Results:
+  `bench/retrieval/results/2026-11-18-server`.
 
 ## Notes
 

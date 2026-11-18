@@ -301,7 +301,8 @@ of 3.0.0 (format v2).
 - **Long documents** (MS MARCO v2.1, 10.96M web pages, 13.05G tokens; `bench/README.md`
   section 8). Done: lexicons of over 16.7M words (39.3M here) no longer break the writers
   (`NindPadFile::MAX_ENTRIES_BLOC_SIZE`). Left, all from stage 8:
-  - **Search on one thread**: 6.73 ms against Lucene's 3.86 (p99 62.6 vs 36.5) where nind led
+  - [x] **Search on one thread** (stage 9: 3.21 ms against Lucene's 3.86, nind ahead at every size;
+    the TREC topics alone: 6.31 against 5.36): 6.73 ms against Lucene's 3.86 (p99 62.6 vs 36.5) where nind led
     on passages; it leads at 1M documents, trails from 4M. Measured (`nind-bench/scripts`:
     `per_query.py`, `block_bounds.py`, `profile_queries.py`; socket 1, the other busy):
     - every query of 3 terms or more is slower, by 2.4 times at the median (1.6 to 3.6 for 80%
