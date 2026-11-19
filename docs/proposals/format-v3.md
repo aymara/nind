@@ -4,7 +4,12 @@ orphan: true
 
 # Proposal: nind format v3, a smaller term index
 
-Status: **accepted** (2026-11-19, the four decisions below), being implemented. Written after the long-document benchmark
+Status: **implemented** (2026-11-19, the four decisions below). Measured, built directly as the
+benchmarks build nind: MS MARCO v2.1 documents' term index 10,235 -> 8,855 MB (-13.5%, estimated
+-13.9%), the 138M MS MARCO v2 passages' 7,908 -> 7,237 MB (-8.5%, estimated -8.7%); every dev
+query's top 10 and top 100 identical (ids and scores); top 10 medians on one thread, the same
+binary on both indexes, alternated: long documents 4.35 -> 4.12 ms, passages 12.1 -> 11.95 ms (the
+impacts' rounded lengths, measured with the rest, cost nothing). Written after the long-document benchmark
 (MS MARCO v2.1, `bench/README.md` section 8), where nind's index takes a third more space than
 Lucene's: 11.2 GB against 8.45.
 

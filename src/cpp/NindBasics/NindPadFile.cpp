@@ -73,7 +73,8 @@ NindPadFile::NindPadFile(const string &fileName,
                          const unsigned int dataEntrySize,
                          const unsigned int dataEntriesBlocSize,
                          const unsigned int nextBlockAddrSize,
-                         const unsigned int legacyDataEntrySize):
+                         const unsigned int legacyDataEntrySize,
+                         const unsigned int otherDataEntrySize):
     m_file(fileName),
     m_fileName(fileName),
     m_isWriter(isWriter),
@@ -108,7 +109,7 @@ NindPadFile::NindPadFile(const string &fileName,
             m_dataEntrySize = m_file.getInt1();
             if (legacyDataEntrySize != 0 && m_dataEntrySize == legacyDataEntrySize)
                 throw NindPadFileException("NindPadFile::NindPadFile format v1 file, written by an older nind: rebuild it " + m_fileName);
-            if (m_dataEntrySize != dataEntrySize)
+            if (m_dataEntrySize != dataEntrySize && (otherDataEntrySize == 0 || m_dataEntrySize != otherDataEntrySize))
                 throw NindPadFileException("NindPadFile::NindPadFile bad index size " + m_fileName);
             m_specificsSize = m_file.getInt3();
             if (m_specificsSize != specificsSize)
@@ -158,7 +159,8 @@ NindPadFile::NindPadFile(const string &fileName,
         m_specificsSize = m_file.getInt3();
         //a reader reads both layouts
         if (legacyDataEntrySize != 0 && m_dataEntrySize == legacyDataEntrySize) m_nextBlockAddrSize = 5;
-        else if (m_dataEntrySize != dataEntrySize && legacyDataEntrySize != 0)
+        else if (m_dataEntrySize != dataEntrySize && legacyDataEntrySize != 0
+                 && (otherDataEntrySize == 0 || m_dataEntrySize != otherDataEntrySize))
             throw NindPadFileException("NindPadFile::NindPadFile bad index size " + m_fileName);
         checkHeader();
         //ejtablit la carte des blocs d'entrejes

@@ -1,8 +1,9 @@
 // Golden files: a small index (lexicon + retrolexicon, term index, local index), written once
-// per format version and checked into golden/v1/ and golden/v2/.
+// per format version and checked into golden/v1/, golden/v2/ and golden/v3/ (v3: the term index;
+// the other files are v2's).
 //
-// - NindGolden.WritersReproduceTheGoldenFiles: today's writers (format v2) must produce exactly
-//   golden/v2's bytes (except the identification's timestamp, the last 4 bytes of every file).
+// - NindGolden.WritersReproduceTheGoldenFiles: today's writers (format v3) must produce exactly
+//   golden/v3's bytes (except the identification's timestamp, the last 4 bytes of every file).
 //   An accidental format change, or a writer and a reader sharing the same bug, breaks it.
 // - NindGolden.ReadersDecodeTheGoldenFiles: today's readers must decode both versions to the
 //   values written (format v1 files, written by older nind, stay readable).
@@ -133,7 +134,7 @@ vector<unsigned char> maskedBytes(const string &path) {
     return bytes;
 }
 
-const string goldenBase(const char *version = "v2") { return string(NIND_GOLDEN_DIR) + "/" + version + "/golden"; }
+const string goldenBase(const char *version = "v3") { return string(NIND_GOLDEN_DIR) + "/" + version + "/golden"; }
 }
 ////////////////////////////////////////////////////////////
 TEST_CASE("NindGolden.WritersReproduceTheGoldenFiles") {
@@ -143,7 +144,7 @@ TEST_CASE("NindGolden.WritersReproduceTheGoldenFiles") {
     if (getenv("NIND_WRITE_GOLDEN") != 0) {
         for (size_t e = 0; e < 4; e++)
             writeFileBytes(goldenBase() + kExtensions[e], readFileBytes(base + kExtensions[e]));
-        MESSAGE("golden files written into " NIND_GOLDEN_DIR "/v2");
+        MESSAGE("golden files written into " NIND_GOLDEN_DIR "/v3");
     }
     for (size_t e = 0; e < 4; e++) {
         INFO("file " << kExtensions[e]);
@@ -155,7 +156,7 @@ TEST_CASE("NindGolden.WritersReproduceTheGoldenFiles") {
 ////////////////////////////////////////////////////////////
 void checkGoldenFiles(const char *version);
 TEST_CASE("NindGolden.ReadersDecodeTheGoldenFiles") {
-    for (const char *version : {"v1", "v2"}) {
+    for (const char *version : {"v1", "v2", "v3"}) {
         INFO("format " << version);
         checkGoldenFiles(version);
     }
@@ -234,3 +235,37 @@ void checkGoldenFiles(const char *version) {
         }
     }
 }
+////////////////////////////////////////////////////////////
+TEST_CASE("NindGolden.FormatV2TermIndexStaysV2WhenExtended") {
+    // a v2 term index reopened by a writer keeps its format (an update of a v2 index writes v2)
+    TestTempDir tmp;
+    const string base = tmp.file("golden");
+    for (size_t e = 0; e < 4; e++)
+        writeFileBytes(base + kExtensions[e], readFileBytes(goldenBase("v2") + kExtensions[e]));
+    NindLexiconIndex lexicon(base, false, true);
+    const NindIndex::Identification identification = lexicon.getIdentification();
+    list<TermCG> written;
+    written.push_back(TermCG(0, 5));
+    written.back().documents.push_back(Document(7, 2));
+    written.back().documents.push_back(Document(9, 3));
+    list<TermCG> single;
+    single.push_back(TermCG(0, 4));
+    single.back().documents.push_back(Document(11, 4));
+    {
+        NindTermIndex terms(base, true, identification, 2);
+        CHECK(terms.isFormatV2());
+        CHECK_FALSE(terms.isFormatV3());
+        terms.setTermDef(3, written, identification, goldenSpecifics());
+        terms.setTermDef(4, single, identification, goldenSpecifics());   //(no v2 singleton)
+    }
+    NindTermIndex terms(base, false, identification, 2);
+    CHECK_FALSE(terms.isFormatV3());
+    list<TermCG> read;
+    REQUIRE(terms.getTermDef(3, read));
+    REQUIRE_EQ(1u, read.size());
+    CHECK_EQ(2u, read.front().documents.size());
+    read.clear();
+    REQUIRE(terms.getTermDef(4, read));
+    CHECK_EQ(11u, read.front().documents.front().ident);
+}
+////////////////////////////////////////////////////////////

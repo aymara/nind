@@ -69,9 +69,17 @@ public:
     *\return true if in bulk mode */
     bool isBulk() const { return m_isBulk; }
 
-    /**\brief true for a file of format v2 (10-byte indirections), false for v1 (8): a v1 file is
-    * read, but a writer refuses to extend it (rebuild it, e.g. with NindIndexMerge) */
-    bool isFormatV2() const { return getDataEntrySize() == 10; }
+    /**\brief true for a file of wide fields: format v2 (10-byte indirections) or v3 (11, a term
+    * index), false for v1 (8): a v1 file is read, but a writer refuses to extend it (rebuild it,
+    * e.g. with NindIndexMerge) */
+    bool isFormatV2() const { return getDataEntrySize() >= 10; }
+
+    /**\brief true for a term index of format v3 (11-byte indirections: their kind, see ENTRY_*) */
+    bool isFormatV3() const { return getDataEntrySize() == 11; }
+
+    /**\brief A format v3 indirection's kind (<genreEntreje>): none, a definition, or a term of one
+    * posting without definition (its document and frequency in the indirection's fields) */
+    static const unsigned int ENTRY_NONE = 0, ENTRY_DEFINITION = 1, ENTRY_SINGLETON = 2;
 
 protected:
 
@@ -80,6 +88,27 @@ protected:
         return isFormatV2() ? in.getInt6() : in.getInt5(); }
     unsigned int getIndirectionLength(NindReadBuffer &in) const {
         return isFormatV2() ? in.getInt4() : in.getInt3(); }
+    //an indirection as a definition's area: a v3 term of one posting has none (offset and length 0)
+    void readIndirection(NindReadBuffer &in, uint64_t &offset, unsigned int &length) const {
+        unsigned int kind;
+        readEntry(in, offset, length, kind);
+        if (kind != ENTRY_DEFINITION) { offset = 0; length = 0; }
+    }
+    //an indirection's fields and kind (v1, v2: ENTRY_DEFINITION, or ENTRY_NONE at offset 0)
+    void readEntry(NindReadBuffer &in, uint64_t &offset, unsigned int &length, unsigned int &kind) const {
+        offset = getIndirectionOffset(in);
+        length = getIndirectionLength(in);
+        if (!isFormatV3()) { kind = offset != 0 ? ENTRY_DEFINITION : ENTRY_NONE; return; }
+        kind = in.getInt1();
+        if (kind > ENTRY_SINGLETON || (kind == ENTRY_DEFINITION && offset == 0))
+            throw NindIndexException("NindIndex bad indirection kind : " + m_fileName);
+    }
+    //an indirection's fields, then (v3) its kind
+    void putIndirection(const uint64_t offset, const uint64_t length, const unsigned int kind) {
+        putIndirectionOffset(offset);
+        putIndirectionLength(length);
+        if (isFormatV3()) m_file.putInt1(kind);
+    }
     void putIndirectionOffset(const uint64_t offset) {
         if (isFormatV2()) m_file.putInt6(offset); else m_file.putInt5(offset); }
     void putIndirectionLength(const uint64_t length) {
@@ -121,7 +150,9 @@ protected:
               const Identification &lexiconIdentification,
               const unsigned int specificsSize,
               const unsigned int definitionMinimumSize = 0,
-              const unsigned int indirectionBlocSize = 0);
+              const unsigned int indirectionBlocSize = 0,
+              const unsigned int newEntrySize = 10,
+              const unsigned int otherEntrySize = 0);
 
     virtual ~NindIndex();
     
@@ -170,6 +201,39 @@ protected:
     bool getDefinitionArea(const unsigned int ident,
                            uint64_t &offset,
                            unsigned int &length);
+
+    /**\brief (format v3) a term of one posting, in its indirection, without definition: the
+    * write buffer holds the specifics and identification (as an erasure's); a definition it had is
+    * freed. document below 2^48 */
+    void setSingleton(const unsigned int ident,
+                      const uint64_t document,
+                      const unsigned int frequency);
+
+    /**\brief (format v3) a term of one posting, sequential read (in bulk mode too)
+    *\return false if its indirection isn't one */
+    bool getSingleton(const unsigned int ident,
+                      uint64_t &document,
+                      unsigned int &frequency);
+
+    /**\brief Thread-safe (const) read of an indirection: its kind (ENTRY_*) and fields (a
+    * definition's offset and length, or a term of one posting's document and frequency)
+    *\return false if the identifier has no indirection */
+    bool getEntryAt(const unsigned int ident,
+                    NindReadBuffer &buffer,
+                    uint64_t &offset,
+                    unsigned int &length,
+                    unsigned int &kind) const;
+
+    /**\brief The smallest area a definition takes (see the constructor), for a file whose format
+    * allows smaller ones */
+    void setDefinitionMinimumSize(const unsigned int size) { m_definitionMinimumSize = size; }
+
+    /**\brief (format v3) a term of one posting, thread-safe (const) read
+    *\return false if its indirection isn't one */
+    bool getSingletonAt(const unsigned int ident,
+                        NindReadBuffer &buffer,
+                        uint64_t &document,
+                        unsigned int &frequency) const;
         
     /**\brief check if indirection exists and create indirection block if necessary
     *\param ident ident of definition
@@ -178,10 +242,11 @@ protected:
                                 const Identification &fileIdentification);
     
 private:
-    //ejcrit une nouvelle indirection dans l'index
+    //ejcrit une nouvelle indirection dans l'index (v3: of kind ENTRY_DEFINITION, ENTRY_NONE at 0)
     void setIndirection(const uint64_t indirection,
                         const uint64_t offsetDejfinition,
-                        const unsigned int longueurDejfinition);
+                        const unsigned int longueurDejfinition,
+                        const unsigned int kind = ENTRY_DEFINITION);
 
     //ejtablit la carte des vides
     void mapEmptySpaces();
@@ -193,8 +258,12 @@ private:
     void setDefinitionBulk(const unsigned int ident,
                            const unsigned int tailleQueue);
 
-    //indirections en mejmoire en mode massif
+    //indirections en mejmoire en mode massif ; format v3, their kinds (ENTRY_SINGLETON: the pair
+    //holds the document and frequency, not an area)
     std::vector<std::pair<uint64_t, unsigned int> > m_bulkIndirections;
+    std::vector<unsigned char> m_bulkKinds;
+    bool bulkSingleton(const unsigned int ident) const {
+        return ident < m_bulkKinds.size() && m_bulkKinds[ident] == ENTRY_SINGLETON; }
 
     //trouve une nouvelle zone pour les nouvelles donnejs
     //retourne true si l'identification est dejjah ejcrite

@@ -54,15 +54,18 @@ NindIndex::NindIndex(const std::string &fileName,
                              const Identification &lexiconIdentification,
                              const unsigned int specificsSize,
                              const unsigned int definitionMinimumSize,
-                             const unsigned int indirectionBlocSize):
+                             const unsigned int indirectionBlocSize,
+                             const unsigned int newEntrySize,
+                             const unsigned int otherEntrySize):
     NindPadFile(fileName, 
                 isWriter, 
                 lexiconIdentification, 
                 specificsSize,
-                TAILLE_INDIRECTION_V2,          //new files: format v2
+                newEntrySize,                   //new files: format v2 (10), a term index v3 (11)
                 indirectionBlocSize,
-                6,                              //v2: 6-byte <addrBlocSuivant>
-                TAILLE_INDIRECTION_V1),         //v1 files: read (a writer refuses them)
+                6,                              //v2, v3: 6-byte <addrBlocSuivant>
+                TAILLE_INDIRECTION_V1,          //v1 files: read (a writer refuses them)
+                otherEntrySize),                //a term index: v2 files too
     m_definitionMinimumSize(definitionMinimumSize),
     m_emptyAreas()
 {
@@ -88,15 +91,19 @@ void NindIndex::beginBulk()
     //les indirections actuelles, bloc par bloc
     m_bulkIndirections.clear();
     m_bulkIndirections.reserve(getMaxIdent());
+    m_bulkKinds.clear();
+    if (isFormatV3()) m_bulkKinds.reserve(getMaxIdent());
     for (list<pair<uint64_t, unsigned int> >::const_iterator it = m_entriesBlocksMap.begin();
         it != m_entriesBlocksMap.end(); it++) {
         m_file.setPos((*it).first, SEEK_SET);
         m_file.readBuffer((*it).second * TAILLE_INDIRECTION);
         for (unsigned int i = 0; i < (*it).second; i++) {
-            //<offsetDejfinition> <longueurDejfinition>
-            const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
-            const unsigned int longueurDejfinition = getIndirectionLength(m_file.inBuffer());
+            //<offsetDejfinition> <longueurDejfinition> (v3: <genreEntreje>)
+            uint64_t offsetDejfinition;
+            unsigned int longueurDejfinition, kind;
+            readEntry(m_file.inBuffer(), offsetDejfinition, longueurDejfinition, kind);
             m_bulkIndirections.push_back(pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition));
+            if (isFormatV3()) m_bulkKinds.push_back((unsigned char)kind);
         }
     }
     //la queue actuelle (spejcifiques et identification)
@@ -127,8 +134,9 @@ void NindIndex::endBulk()
             for (unsigned int i = 0; i < nb; i++, ident++) {
                 const pair<uint64_t, unsigned int> entry = (ident < m_bulkIndirections.size()) ?
                     m_bulkIndirections[ident] : pair<uint64_t, unsigned int>(0, 0);
-                putIndirectionOffset(entry.first);
-                putIndirectionLength(entry.second);
+                const unsigned int kind = bulkSingleton((unsigned int)ident) ? ENTRY_SINGLETON
+                                          : (entry.first != 0 ? ENTRY_DEFINITION : ENTRY_NONE);
+                putIndirection(entry.first, entry.second, kind);
             }
             bulkWrite((*it).first + (uint64_t)first * TAILLE_INDIRECTION, 0, nb * TAILLE_INDIRECTION);
         }
@@ -140,6 +148,7 @@ void NindIndex::endBulk()
     m_isBulk = false;
     m_file.setBulk(false);         //vidange, taille du fichier
     vector<pair<uint64_t, unsigned int> >().swap(m_bulkIndirections);
+    vector<unsigned char>().swap(m_bulkKinds);
 }
 ////////////////////////////////////////////////////////////
 //brief Thread-safe (const) place of a definition in the file, without reading it
@@ -152,8 +161,7 @@ bool NindIndex::getDefinitionRefAt(const unsigned int ident,
     const uint64_t indirection = getEntryPosAt(ident, buffer);
     if (indirection == 0) return false;
     m_file.readAt(indirection, TAILLE_INDIRECTION, buffer);
-    offset = getIndirectionOffset(buffer);
-    length = getIndirectionLength(buffer);
+    readIndirection(buffer, offset, length);
     return offset != 0;
 }
 ////////////////////////////////////////////////////////////
@@ -167,8 +175,10 @@ bool NindIndex::getDefinitionAt(const unsigned int ident,
     if (indirection == 0) return false;
     //<offsetDejfinition> <longueurDejfinition>
     m_file.readAt(indirection, TAILLE_INDIRECTION, buffer);
-    const uint64_t offsetDejfinition = getIndirectionOffset(buffer);
-    const unsigned int longueurDejfinition = (bytesNb == 0) ? getIndirectionLength(buffer) : bytesNb;
+    uint64_t offsetDejfinition;
+    unsigned int longueurEntreje;
+    readIndirection(buffer, offsetDejfinition, longueurEntreje);
+    const unsigned int longueurDejfinition = (bytesNb == 0) ? longueurEntreje : bytesNb;
     //si la dejfinition n'a pas encore ete indexe, retourne false
     if (offsetDejfinition == 0) return false;
     m_file.readAt(offsetDejfinition, longueurDejfinition, buffer);
@@ -186,7 +196,7 @@ bool NindIndex::getDefinition(const unsigned int ident,
     if (indirection == 0) return false;
     if (m_isBulk) {
         //les indirections sont en mejmoire
-        if (ident >= m_bulkIndirections.size()) return false;
+        if (ident >= m_bulkIndirections.size() || bulkSingleton(ident)) return false;
         const pair<uint64_t, unsigned int> entry = m_bulkIndirections[ident];
         if (entry.first == 0) return false;
         m_file.flush();
@@ -199,8 +209,10 @@ bool NindIndex::getDefinition(const unsigned int ident,
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     m_file.readBuffer(TAILLE_INDIRECTION);
     //<offsetDejfinition> <longueurDejfinition>
-    const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
-    const unsigned int longueurDejfinition = (bytesNb == 0) ? getIndirectionLength(m_file.inBuffer()) : bytesNb;
+    uint64_t offsetDejfinition;
+    unsigned int longueurEntreje;
+    readIndirection(m_file.inBuffer(), offsetDejfinition, longueurEntreje);
+    const unsigned int longueurDejfinition = (bytesNb == 0) ? longueurEntreje : bytesNb;
     //si la dejfinition n'a pas encore ete indexe, retourne false
     if (offsetDejfinition == 0) return false;
     //et lit tout ce qui concerne la dejfinition
@@ -226,8 +238,12 @@ void NindIndex::setDefinition(const unsigned int ident)
     m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
     //<offsetDejfinition> <longueurDejfinition> 
     m_file.readBuffer(TAILLE_INDIRECTION);
-    const uint64_t oldOffsetEntry = getIndirectionOffset(m_file.inBuffer());
-    const unsigned int oldLengthEntry = getIndirectionLength(m_file.inBuffer());
+    uint64_t oldOffsetEntry;
+    unsigned int oldLengthEntry;
+    unsigned int oldKind;
+    readEntry(m_file.inBuffer(), oldOffsetEntry, oldLengthEntry, oldKind);
+    //(a term of one posting had no area)
+    if (oldKind != ENTRY_DEFINITION) { oldOffsetEntry = 0; oldLengthEntry = 0; }
     //le buffer d'ejcriture contient <dejfinition> puis les spejcifiques et l'identification
     if (m_file.getOutBufferSize() < (unsigned int)tailleQueue)
         throw NindIndexException("NindIndex::setDefinition write buffer smaller than specifics : " + m_fileName);
@@ -242,7 +258,7 @@ void NindIndex::setDefinition(const unsigned int ident)
         m_file.setPos(-tailleQueue, SEEK_END);      //se positionne sur les spejcifiques
         m_file.writeBuffer();                       //ejcriture effective sur le fichier  
         //met ah 0 l'indirection sur le fichier
-        setIndirection(indirection, 0, 0);
+        setIndirection(indirection, 0, 0, ENTRY_NONE);
         return;
     }
     //INSERTION ou REMPLACEMENT
@@ -257,7 +273,7 @@ void NindIndex::setDefinition(const unsigned int ident)
         //ejcrit sur le fichier les spejcifiques et l'identification qui constituent le buffer
         m_file.setPos(-tailleQueue, SEEK_END);          //se positionne sur les spejcifiques
         m_file.writeBuffer(dataSize, tailleQueue);      //ejcriture effective sur le fichier             
-        //l'indirection reste inchangee
+        //l'indirection reste inchangee (v3: of a definition already, its length the area's)
         return;
     }
     //INSERTION ou REMPLACEMENT NOUVEL ENDROIT
@@ -292,8 +308,15 @@ void NindIndex::setDefinitionBulk(const unsigned int ident,
     //des blocs d'indirection ont pu estre ajoutejs depuis
     if (m_bulkIndirections.size() < getMaxIdent())
         m_bulkIndirections.resize(getMaxIdent(), pair<uint64_t, unsigned int>(0, 0));
+    if (isFormatV3() && m_bulkKinds.size() < m_bulkIndirections.size())
+        m_bulkKinds.resize(m_bulkIndirections.size(), (unsigned char)ENTRY_NONE);
     if (ident >= m_bulkIndirections.size()) throw NindIndexException("NindIndex::setDefinition : " + m_fileName);
     pair<uint64_t, unsigned int> &entry = m_bulkIndirections[ident];
+    //(a term of one posting had no area: it gets one, or none)
+    if (bulkSingleton(ident)) {
+        entry = pair<uint64_t, unsigned int>(0, 0);
+        m_bulkKinds[ident] = (unsigned char)ENTRY_NONE;
+    }
     if (m_file.getOutBufferSize() < tailleQueue)
         throw NindIndexException("NindIndex::setDefinition write buffer smaller than specifics : " + m_fileName);
     const unsigned int dataSize = m_file.getOutBufferSize() - tailleQueue;
@@ -365,7 +388,7 @@ bool NindIndex::getDefinitionArea(const unsigned int ident,
                                   unsigned int &length)
 {
     if (m_isBulk) {
-        if (ident >= m_bulkIndirections.size()) return false;
+        if (ident >= m_bulkIndirections.size() || bulkSingleton(ident)) return false;
         offset = m_bulkIndirections[ident].first;
         length = m_bulkIndirections[ident].second;
         return offset != 0;
@@ -375,8 +398,7 @@ bool NindIndex::getDefinitionArea(const unsigned int ident,
     m_file.flush();
     m_file.setPos(indirection, SEEK_SET);
     m_file.readBuffer(TAILLE_INDIRECTION);
-    offset = getIndirectionOffset(m_file.inBuffer());
-    length = getIndirectionLength(m_file.inBuffer());
+    readIndirection(m_file.inBuffer(), offset, length);
     return offset != 0;
 }
 ////////////////////////////////////////////////////////////
@@ -426,8 +448,9 @@ NindIndex::IndexStats NindIndex::analyseIndex()
         m_file.setPos(indirection, SEEK_SET);
         //<offsetDejfinition> <longueurDejfinition>
         m_file.readBuffer(TAILLE_INDIRECTION);
-        const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
-        const unsigned int longueurDejfinition = getIndirectionLength(m_file.inBuffer());
+        uint64_t offsetDejfinition;
+        unsigned int longueurDejfinition;
+        readIndirection(m_file.inBuffer(), offsetDejfinition, longueurDejfinition);
         //si la dejfinition n'a pas encore ete indexe, n'en tient pas compte
         if (offsetDejfinition != 0) {
             nonVidesList.push_back(pair<uint64_t, unsigned int>(offsetDejfinition, longueurDejfinition));
@@ -448,15 +471,100 @@ NindIndex::IndexStats NindIndex::analyseIndex()
 //ejcrit une nouvelle indirection dans l'index
 void NindIndex::setIndirection(const uint64_t indirection,
                                const uint64_t offsetDejfinition,
-                               const unsigned int longueurDejfinition)
+                               const unsigned int longueurDejfinition,
+                               const unsigned int kind)
 {
     //se positionne sur l'indirection de la dejfinition
     m_file.setPos(indirection, SEEK_SET);
-    //<offsetDejfinition> <longueurDejfinition> 
+    //<offsetDejfinition> <longueurDejfinition> (v3: <genreEntreje>)
     m_file.createBuffer(TAILLE_INDIRECTION);
-    putIndirectionOffset(offsetDejfinition);               // <offsetDejfinition> 
-    putIndirectionLength(longueurDejfinition);             //<longueurDejfinition>
-    m_file.writeBuffer();                           //ecriture effective sur le fichier      
+    putIndirection(offsetDejfinition, longueurDejfinition, offsetDejfinition == 0 && kind == ENTRY_DEFINITION ? ENTRY_NONE : kind);
+    m_file.writeBuffer();                           //ecriture effective sur le fichier
+}
+////////////////////////////////////////////////////////////
+//brief (format v3) a term of one posting in its indirection (see the header)
+void NindIndex::setSingleton(const unsigned int ident,
+                             const uint64_t document,
+                             const unsigned int frequency)
+{
+    if (!isFormatV3()) throw NindIndexException("NindIndex::setSingleton not a format v3 file : " + m_fileName);
+    if (document >= ((uint64_t)1 << 48)) throw OutOfBoundException("NindIndex::setSingleton document over 48 bits " + m_fileName);
+    const unsigned int tailleQueue = getSpecificsAndIdentificationSize();
+    if (m_file.getOutBufferSize() != tailleQueue)
+        throw NindIndexException("NindIndex::setSingleton write buffer : " + m_fileName);
+    const uint64_t indirection = getEntryPos(ident);
+    if (indirection == 0) throw NindIndexException("NindIndex::setSingleton : " + m_fileName);
+    if (m_isBulk) {
+        if (m_bulkIndirections.size() < getMaxIdent())
+            m_bulkIndirections.resize(getMaxIdent(), pair<uint64_t, unsigned int>(0, 0));
+        if (m_bulkKinds.size() < m_bulkIndirections.size())
+            m_bulkKinds.resize(m_bulkIndirections.size(), (unsigned char)ENTRY_NONE);
+        if (ident >= m_bulkIndirections.size()) throw NindIndexException("NindIndex::setSingleton : " + m_fileName);
+        m_file.copyOutBuffer(0, tailleQueue, m_bulkTail);
+        pair<uint64_t, unsigned int> &entry = m_bulkIndirections[ident];
+        if (!bulkSingleton(ident) && entry.second != 0) vacateOldArea(entry.first, entry.second);
+        entry = pair<uint64_t, unsigned int>(document, frequency);
+        m_bulkKinds[ident] = (unsigned char)ENTRY_SINGLETON;
+        return;
+    }
+    m_file.setPos(indirection, SEEK_SET);
+    m_file.readBuffer(TAILLE_INDIRECTION);
+    uint64_t oldOffsetEntry;
+    unsigned int oldLengthEntry;
+    readIndirection(m_file.inBuffer(), oldOffsetEntry, oldLengthEntry);
+    //les spejcifiques et l'identification, puis l'indirection
+    m_file.setPos(-(long int)tailleQueue, SEEK_END);
+    m_file.writeBuffer();
+    if (oldLengthEntry != 0) vacateOldArea(oldOffsetEntry, oldLengthEntry);
+    setIndirection(indirection, document, frequency, ENTRY_SINGLETON);
+}
+////////////////////////////////////////////////////////////
+//brief (format v3) a term of one posting, sequential read
+bool NindIndex::getSingleton(const unsigned int ident,
+                             uint64_t &document,
+                             unsigned int &frequency)
+{
+    if (!isFormatV3()) return false;
+    if (m_isBulk) {
+        if (!bulkSingleton(ident)) return false;
+        document = m_bulkIndirections[ident].first;
+        frequency = m_bulkIndirections[ident].second;
+        return true;
+    }
+    const uint64_t indirection = getEntryPos(ident);
+    if (indirection == 0) return false;
+    m_file.flush();
+    m_file.setPos(indirection, SEEK_SET);
+    m_file.readBuffer(TAILLE_INDIRECTION);
+    unsigned int kind;
+    readEntry(m_file.inBuffer(), document, frequency, kind);
+    return kind == ENTRY_SINGLETON;
+}
+////////////////////////////////////////////////////////////
+//brief (format v3) a term of one posting, thread-safe (const) read
+bool NindIndex::getSingletonAt(const unsigned int ident,
+                               NindReadBuffer &buffer,
+                               uint64_t &document,
+                               unsigned int &frequency) const
+{
+    if (!isFormatV3()) return false;
+    unsigned int kind;
+    return getEntryAt(ident, buffer, document, frequency, kind) && kind == ENTRY_SINGLETON;
+}
+////////////////////////////////////////////////////////////
+//brief Thread-safe (const) read of an indirection
+bool NindIndex::getEntryAt(const unsigned int ident,
+                           NindReadBuffer &buffer,
+                           uint64_t &offset,
+                           unsigned int &length,
+                           unsigned int &kind) const
+{
+    if (m_isBulk) throw NindIndexException("NindIndex::getEntryAt in bulk mode : " + m_fileName);
+    const uint64_t indirection = getEntryPosAt(ident, buffer);
+    if (indirection == 0) return false;
+    m_file.readAt(indirection, TAILLE_INDIRECTION, buffer);
+    readEntry(buffer, offset, length, kind);
+    return true;
 }
 ////////////////////////////////////////////////////////////
 //ejtablit la carte des vides
@@ -470,9 +578,10 @@ void NindIndex::mapEmptySpaces()
     while (indirection != 0) {
         m_file.setPos(indirection, SEEK_SET);    //se positionne sur l'indirection de la dejfinition
         m_file.readBuffer(TAILLE_INDIRECTION);
-        //<offsetDejfinition> <longueurDejfinition> 
-        const uint64_t offsetDejfinition = getIndirectionOffset(m_file.inBuffer());
-        const unsigned int longueurDejfinition = getIndirectionLength(m_file.inBuffer());
+        //<offsetDejfinition> <longueurDejfinition> (v3 <genreEntreje>: a term of one posting has no area)
+        uint64_t offsetDejfinition;
+        unsigned int longueurDejfinition;
+        readIndirection(m_file.inBuffer(), offsetDejfinition, longueurDejfinition);
         //si la dejfinition n'a pas encore ete indexe, n'en tient pas compte
         if (offsetDejfinition != 0) {
             const pair<uint64_t, unsigned int> nonVide(offsetDejfinition, longueurDejfinition);

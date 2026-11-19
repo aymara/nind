@@ -175,11 +175,11 @@ class NindPadFile(NindFile):
 
         :raises Exception: if the file's structure is invalid.
         """
-        # these diagnostics parse format v1; format v2 (10-byte indirections) is read by
-        # nind._native only, until they move there
-        if self.tailleEntreje == 10:
-            raise NotImplementedError('%s: format v2 file; the Python diagnostics read format v1 only '
-                                      '(nind._native reads both)' % self.latFileName)
+        # these diagnostics parse format v1; formats v2 and v3 (10- and 11-byte indirections) are
+        # read by nind._native only, until they move there
+        if self.tailleEntreje >= 10:
+            raise NotImplementedError('%s: format v2 or v3 file; the Python diagnostics read format v1 only '
+                                      '(nind._native reads every format)' % self.latFileName)
         #ejtablit la carte des index sur les diffejrents blocs
         self.__ejtablitCarteIndex()
         # vejrifie les spejcifiques

@@ -132,7 +132,10 @@ protected:
     *\param specificsSize size in bytes of specific datas
     *\param dataEntrySize size in bytes of one data entry (for neo writer)
     *\param dataEntriesBlocSize number of entries in a single block (for neo writer), at most
-    * MAX_ENTRIES_BLOC_SIZE (larger: that) */
+    * MAX_ENTRIES_BLOC_SIZE (larger: that)
+    *\param otherDataEntrySize another entry size an existing file may have (0: none), its
+    * <addrBlocSuivant> as wide as dataEntrySize's: read and extended as it is (a format v3 term
+    * index's 11-byte entries next to v2's 10) */
     NindPadFile(const std::string &fileName,
                 const bool isWriter,
                 const Identification &referenceIdentification,
@@ -140,7 +143,8 @@ protected:
                 const unsigned int dataEntrySize = 0,
                 const unsigned int dataEntriesBlocSize = 0,
                 const unsigned int nextBlockAddrSize = 5,
-                const unsigned int legacyDataEntrySize = 0);
+                const unsigned int legacyDataEntrySize = 0,
+                const unsigned int otherDataEntrySize = 0);
 
     virtual ~NindPadFile();
 

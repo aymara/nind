@@ -97,6 +97,63 @@ void unpackBits(const unsigned char *bytes, const size_t bytesNb, const size_t v
         values[i] = value;
     }
 }
+//an EntierULat (EntierULat64 above 2^32), appended to bytes: NindFile::putUIntLat64's bytes
+void appendULat(vector<unsigned char> &bytes, const uint64_t value) {
+    if (value < 0x80) bytes.push_back((unsigned char)value);
+    else if (value < 0x4000) {
+        bytes.push_back((unsigned char)((value >> 8) | 0x80));
+        bytes.push_back((unsigned char)(value & 0xFF));
+    }
+    else if (value < 0x200000) {
+        bytes.push_back((unsigned char)((value >> 16) | 0xC0));
+        bytes.push_back((unsigned char)((value >> 8) & 0xFF));
+        bytes.push_back((unsigned char)(value & 0xFF));
+    }
+    else if (value < 0x10000000) {
+        bytes.push_back((unsigned char)((value >> 24) | 0xE0));
+        for (int shift = 16; shift >= 0; shift -= 8) bytes.push_back((unsigned char)((value >> shift) & 0xFF));
+    }
+    else if (value <= 0xFFFFFFFFull) {
+        bytes.push_back(0xF0);
+        for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back((unsigned char)((value >> shift) & 0xFF));
+    }
+    else {
+        bytes.push_back(0xF8);
+        for (int shift = 56; shift >= 0; shift -= 8) bytes.push_back((unsigned char)((value >> shift) & 0xFF));
+    }
+}
+//the bytes of an EntierULat (EntierULat64)
+unsigned int ulatSize(const uint64_t value) {
+    return value < 0x80 ? 1 : value < 0x4000 ? 2 : value < 0x200000 ? 3 : value < 0x10000000 ? 4
+         : value <= 0xFFFFFFFFull ? 5 : 9;
+}
+//format v3, <longueurPlancher>: an impact's length on a byte, rounded down: 0..127 exact, then
+//steps of ~16% (each value the previous one + 1/8 + 1/32 of it, integers), past 2^32 at 255
+struct LengthFloors {
+    uint64_t values[256];
+    LengthFloors() {
+        for (unsigned int b = 0; b < 129; b++) values[b] = b;
+        for (unsigned int b = 129; b < 256; b++) values[b] = values[b - 1] + (values[b - 1] >> 3) + (values[b - 1] >> 5);
+    }
+};
+const LengthFloors &lengthFloors() {
+    static const LengthFloors floors;
+    return floors;
+}
+//the largest code whose length is at most length
+unsigned char encodeLengthFloor(const unsigned int length) {
+    const uint64_t *values = lengthFloors().values;
+    unsigned int low = 0, high = 255;
+    while (low < high) {
+        const unsigned int middle = (low + high + 1) / 2;
+        if (values[middle] <= length) low = middle;
+        else high = middle - 1;
+    }
+    return (unsigned char)low;
+}
+unsigned int decodeLengthFloor(const unsigned char code) {
+    return (unsigned int)min<uint64_t>(lengthFloors().values[code], 0xFFFFFFFFull);
+}
 }
 ////////////////////////////////////////////////////////////
 //(definition of the static member: it may be bound by reference)
@@ -139,6 +196,16 @@ const unsigned int NindTermIndex::BLOCK_SIZE;
 #define TAILLE_DOC_MAXIMUM (isFormatV2() ? 14 : 5)   //v2 : 9 + 5
 //taille minimum du buffer d'ecriture
 #define TAILLE_BUFFER_MINIMUM 128
+//format v3 (docs/proposals/format-v3.md): <flagDejfinition=29> <longueurRejpertoire> <reserve>
+#define FLAG_DEJFINITION_V3 29
+#define FLAG_CG_V3_INLINE 79            //postings inline, frequencies of 1 folded into the gaps
+#define FLAG_CG_V3_IMPACTS 81           //blocks, every descriptor with its impacts
+#define FLAG_CG_V3_PLAIN 83             //blocks, lengths unknown: each descriptor's largest frequency
+#define FLAG_BLOC_V3 85
+//the header's largest: <flagDejfinition>(1) <longueurRejpertoire>(5) <reserve>(5)
+#define TAILLE_TESTE_V3_MAXIMUM 11
+//the smallest area of a definition: no padding of short ones (v2's 18 bytes)
+#define TAILLE_DEJFINITION_MINIMUM_V3 4
 //format v2 blocks: <flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc>
 #define FLAG_BLOC 71
 #define FLAG_BLOC_COMPACT 73
@@ -164,13 +231,16 @@ NindTermIndex::NindTermIndex(const std::string &fileNameExtensionLess,
               lexiconIdentification, 
               specificsNumber * 4,
               TAILLE_DEJFINITION_MINIMUM, 
-              indirectionBlocSize),
+              indirectionBlocSize,
+              11,                               //new files: format v3
+              10),                              //format v2 files: read, extended as they are
     m_specificsNumber(specificsNumber),
     m_denseFirst(0),
     m_denseLengths(),
     m_sparseLengths(),
     m_packed()
 {
+    if (isFormatV3()) setDefinitionMinimumSize(TAILLE_DEJFINITION_MINIMUM_V3);
 }
 ////////////////////////////////////////////////////////////
 NindTermIndex::~NindTermIndex()
@@ -184,6 +254,13 @@ NindTermIndex::~NindTermIndex()
 bool NindTermIndex::getTermDef(const unsigned int ident,
                                list<struct TermCG> &termDef)
 {
+    uint64_t document;
+    unsigned int frequency;
+    if (getSingleton(ident, document, frequency)) {
+        termDef.push_back(TermCG(0, frequency));
+        termDef.back().documents.push_back(Document(document, frequency));
+        return true;
+    }
     if (!getDefinition(ident)) return false;
     decodeTermDef(ident, m_file.inBuffer(), termDef);
     return true;
@@ -194,7 +271,19 @@ bool NindTermIndex::getTermDef(const unsigned int ident,
                                list<struct TermCG> &termDef,
                                NindReadBuffer &buffer) const
 {
-    if (!getDefinitionAt(ident, buffer)) return false;
+    if (isFormatV3()) {
+        //one read of the indirection: a term of one posting, or its definition's place
+        uint64_t offset;
+        unsigned int length, kind;
+        if (!getEntryAt(ident, buffer, offset, length, kind) || kind == ENTRY_NONE) return false;
+        if (kind == ENTRY_SINGLETON) {
+            termDef.push_back(TermCG(0, length));
+            termDef.back().documents.push_back(Document(offset, length));
+            return true;
+        }
+        m_file.readAt(offset, length, buffer);
+    }
+    else if (!getDefinitionAt(ident, buffer)) return false;
     decodeTermDef(ident, buffer, termDef);
     return true;
 }
@@ -267,6 +356,13 @@ bool NindTermIndex::getTermPostings(const unsigned int ident,
 {
     postings.clear();
     categoryEnds.clear();
+    uint64_t document;
+    unsigned int frequency;
+    if (getSingleton(ident, document, frequency)) {
+        postings.push_back(Document(document, frequency));
+        categoryEnds.push_back(1);
+        return true;
+    }
     if (!getDefinition(ident)) return false;
     decodeTermPostings(ident, m_file.inBuffer(), postings, categoryEnds, 0);
     return true;
@@ -281,6 +377,14 @@ bool NindTermIndex::getTermPostings(const unsigned int ident,
     postings.clear();
     categoryEnds.clear();
     categories.clear();
+    uint64_t document;
+    unsigned int frequency;
+    if (getSingleton(ident, document, frequency)) {
+        postings.push_back(Document(document, frequency));
+        categoryEnds.push_back(1);
+        categories.push_back(make_pair((unsigned char)0, frequency));
+        return true;
+    }
     if (!getDefinition(ident)) return false;
     decodeTermPostings(ident, m_file.inBuffer(), postings, categoryEnds, &categories);
     return true;
@@ -294,7 +398,18 @@ bool NindTermIndex::getTermPostings(const unsigned int ident,
 {
     postings.clear();
     categoryEnds.clear();
-    if (!getDefinitionAt(ident, buffer)) return false;
+    if (isFormatV3()) {
+        uint64_t offset;
+        unsigned int length, kind;
+        if (!getEntryAt(ident, buffer, offset, length, kind) || kind == ENTRY_NONE) return false;
+        if (kind == ENTRY_SINGLETON) {
+            postings.push_back(Document(offset, length));
+            categoryEnds.push_back(1);
+            return true;
+        }
+        m_file.readAt(offset, length, buffer);
+    }
+    else if (!getDefinitionAt(ident, buffer)) return false;
     decodeTermPostings(ident, buffer, postings, categoryEnds, 0);
     return true;
 }
@@ -455,12 +570,18 @@ void NindTermIndex::decodeBlock(const unsigned int ident,
     //<flagBloc=71> <identifiantTerme> <catejgorie> <nbreDocsBloc> { <identDocRelatif> <frejquenceDoc> }
     //or <flagBloc=73> ... bit-packed (see putBlock)
     const unsigned int flag = in.getInt1();
-    if ((flag != FLAG_BLOC && flag != FLAG_BLOC_COMPACT) || in.getInt4() != ident)
-        throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
-    in.getInt1();                   //catejgorie (checked by the descriptor's place)
-    if (in.getUIntLat() != block.docsNb)
-        throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
-    if (flag == FLAG_BLOC_COMPACT) {
+    if (flag == FLAG_BLOC_V3) {
+        //format v3: <flagBloc=85> <frejquenceMin> <bitsEcarts> <bitsFrejquences> ..., its count the descriptor's
+        if (!isFormatV3()) throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
+    }
+    else {
+        if ((flag != FLAG_BLOC && flag != FLAG_BLOC_COMPACT) || isFormatV3() || in.getInt4() != ident)
+            throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
+        in.getInt1();                   //catejgorie (checked by the descriptor's place)
+        if (in.getUIntLat() != block.docsNb)
+            throw NindTermIndexException("NindTermIndex::getTermDef H : " + m_fileName);
+    }
+    if (flag == FLAG_BLOC_COMPACT || flag == FLAG_BLOC_V3) {
         //(a descriptor's count is at most BLOCK_SIZE for a compact block)
         if (block.docsNb == 0 || block.docsNb > BLOCK_SIZE)
             throw NindTermIndexException("NindTermIndex::getTermDef K : " + m_fileName);
@@ -529,7 +650,7 @@ void NindTermIndex::decodeTermDefV2(const unsigned int ident,
                                     vector<pair<unsigned char, unsigned int> > *categories) const
 {
     TermDirectory directory;
-    parseDirectoryV2(ident, in, directory);
+    parseDirectory(ident, in, directory);
     const unsigned int directoryEnd = in.getInBufferSize();
     for (size_t c = 0; c < directory.categories.size(); c++) {
         const TermDirectory::Category &category = directory.categories[c];
@@ -571,10 +692,16 @@ bool NindTermIndex::getTermDirectory(const unsigned int ident,
     }
     uint64_t offset = 0;
     unsigned int length = 0;
+    uint64_t document;
+    unsigned int frequency;
+    if (getSingleton(ident, document, frequency)) {
+        singletonDirectory(document, frequency, directory);
+        return true;
+    }
     if (!getDefinitionArea(ident, offset, length)) return false;
     if (!getDefinition(ident)) return false;
     NindReadBuffer &in = m_file.inBuffer();
-    parseDirectoryV2(ident, in, directory);
+    parseDirectory(ident, in, directory);
     directory.offset = offset;
     directory.length = length;
     const unsigned int directoryEnd = in.getInBufferSize();
@@ -610,17 +737,41 @@ bool NindTermIndex::getTermDirectory(const unsigned int ident,
         }
         return true;
     }
-    if (!getDefinitionRefAt(ident, buffer, directory.offset, directory.length)) return false;
-    //the header, for the directory's length, then the directory
-    if (directory.length < TAILLE_TESTE_DEJFINITION)
-        throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
-    m_file.readAt(directory.offset, TAILLE_TESTE_DEJFINITION, buffer);
-    buffer.setInBufferPtr(OFFSET_LONGUEUR);
-    const uint64_t directorySize = (uint64_t)TAILLE_TESTE_DEJFINITION + getDefinitionField(buffer);
-    if (directorySize > directory.length)
-        throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
-    m_file.readAt(directory.offset, (unsigned int)directorySize, buffer);
-    parseDirectoryV2(ident, buffer, directory);
+    uint64_t directorySize = 0;
+    if (isFormatV3()) {
+        //one read of the indirection: a term of one posting, or its definition's place
+        unsigned int kind;
+        if (!getEntryAt(ident, buffer, directory.offset, directory.length, kind) || kind == ENTRY_NONE) return false;
+        if (kind == ENTRY_SINGLETON) {
+            singletonDirectory(directory.offset, directory.length, directory);
+            return true;
+        }
+        //the header (<flagDejfinition=29> <longueurRejpertoire> <reserve>), then the directory
+        m_file.readAt(directory.offset, min<unsigned int>(directory.length, TAILLE_TESTE_V3_MAXIMUM), buffer);
+        if (buffer.getInt1() != FLAG_DEJFINITION_V3)
+            throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
+        const unsigned int longueurRejpertoire = buffer.getUIntLat();
+        buffer.getUIntLat();
+        //(the header's bytes: those read)
+        directorySize = (uint64_t)(buffer.getInBufferSize() - buffer.getUnreadSize()) + longueurRejpertoire;
+        if (directorySize > directory.length)
+            throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
+        m_file.readAt(directory.offset, (unsigned int)directorySize, buffer);
+        parseDirectoryV3(ident, buffer, directory);
+    }
+    else {
+        if (!getDefinitionRefAt(ident, buffer, directory.offset, directory.length)) return false;
+        //the header, for the directory's length, then the directory
+        if (directory.length < TAILLE_TESTE_DEJFINITION)
+            throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
+        m_file.readAt(directory.offset, TAILLE_TESTE_DEJFINITION, buffer);
+        buffer.setInBufferPtr(OFFSET_LONGUEUR);
+        directorySize = (uint64_t)TAILLE_TESTE_DEJFINITION + getDefinitionField(buffer);
+        if (directorySize > directory.length)
+            throw NindTermIndexException("NindTermIndex::getTermDirectory : " + m_fileName);
+        m_file.readAt(directory.offset, (unsigned int)directorySize, buffer);
+        parseDirectoryV2(ident, buffer, directory);
+    }
     //every block within the definition, after the directory
     for (size_t c = 0; c < directory.categories.size(); c++) {
         const vector<Block> &blocks = directory.categories[c].blocks;
@@ -724,41 +875,8 @@ void NindTermIndex::writeTermDefV2(const unsigned int ident,
     const size_t singleDocsNb = categories.size() == 1 ? categories.front().docsNb : 0;
     const size_t extraBlocks = (withRoom && singleDocsNb > BLOCK_SIZE) ?
         max((size_t)2, (singleDocsNb + BLOCK_SIZE - 1) / BLOCK_SIZE / 16) : 0;
-    //2) la taille maximum du buffer d'ecriture : exacte pour les blocs (leurs bits par ejcart et par
-    //frejquence), au pire pour le reste ; une liste de centaines de millions de documents ne
-    //rejserve donc que sa taille (~1-2 octets par document), pas 14 octets par document
-    uint64_t tailleMaximum = TAILLE_TESTE_DEJFINITION + getSpecificsAndIdentificationSize() + TAILLE_BUFFER_MINIMUM;
-    for (size_t c = 0; c < categories.size(); c++) {
-        const Document *documents = categories[c].documents;
-        const uint64_t docsNb = categories[c].docsNb;
-        for (uint64_t d = 1; d < docsNb; d++) {
-            if (documents[d].ident <= documents[d - 1].ident)
-                throw NindTermIndexException("NindTermIndex::setTermDef documents not in increasing order : " + m_fileName);
-        }
-        tailleMaximum += TAILLE_TESTE_DEJFINITION_MAXIMUM;
-        if (docsNb <= BLOCK_SIZE) {
-            tailleMaximum += docsNb * TAILLE_DOC_MAXIMUM;
-            continue;
-        }
-        for (uint64_t begin = 0; begin < docsNb; begin += BLOCK_SIZE) {
-            const uint64_t end = min(begin + BLOCK_SIZE, docsNb);
-            uint64_t maxGap = 0;
-            unsigned int minFrequency = documents[begin].frequency, maxFrequency = minFrequency;
-            for (uint64_t d = begin; d < end; d++) {
-                if (d > begin) maxGap = max(maxGap, (uint64_t)(documents[d].ident - documents[d - 1].ident - 1));
-                minFrequency = min(minFrequency, documents[d].frequency);
-                maxFrequency = max(maxFrequency, documents[d].frequency);
-            }
-            const uint64_t n = end - begin;
-            //(packBits: each array rounded up to a byte)
-            tailleMaximum += TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_BLOC_MAXIMUM
-                             + ((n - 1) * bitsOf(maxGap) + 7) / 8 + (n * bitsOf(maxFrequency - minFrequency) + 7) / 8;
-        }
-    }
-    if (extraBlocks != 0)
-        tailleMaximum += (uint64_t)extraBlocks * TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_DEJFINITION_MAXIMUM
-                         + (uint64_t)(extraBlocks + 1) * (TAILLE_TESTE_BLOC_MAXIMUM + BLOCK_SIZE * TAILLE_DOC_MAXIMUM)
-                         + 2 * BLOCK_SIZE;
+    //2) la taille maximum du buffer d'ecriture
+    const uint64_t tailleMaximum = definitionSizeBound(categories, extraBlocks);
     if (tailleMaximum > 0xFFFFFFFFull)
         throw OutOfBoundException("NindTermIndex::setTermDef definition over 4 GiB " + m_fileName);
     m_file.createBuffer((unsigned int)tailleMaximum);
@@ -1134,10 +1252,24 @@ void NindTermIndex::writeTermDef(const unsigned int ident,
                                  const list<unsigned int> &specifics,
                                  const bool withRoom)
 {
-    writeTermDefV2(ident, categories, withRoom);
-    //calcule le nombre d'extra octets ah mettre dans le buffer pour atteindre la taille minimum
-    int extra = m_file.getOutBufferSize() - TAILLE_DEJFINITION_MINIMUM;
-    while (extra++ < 0) m_file.putInt1(0);
+    if (isFormatV3()) {
+        //a term of one posting (category 0, a document below 2^48): in its indirection, no definition
+        if (categories.size() == 1 && categories[0].cg == 0 && categories[0].docsNb == 1
+            && categories[0].documents[0].ident < ((uint64_t)1 << 48)
+            && categories[0].frequency == categories[0].documents[0].frequency) {
+            m_file.createBuffer(getSpecificsAndIdentificationSize());
+            writeSpecificsAndIdentification(specifics, fileIdentification);
+            setSingleton(ident, categories[0].documents[0].ident, categories[0].documents[0].frequency);
+            return;
+        }
+        writeTermDefV3(ident, categories, withRoom);
+    }
+    else {
+        writeTermDefV2(ident, categories, withRoom);
+        //calcule le nombre d'extra octets ah mettre dans le buffer pour atteindre la taille minimum
+        int extra = m_file.getOutBufferSize() - TAILLE_DEJFINITION_MINIMUM;
+        while (extra++ < 0) m_file.putInt1(0);
+    }
     writeSpecificsAndIdentification(specifics, fileIdentification);
     setDefinition(ident);
 }
@@ -1162,7 +1294,9 @@ bool NindTermIndex::updateTermDef(const unsigned int ident,
     NindCriticalSection criticalSection(m_file);
     checkExtendIndirection(ident, fileIdentification);
     //the fast path: the last block, the new ones and the directory, in place
-    if (removed.empty() && !added.empty() && appendInPlace(ident, cg, added, fileIdentification, specifics))
+    if (removed.empty() && !added.empty()
+        && (isFormatV3() ? appendInPlaceV3(ident, cg, added, fileIdentification, specifics)
+                         : appendInPlace(ident, cg, added, fileIdentification, specifics)))
         return true;
     //the whole definition (sequential read: also in bulk mode, where the definitions are where
     //the bulk session put them)
@@ -1296,3 +1430,403 @@ bool NindTermIndex::appendInPlace(const unsigned int ident,
     return true;
 }
 ////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////
+//an upper bound of a definition's write buffer (v2's sizes: v3 never takes more)
+uint64_t NindTermIndex::definitionSizeBound(const vector<CategoryPostings> &categories,
+                                            const size_t extraBlocks) const
+{
+    //2) la taille maximum du buffer d'ecriture : exacte pour les blocs (leurs bits par ejcart et par
+    //frejquence), au pire pour le reste ; une liste de centaines de millions de documents ne
+    //rejserve donc que sa taille (~1-2 octets par document), pas 14 octets par document
+    uint64_t tailleMaximum = TAILLE_TESTE_DEJFINITION + getSpecificsAndIdentificationSize() + TAILLE_BUFFER_MINIMUM;
+    for (size_t c = 0; c < categories.size(); c++) {
+        const Document *documents = categories[c].documents;
+        const uint64_t docsNb = categories[c].docsNb;
+        for (uint64_t d = 1; d < docsNb; d++) {
+            if (documents[d].ident <= documents[d - 1].ident)
+                throw NindTermIndexException("NindTermIndex::setTermDef documents not in increasing order : " + m_fileName);
+        }
+        tailleMaximum += TAILLE_TESTE_DEJFINITION_MAXIMUM;
+        if (docsNb <= BLOCK_SIZE) {
+            tailleMaximum += docsNb * TAILLE_DOC_MAXIMUM;
+            continue;
+        }
+        for (uint64_t begin = 0; begin < docsNb; begin += BLOCK_SIZE) {
+            const uint64_t end = min(begin + BLOCK_SIZE, docsNb);
+            uint64_t maxGap = 0;
+            unsigned int minFrequency = documents[begin].frequency, maxFrequency = minFrequency;
+            for (uint64_t d = begin; d < end; d++) {
+                if (d > begin) maxGap = max(maxGap, (uint64_t)(documents[d].ident - documents[d - 1].ident - 1));
+                minFrequency = min(minFrequency, documents[d].frequency);
+                maxFrequency = max(maxFrequency, documents[d].frequency);
+            }
+            const uint64_t n = end - begin;
+            //(packBits: each array rounded up to a byte)
+            tailleMaximum += TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_BLOC_MAXIMUM
+                             + ((n - 1) * bitsOf(maxGap) + 7) / 8 + (n * bitsOf(maxFrequency - minFrequency) + 7) / 8;
+        }
+    }
+    if (extraBlocks != 0)
+        tailleMaximum += (uint64_t)extraBlocks * TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_DEJFINITION_MAXIMUM
+                         + (uint64_t)(extraBlocks + 1) * (TAILLE_TESTE_BLOC_MAXIMUM + BLOCK_SIZE * TAILLE_DOC_MAXIMUM)
+                         + 2 * BLOCK_SIZE;
+    return tailleMaximum;
+}
+////////////////////////////////////////////////////////////
+//format v3 (docs/proposals/format-v3.md)
+//<dejfinitionV3>         ::= <flagDejfinition=29> <longueurRejpertoire> <reserve> { <catejgorieV3> }
+//                            <reserve bytes> { <blocV3> }
+//<longueurRejpertoire>   ::= <EntierULat>            // the categories' bytes
+//<reserve>               ::= <EntierULat>            // bytes after them, before the first block
+//<catejgorieV3>          ::= <flagCg=79> <catejgorie> <nbreDocs> { <ecartEtUn> [ <frejquenceDoc> ] }
+//                          | <flagCg=81> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
+//                            { <descripteurBlocV3> }
+//                          | <flagCg=83> <catejgorie> <frejquenceTerme> <nbreDocs> <nbreBlocs>
+//                            { <descripteurBlocSansImpacts> }
+//<ecartEtUn>             ::= <EntierULat64>          // 2 * the gap (the first from 0) + 1 if the frequency is 1
+//<descripteurBlocV3>     ::= <premierDocRelatif> <dernierDocRelatif> <manque> <longueurBloc>
+//                            <nbreImpacts> { <frejquence> <longueurPlancher> }
+//<descripteurBlocSansImpacts> ::= <premierDocRelatif> <dernierDocRelatif> <manque> <longueurBloc> <frejquenceMax>
+//<manque>                ::= <EntierULat>            // BLOCK_SIZE (128) - the block's documents
+//<longueurBloc>          ::= <EntierULat>            // a block's offset: after the reserve, the lengths before it
+//<longueurPlancher>      ::= <Entier1>               // a lower bound of the length (decodeLengthFloor)
+//<blocV3>                ::= <flagBloc=85> <frejquenceMin> <bitsEcarts> <bitsFrejquences>
+//                            <ecartsPackejs> <frejquencesPackejes>     // as flag 73's
+//a term of one posting (category 0, a document below 2^48) has no definition: its indirection
+//(<genreEntreje=2>) holds its document and frequency
+void NindTermIndex::parseDirectoryV3(const unsigned int ident,
+                                     NindReadBuffer &in,
+                                     TermDirectory &directory) const
+{
+    (void)ident;
+    directory.categories.clear();
+    if (in.getInt1() != FLAG_DEJFINITION_V3)
+        throw NindTermIndexException("NindTermIndex::getTermDef A : " + m_fileName);
+    const unsigned int longueurRejpertoire = in.getUIntLat();
+    const unsigned int reserve = in.getUIntLat();
+    in.setEndInBuffer(longueurRejpertoire);
+    //(the logical end: the header and the categories)
+    uint64_t offset = (uint64_t)in.getInBufferSize() + reserve;     //the first block's
+    while (!in.endOfInBuffer()) {
+        const unsigned int flagCg = in.getInt1();
+        if (flagCg != FLAG_CG_V3_INLINE && flagCg != FLAG_CG_V3_IMPACTS && flagCg != FLAG_CG_V3_PLAIN)
+            throw NindTermIndexException("NindTermIndex::getTermDef C : " + m_fileName);
+        directory.categories.push_back(TermDirectory::Category());
+        TermDirectory::Category &category = directory.categories.back();
+        category.cg = in.getInt1();
+        if (flagCg == FLAG_CG_V3_INLINE) {
+            //<nbreDocs> { <ecartEtUn> [ <frejquenceDoc> ] }: at most BLOCK_SIZE (none: an empty
+            //category), the term frequency their sum
+            category.docsNb = in.getUIntLat64();
+            if (category.docsNb > BLOCK_SIZE)
+                throw NindTermIndexException("NindTermIndex::getTermDef D : " + m_fileName);
+            NindDocId identDocument = 0;
+            uint64_t total = 0;
+            for (uint64_t it = 0; it != category.docsNb; it++) {
+                const uint64_t value = in.getUIntLat64();
+                const uint64_t gap = value >> 1;
+                const unsigned int frequency = (value & 1) != 0 ? 1 : in.getUIntLat();
+                if (gap > ~(NindDocId)0 - identDocument || (it > 0 && gap == 0))
+                    throw NindTermIndexException("NindTermIndex::getTermDef D : " + m_fileName);
+                identDocument += gap;
+                category.inlinePostings.push_back(Document(identDocument, frequency));
+                total += frequency;
+            }
+            if (total > 0xFFFFFFFFull)
+                throw NindTermIndexException("NindTermIndex::getTermDef term frequency over 32 bits : " + m_fileName);
+            category.frequency = (unsigned int)total;
+            continue;
+        }
+        //<frejquenceTerme> <nbreDocs> <nbreBlocs> { <descripteurBlocV3> | <descripteurBlocSansImpacts> }
+        const uint64_t frejquenceTerme = in.getUIntLat64();
+        category.docsNb = in.getUIntLat64();
+        const unsigned int nbreBlocs = in.getUIntLat();
+        if (frejquenceTerme > 0xFFFFFFFFull || nbreBlocs == 0)
+            throw NindTermIndexException("NindTermIndex::getTermDef C : " + m_fileName);
+        category.frequency = (unsigned int)frejquenceTerme;
+        //(a descriptor takes 5 bytes at least: reserved within what the bytes left can hold)
+        category.blocks.reserve(std::min<size_t>(nbreBlocs, in.getUnreadSize() / 5));
+        NindDocId previousLast = 0;
+        uint64_t total = 0;
+        for (unsigned int b = 0; b != nbreBlocs; b++) {
+            Block block;
+            const uint64_t firstRelative = in.getUIntLat64();
+            const uint64_t lastRelative = in.getUIntLat64();
+            if (firstRelative > ~(NindDocId)0 - previousLast)
+                throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
+            block.first = previousLast + firstRelative;
+            if (lastRelative > ~(NindDocId)0 - block.first)
+                throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
+            block.last = block.first + lastRelative;
+            const unsigned int manque = in.getUIntLat();
+            if (manque >= BLOCK_SIZE) throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
+            block.docsNb = BLOCK_SIZE - manque;
+            block.length = in.getUIntLat();
+            block.offset = offset;
+            offset += block.length;
+            if (flagCg == FLAG_CG_V3_IMPACTS) {
+                //<nbreImpacts> { <frejquence> <longueurPlancher> }: by decreasing frequency, lengths
+                //not increasing (rounded down); the first frequency the block's largest, the last
+                //length its shortest (rounded down)
+                block.impactsNb = in.getInt1();
+                if (block.impactsNb == 0 || block.impactsNb > MAX_IMPACTS)
+                    throw NindTermIndexException("NindTermIndex::getTermDef L : " + m_fileName);
+                for (unsigned int i = 0; i < block.impactsNb; i++) {
+                    block.impacts[i].first = in.getUIntLat();
+                    block.impacts[i].second = decodeLengthFloor((unsigned char)in.getInt1());
+                    if (i > 0 && (block.impacts[i].first >= block.impacts[i - 1].first
+                                  || block.impacts[i].second > block.impacts[i - 1].second))
+                        throw NindTermIndexException("NindTermIndex::getTermDef L : " + m_fileName);
+                }
+                block.maxFrequency = block.impacts[0].first;
+                block.minLength = block.impacts[block.impactsNb - 1].second;
+            }
+            else {
+                block.maxFrequency = in.getUIntLat();
+                block.minLength = 0;
+                block.impactsNb = 0;
+            }
+            //a block after the first starts after the previous one's last document
+            if (b > 0 && firstRelative == 0)
+                throw NindTermIndexException("NindTermIndex::getTermDef E : " + m_fileName);
+            total += block.docsNb;
+            previousLast = block.last;
+            category.blocks.push_back(block);
+        }
+        if (total != category.docsNb)
+            throw NindTermIndexException("NindTermIndex::getTermDef F : " + m_fileName);
+    }
+}
+////////////////////////////////////////////////////////////
+//format v3: the definition in the write buffer (as writeTermDefV2: room for additions in place)
+void NindTermIndex::writeTermDefV3(const unsigned int ident,
+                                   const vector<CategoryPostings> &categories,
+                                   const bool withRoom)
+{
+    (void)ident;
+    const size_t singleDocsNb = categories.size() == 1 ? categories.front().docsNb : 0;
+    const size_t extraBlocks = (withRoom && singleDocsNb > BLOCK_SIZE) ?
+        max((size_t)2, (singleDocsNb + BLOCK_SIZE - 1) / BLOCK_SIZE / 16) : 0;
+    //(the documents' order checked there; v3 is never larger than v2)
+    const uint64_t tailleMaximum = definitionSizeBound(categories, extraBlocks);
+    if (tailleMaximum > 0xFFFFFFFFull)
+        throw OutOfBoundException("NindTermIndex::setTermDef definition over 4 GiB " + m_fileName);
+    vector<unsigned char> directory, blocks;
+    for (size_t c = 0; c < categories.size(); c++) putCategoryV3(categories[c], directory, blocks);
+    const unsigned int reserve = extraBlocks != 0 ?
+        (unsigned int)(extraBlocks * TAILLE_DESCRIPTEUR_MAXIMUM + TAILLE_TESTE_DEJFINITION_MAXIMUM) : 0;
+    m_file.createBuffer((unsigned int)tailleMaximum);
+    m_file.putInt1(FLAG_DEJFINITION_V3);
+    m_file.putUIntLat(directory.size());
+    m_file.putUIntLat(reserve);
+    if (!directory.empty()) m_file.putBytes(&directory[0], directory.size());
+    for (unsigned int i = 0; i < reserve; i++) m_file.putInt1(0);
+    if (!blocks.empty()) m_file.putBytes(&blocks[0], blocks.size());
+    //room for extraBlocks more blocks, and the last one's growth (as v2)
+    if (extraBlocks != 0) {
+        const size_t blocksNb = (singleDocsNb + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        const uint64_t averageBlock = blocks.size() / blocksNb + 1;
+        const uint64_t room = (extraBlocks + 1) * averageBlock + 2 * BLOCK_SIZE;
+        for (uint64_t i = 0; i < room; i++) m_file.putInt1(0);
+    }
+}
+////////////////////////////////////////////////////////////
+//format v3: a category's directory entry, its blocks' bytes
+void NindTermIndex::putCategoryV3(const CategoryPostings &category,
+                                  vector<unsigned char> &directory,
+                                  vector<unsigned char> &blocks)
+{
+    const Document *documents = category.documents;
+    const size_t docsNb = category.docsNb;
+    //a short list inline, unless a gap of 2^63 or more can't be folded (2 * gap + 1): in a block then
+    bool inlineList = docsNb <= BLOCK_SIZE;
+    for (size_t d = 0; inlineList && d < docsNb; d++)
+        if (documents[d].ident - (d > 0 ? documents[d - 1].ident : 0) >= ((uint64_t)1 << 63)) inlineList = false;
+    if (inlineList) {
+        //<flagCg=79> <catejgorie> <nbreDocs> { <ecartEtUn> [ <frejquenceDoc> ] }
+        directory.push_back(FLAG_CG_V3_INLINE);
+        directory.push_back(category.cg);
+        appendULat(directory, docsNb);
+        NindDocId previous = 0;
+        for (size_t d = 0; d < docsNb; d++) {
+            const uint64_t gap = documents[d].ident - previous;
+            appendULat(directory, 2 * gap + (documents[d].frequency == 1 ? 1 : 0));
+            if (documents[d].frequency != 1) appendULat(directory, documents[d].frequency);
+            previous = documents[d].ident;
+        }
+        return;
+    }
+    //blocks of BLOCK_SIZE documents, the last one possibly smaller; impacts if every block has them
+    const size_t blocksNb = (docsNb + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    vector<Block> described;
+    described.reserve(blocksNb);
+    bool impacts = true;
+    for (size_t b = 0; b < blocksNb; b++) {
+        const size_t begin = b * BLOCK_SIZE;
+        const size_t end = min(begin + (size_t)BLOCK_SIZE, docsNb);
+        described.push_back(describeBlock(documents + begin, end - begin));
+        impacts = impacts && described.back().impactsNb != 0;
+    }
+    directory.push_back(impacts ? FLAG_CG_V3_IMPACTS : FLAG_CG_V3_PLAIN);
+    directory.push_back(category.cg);
+    appendULat(directory, category.frequency);
+    appendULat(directory, docsNb);
+    appendULat(directory, blocksNb);
+    NindDocId previousLast = 0;
+    for (size_t b = 0; b < blocksNb; b++) {
+        const size_t start = blocks.size();
+        putBlockV3(documents + b * BLOCK_SIZE, (size_t)described[b].docsNb, blocks);
+        described[b].length = blocks.size() - start;
+        putBlockDescriptorV3(described[b], previousLast, impacts, directory);
+        previousLast = described[b].last;
+    }
+}
+////////////////////////////////////////////////////////////
+//format v3: <flagBloc=85> <frejquenceMin> <bitsEcarts> <bitsFrejquences> <ecartsPackejs> <frejquencesPackejes>
+void NindTermIndex::putBlockV3(const Document *documents,
+                               const size_t docsNb,
+                               vector<unsigned char> &bytes)
+{
+    uint64_t gaps[BLOCK_SIZE], frequencies[BLOCK_SIZE];
+    if (docsNb == 0 || docsNb > BLOCK_SIZE)
+        throw NindTermIndexException("NindTermIndex::setTermDef bad block size : " + m_fileName);
+    unsigned int minFrequency = documents[0].frequency;
+    for (size_t d = 1; d < docsNb; d++) minFrequency = min(minFrequency, documents[d].frequency);
+    uint64_t maxGap = 0, maxFrequency = 0;
+    for (size_t d = 0; d < docsNb; d++) {
+        if (d > 0) {
+            gaps[d - 1] = documents[d].ident - documents[d - 1].ident - 1;
+            maxGap = max(maxGap, gaps[d - 1]);
+        }
+        frequencies[d] = documents[d].frequency - minFrequency;
+        maxFrequency = max(maxFrequency, frequencies[d]);
+    }
+    const unsigned int gapBits = bitsOf(maxGap), frequencyBits = bitsOf(maxFrequency);
+    bytes.push_back(FLAG_BLOC_V3);
+    appendULat(bytes, minFrequency);
+    bytes.push_back((unsigned char)gapBits);
+    bytes.push_back((unsigned char)frequencyBits);
+    packBits(gaps, docsNb - 1, gapBits, bytes);
+    packBits(frequencies, docsNb, frequencyBits, bytes);
+}
+////////////////////////////////////////////////////////////
+//format v3: <premierDocRelatif> <dernierDocRelatif> <manque> <longueurBloc> then its impacts, or its
+//largest frequency
+void NindTermIndex::putBlockDescriptorV3(const Block &block,
+                                         const NindDocId previousLast,
+                                         const bool impacts,
+                                         vector<unsigned char> &bytes)
+{
+    appendULat(bytes, block.first - previousLast);
+    appendULat(bytes, block.last - block.first);
+    appendULat(bytes, BLOCK_SIZE - block.docsNb);
+    appendULat(bytes, block.length);
+    if (impacts) {
+        bytes.push_back((unsigned char)block.impactsNb);
+        for (unsigned int i = 0; i < block.impactsNb; i++) {
+            appendULat(bytes, block.impacts[i].first);
+            bytes.push_back(encodeLengthFloor(block.impacts[i].second));
+        }
+    }
+    else appendULat(bytes, block.maxFrequency);
+}
+////////////////////////////////////////////////////////////
+//format v3: the fast path of updateTermDef: the last block and the new ones written in place, the
+//header and directory rewritten in the room before the first block
+bool NindTermIndex::appendInPlaceV3(const unsigned int ident,
+                                    const unsigned char cg,
+                                    const vector<Document> &added,
+                                    const Identification &fileIdentification,
+                                    const list<unsigned int> &specifics)
+{
+    uint64_t areaOffset = 0;
+    unsigned int areaLength = 0;
+    if (!getDefinitionArea(ident, areaOffset, areaLength)) return false;
+    if (!getDefinition(ident)) return false;
+    NindReadBuffer &in = m_file.inBuffer();
+    TermDirectory directory;
+    parseDirectoryV3(ident, in, directory);
+    const unsigned int directoryEnd = in.getInBufferSize();
+    if (directory.categories.size() != 1 || directory.categories[0].cg != cg) return false;
+    const TermDirectory::Category &category = directory.categories[0];
+    if (category.blocks.empty() || added.front().ident <= category.blocks.back().last) return false;
+    for (size_t b = 0; b < category.blocks.size(); b++)
+        if (category.blocks[b].offset < directoryEnd || category.blocks[b].offset + category.blocks[b].length > areaLength)
+            throw NindTermIndexException("NindTermIndex::updateTermDef G : " + m_fileName);
+    //the last block's documents, then the added ones, cut into blocks
+    const size_t last = category.blocks.size() - 1;
+    vector<Document> documents;
+    in.setInBufferPtr((unsigned int)category.blocks[last].offset);
+    in.setEndInBuffer((unsigned int)category.blocks[last].length);
+    decodeBlock(ident, category.blocks[last], in, documents);
+    documents.insert(documents.end(), added.begin(), added.end());
+    uint64_t addedFrequency = 0;
+    for (size_t a = 0; a < added.size(); a++) addedFrequency += added[a].frequency;
+    if (category.frequency + addedFrequency > 0xFFFFFFFFull) return false;
+    vector<Block> blocks(category.blocks.begin(), category.blocks.begin() + last);
+    for (size_t begin = 0; begin < documents.size(); begin += BLOCK_SIZE) {
+        const size_t end = min(begin + (size_t)BLOCK_SIZE, documents.size());
+        blocks.push_back(describeBlock(&documents[begin], end - begin));
+    }
+    //impacts if every block has them (the earlier ones': from the directory, lengths rounded down)
+    bool impacts = true;
+    for (size_t b = 0; b < blocks.size(); b++) impacts = impacts && blocks[b].impactsNb != 0;
+    //the new blocks' bytes, then the directory
+    vector<unsigned char> blockBytes, directoryBytes;
+    for (size_t b = last; b < blocks.size(); b++) {
+        const size_t start = blockBytes.size();
+        putBlockV3(&documents[(b - last) * BLOCK_SIZE], (size_t)blocks[b].docsNb, blockBytes);
+        blocks[b].length = blockBytes.size() - start;
+    }
+    directoryBytes.push_back(impacts ? FLAG_CG_V3_IMPACTS : FLAG_CG_V3_PLAIN);
+    directoryBytes.push_back(cg);
+    appendULat(directoryBytes, category.frequency + addedFrequency);
+    appendULat(directoryBytes, category.docsNb + added.size());
+    appendULat(directoryBytes, blocks.size());
+    NindDocId previousLast = 0;
+    for (size_t b = 0; b < blocks.size(); b++) {
+        putBlockDescriptorV3(blocks[b], previousLast, impacts, directoryBytes);
+        previousLast = blocks[b].last;
+    }
+    //the header, directory and reserve take the same bytes as before the first block
+    const uint64_t blocksStart = category.blocks[0].offset;
+    int64_t reserve = -1;
+    for (unsigned int bytes = 1; bytes <= 5 && reserve < 0; bytes++) {
+        const int64_t left = (int64_t)blocksStart - 1 - (int64_t)ulatSize(directoryBytes.size()) - (int64_t)bytes
+                             - (int64_t)directoryBytes.size();
+        if (left >= 0 && ulatSize((uint64_t)left) == bytes) reserve = left;
+    }
+    if (reserve < 0) return false;
+    const uint64_t blocksOffset = category.blocks[last].offset;
+    if (blocksOffset + blockBytes.size() > areaLength) return false;
+    m_file.createBuffer((unsigned int)(blocksStart + blockBytes.size() + getSpecificsAndIdentificationSize()
+                                       + TAILLE_BUFFER_MINIMUM));
+    m_file.putInt1(FLAG_DEJFINITION_V3);
+    m_file.putUIntLat(directoryBytes.size());
+    m_file.putUIntLat((uint64_t)reserve);
+    m_file.putBytes(&directoryBytes[0], directoryBytes.size());
+    for (int64_t i = 0; i < reserve; i++) m_file.putInt1(0);
+    m_file.putBytes(&blockBytes[0], blockBytes.size());
+    writeSpecificsAndIdentification(specifics, fileIdentification);
+    vector<pair<unsigned int, unsigned int> > parts;
+    parts.push_back(pair<unsigned int, unsigned int>(0, (unsigned int)blocksStart));
+    parts.push_back(pair<unsigned int, unsigned int>((unsigned int)blocksOffset, (unsigned int)blockBytes.size()));
+    setDefinitionParts(ident, parts);
+    return true;
+}
+////////////////////////////////////////////////////////////
+//(format v3) a term of one posting as a directory: one inline posting, category 0
+void NindTermIndex::singletonDirectory(const uint64_t document,
+                                       const unsigned int frequency,
+                                       TermDirectory &directory)
+{
+    directory.categories.clear();
+    directory.offset = 0;
+    directory.length = 0;
+    directory.categories.push_back(TermDirectory::Category());
+    TermDirectory::Category &category = directory.categories.back();
+    category.cg = 0;
+    category.frequency = frequency;
+    category.docsNb = 1;
+    category.inlinePostings.push_back(Document(document, frequency));
+}

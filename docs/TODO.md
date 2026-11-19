@@ -362,8 +362,10 @@ of 3.0.0 (format v2).
     their indirections, 393 MB (10 bytes a term). Packing the widest 10% of a block's values apart
     (Lucene's PFor) would save ~6% of the blocks. What's left is in the format (a v3): smaller
     directories (offsets from the lengths, impacts on fewer bytes), short lists with frequencies of
-    1 folded, rare terms' postings in the lexicon. Planned: `docs/proposals/format-v3.md` (-1,426 MB
-    of the term index here, 13.9%; -684 MB on the 138M passages, 8.7%; `bench/v3_estimate.py`).
+    1 folded, rare terms' postings in the lexicon. Done: format v3 (`docs/proposals/format-v3.md`):
+    the term index 10,235 -> 8,855 MB here (-13.5%), 7,908 -> 7,237 MB on the 138M passages (-8.5%),
+    identical results, searches 1-5% faster. Left: patched blocks (~7% of the bodies), the lexicon
+    (996 MB against 727).
   - [x] **The 32-segment index's first update** merged a tier of 9.76M documents: 1,689 s for +1%
     (11.9 s for 8 segments). `MAX_MERGED_DOCS` counts documents, not their tokens: a tier of long
     documents is many times the work. Done: a second limit, the merged segments' term index bytes

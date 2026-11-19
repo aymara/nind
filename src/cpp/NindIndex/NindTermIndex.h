@@ -327,6 +327,49 @@ private:
                        const std::vector<Document> &added,
                        const Identification &fileIdentification,
                        const std::list<unsigned int> &specifics);
+    //format v3 (docs/proposals/format-v3.md): the definition's header and directory (in at its
+    //first byte), the blocks' offsets summed from their lengths, their largest frequency and
+    //shortest length from their impacts
+    void parseDirectoryV3(const unsigned int ident,
+                          NindReadBuffer &in,
+                          TermDirectory &directory) const;
+    //the directory of the file's format (v2 or v3)
+    void parseDirectory(const unsigned int ident,
+                        NindReadBuffer &in,
+                        TermDirectory &directory) const {
+        if (isFormatV3()) parseDirectoryV3(ident, in, directory);
+        else parseDirectoryV2(ident, in, directory);
+    }
+    //format v3: forms the definition (header, directory, room, blocks) in the write buffer
+    void writeTermDefV3(const unsigned int ident,
+                        const std::vector<CategoryPostings> &categories,
+                        const bool withRoom = false);
+    //format v3: a category's directory entry and its blocks' bytes, appended to directory and blocks
+    void putCategoryV3(const CategoryPostings &category,
+                       std::vector<unsigned char> &directory,
+                       std::vector<unsigned char> &blocks);
+    //format v3: a block's bytes (<flagBloc=85> ...), appended to bytes
+    void putBlockV3(const Document *documents,
+                    const size_t docsNb,
+                    std::vector<unsigned char> &bytes);
+    //format v3: a block's descriptor, appended to bytes (impacts: the category's flag)
+    static void putBlockDescriptorV3(const Block &block,
+                                     const NindDocId previousLast,
+                                     const bool impacts,
+                                     std::vector<unsigned char> &bytes);
+    //format v3: the fast path of updateTermDef
+    bool appendInPlaceV3(const unsigned int ident,
+                         const unsigned char cg,
+                         const std::vector<Document> &added,
+                         const Identification &fileIdentification,
+                         const std::list<unsigned int> &specifics);
+    //an upper bound of the write buffer a definition takes (both formats; extraBlocks: its room)
+    uint64_t definitionSizeBound(const std::vector<CategoryPostings> &categories,
+                                 const size_t extraBlocks) const;
+    //(format v3) a term of one posting as a directory
+    static void singletonDirectory(const uint64_t document,
+                                   const unsigned int frequency,
+                                   TermDirectory &directory);
 public:
     /**\brief number of postings per block of a long list (format v2; a list of at most this many
     * documents is written inline) */

@@ -10,6 +10,7 @@ add_executable(NindIndexUnitTests
   NindGoldenTest.cpp
   NindConcurrentReadTest.cpp
   NindFormatV2Test.cpp
+  NindFormatV3Test.cpp
   NindIndexVerifyTest.cpp
   NindTermUpdateTest.cpp
   NindIndexUpdateTest.cpp
