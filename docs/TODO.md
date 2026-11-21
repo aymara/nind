@@ -353,7 +353,7 @@ of 3.0.0 (format v2).
     (`BUILD_BYTES_PER_KEPT_POSTING` 5, `BUILD_BYTES_PER_REPEATED` 4: the samples count the postings
     of a frequency above 1), refit on shards built by a pool worker: long documents 0.98 to 1.08
     of the model, passages 1.04 to 1.21.
-  - **Index size**: 11.2 GB against Lucene's 8.45 (`nind-bench/scripts/term_index_parts.py`,
+  - **Index size**: 11.2 GB against Lucene's 8.45, 9.9 GB since format v3 (stage 10; the analysis below is v2's) (`nind-bench/scripts/term_index_parts.py`,
     `postings_bytes.py`). The term index, 10,235 MB: blocks 7,655 MB for 4.69G postings (1.63 bytes
     each; Lucene's `.doc` 7,668 MB for all of them: the same), their directories 1,044 MB (28 bytes a
     block: first, last, count, largest frequency, shortest length, offset, length, impacts), 38.9M

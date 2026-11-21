@@ -1,0 +1,280 @@
+Thu Nov 19 07:59:47 PM CET 2026
+msmarco-stop / nind / build ... 49.7 s
+msmarco-stop / nind / search ... 500.6 s
+msmarco-stop / nind / update ... 77.1 s
+msmarco-stop / nind+local / build ... 105.3 s
+msmarco-stop / nind+local / search ... 498.9 s
+msmarco-stop / nind+local / update ... 134.0 s
+msmarco-stop / nind-8s / build ... 21.9 s
+msmarco-stop / nind-8s / search ... 649.0 s
+msmarco-stop / nind-8s / update ... 55.9 s
+msmarco-stop / nind-32s / build ... 21.4 s
+msmarco-stop / nind-32s / search ... 921.0 s
+msmarco-stop / nind-32s / update ... 157.5 s
+msmarco-stop / nind-4t / search ... 172.6 s
+msmarco-stop / nind-8t / search ... 184.0 s
+msmarco-stop / nind-8s-8t / search ... 130.5 s
+msmarco-stop / nind-32s-8t / search ... 172.8 s
+Thu Nov 19 09:24:32 PM CET 2026
+msmarco / nind / build ... 63.8 s
+msmarco / nind / search ... 792.2 s
+msmarco / nind / update ... 102.1 s
+msmarco / nind+local / build ... 142.9 s
+msmarco / nind+local / search ... 808.2 s
+msmarco / nind+local / update ... 182.3 s
+msmarco / nind-8s / build ... 28.9 s
+msmarco / nind-8s / search ... 1094.0 s
+msmarco / nind-8s / update ... 72.3 s
+msmarco / nind-32s / build ... 26.8 s
+msmarco / nind-32s / search ... 1690.0 s
+msmarco / nind-32s / update ... 185.6 s
+msmarco / nind-4t / search ... 294.2 s
+msmarco / nind-8t / search ... 219.6 s
+msmarco / nind-8s-8t / search ... 216.7 s
+msmarco / nind-32s-8t / search ... 273.0 s
+Thu Nov 19 11:27:59 PM CET 2026
+msmarco-stop-1M / nind / build ... 6.7 s
+msmarco-stop-1M / nind / search ... 163.6 s
+msmarco-stop-1M / nind-8s / build ... 3.0 s
+msmarco-stop-1M / nind-8s / search ... 235.4 s
+msmarco-stop-1M / nind-32s / build ... 3.4 s
+msmarco-stop-1M / nind-32s / search ... 361.0 s
+msmarco-stop-1M / nind-4t / search ... 100.7 s
+msmarco-stop-1M / nind-8t / search ... 132.2 s
+msmarco-stop-1M / nind-8s-8t / search ... 111.8 s
+msmarco-stop-1M / nind-32s-8t / search ... 126.5 s
+msmarco-stop-2M / nind / build ... 11.5 s
+msmarco-stop-2M / nind / search ... 320.4 s
+msmarco-stop-2M / nind-8s / build ... 5.6 s
+msmarco-stop-2M / nind-8s / search ... 387.3 s
+msmarco-stop-2M / nind-32s / build ... 5.8 s
+msmarco-stop-2M / nind-32s / search ... 550.3 s
+msmarco-stop-2M / nind-4t / search ... 206.4 s
+msmarco-stop-2M / nind-8t / search ... 197.9 s
+msmarco-stop-2M / nind-8s-8t / search ... 123.5 s
+msmarco-stop-2M / nind-32s-8t / search ... 137.6 s
+msmarco-stop-4M / nind / build ... 23.4 s
+msmarco-stop-4M / nind / search ... 289.1 s
+msmarco-stop-4M / nind-8s / build ... 10.1 s
+msmarco-stop-4M / nind-8s / search ... 389.4 s
+msmarco-stop-4M / nind-32s / build ... 10.1 s
+msmarco-stop-4M / nind-32s / search ... 602.8 s
+msmarco-stop-4M / nind-4t / search ... 116.3 s
+msmarco-stop-4M / nind-8t / search ... 139.8 s
+msmarco-stop-4M / nind-8s-8t / search ... 123.5 s
+msmarco-stop-4M / nind-32s-8t / search ... 143.6 s
+scifact-stop / nind / build ... 1.2 s
+scifact-stop / nind / search ... 1.7 s
+nfcorpus-stop / nind / build ... 0.6 s
+nfcorpus-stop / nind / search ... 0.5 s
+fiqa-stop / nind / build ... 1.3 s
+fiqa-stop / nind / search ... 8.6 s
+msmarco-stop / nind / build ... 56.6 s
+msmarco-stop / nind / update ... 78.5 s
+msmarco-stop / nind-8s / build ... 22.1 s
+msmarco-stop / nind-8s / update ... 57.1 s
+msmarco-stop / nind-32s / build ... 19.7 s
+msmarco-stop / nind-32s / update ... 178.3 s
+msmarco-stop / nind / build ... 57.9 s
+msmarco-stop / nind / update ... 84.7 s
+msmarco-stop / nind-8s / build ... 21.6 s
+msmarco-stop / nind-8s / update ... 57.0 s
+msmarco-stop / nind-32s / build ... 19.6 s
+msmarco-stop / nind-32s / update ... 175.7 s
+Fri Nov 20 02:47:42 AM CET 2026
+STAGE10 V1 DONE
+v2-stop-1M / nind / build ... 6.5 s
+v2-stop-1M / nind / search ... 32.6 s
+v2-stop-1M / nind-8s / build ... 2.9 s
+v2-stop-1M / nind-8s / search ... 46.0 s
+v2-stop-1M / nind-32s / build ... 3.3 s
+v2-stop-1M / nind-32s / search ... 68.0 s
+v2-stop-1M / nind-4t / search ... 20.2 s
+v2-stop-1M / nind-8t / search ... 30.1 s
+v2-stop-1M / nind-8s-8t / search ... 30.1 s
+v2-stop-1M / nind-32s-8t / search ... 29.9 s
+Fri Nov 20 03:04:12 AM CET 2026
+v2-stop-4M / nind / build ... 24.7 s
+v2-stop-4M / nind / search ... 58.6 s
+v2-stop-4M / nind-8s / build ... 10.7 s
+v2-stop-4M / nind-8s / search ... 76.4 s
+v2-stop-4M / nind-32s / build ... 11.0 s
+v2-stop-4M / nind-32s / search ... 109.3 s
+v2-stop-4M / nind-4t / search ... 26.3 s
+v2-stop-4M / nind-8t / search ... 34.8 s
+v2-stop-4M / nind-8s-8t / search ... 40.3 s
+v2-stop-4M / nind-32s-8t / search ... 44.0 s
+Fri Nov 20 03:23:11 AM CET 2026
+v2-stop-8M / nind / build ... 47.7 s
+v2-stop-8M / nind / search ... 75.5 s
+v2-stop-8M / nind-8s / build ... 20.5 s
+v2-stop-8M / nind-8s / search ... 117.9 s
+v2-stop-8M / nind-32s / build ... 20.2 s
+v2-stop-8M / nind-32s / search ... 159.3 s
+v2-stop-8M / nind-4t / search ... 33.7 s
+v2-stop-8M / nind-8t / search ... 38.1 s
+v2-stop-8M / nind-8s-8t / search ... 38.2 s
+v2-stop-8M / nind-32s-8t / search ... 41.0 s
+Fri Nov 20 03:44:37 AM CET 2026
+v2-stop-16M / nind / build ... 87.8 s
+v2-stop-16M / nind / search ... 149.9 s
+v2-stop-16M / nind / update ... 108.2 s
+v2-stop-16M / nind-8s / build ... 37.5 s
+v2-stop-16M / nind-8s / search ... 174.1 s
+v2-stop-16M / nind-8s / update ... 61.1 s
+v2-stop-16M / nind-32s / build ... 35.5 s
+v2-stop-16M / nind-32s / search ... 217.8 s
+v2-stop-16M / nind-32s / update ... 392.2 s
+v2-stop-16M / nind-4t / search ... 46.6 s
+v2-stop-16M / nind-8t / search ... 49.1 s
+v2-stop-16M / nind-8s-8t / search ... 37.3 s
+v2-stop-16M / nind-32s-8t / search ... 45.6 s
+Fri Nov 20 04:20:30 AM CET 2026
+v2-stop-32M / nind / build ... 165.9 s
+v2-stop-32M / nind / search ... 242.2 s
+v2-stop-32M / nind-8s / build ... 68.5 s
+v2-stop-32M / nind-8s / search ... 288.4 s
+v2-stop-32M / nind-32s / build ... 66.3 s
+v2-stop-32M / nind-32s / search ... 345.2 s
+v2-stop-32M / nind-4t / search ... 72.0 s
+v2-stop-32M / nind-8t / search ... 53.8 s
+v2-stop-32M / nind-8s-8t / search ... 50.3 s
+v2-stop-32M / nind-32s-8t / search ... 58.4 s
+Fri Nov 20 04:55:47 AM CET 2026
+v2-stop-64M / nind / build ... 345.4 s
+v2-stop-64M / nind / search ... 398.6 s
+v2-stop-64M / nind-8s / build ... 141.6 s
+v2-stop-64M / nind-8s / search ... 482.9 s
+v2-stop-64M / nind-32s / build ... 129.7 s
+v2-stop-64M / nind-32s / search ... 563.6 s
+v2-stop-64M / nind-4t / search ... 121.4 s
+v2-stop-64M / nind-8t / search ... 81.8 s
+v2-stop-64M / nind-8s-8t / search ... 77.0 s
+v2-stop-64M / nind-32s-8t / search ... 83.4 s
+Fri Nov 20 05:47:57 AM CET 2026
+v2-stop / nind / build ... 735.0 s
+v2-stop / nind / search ... 1352.3 s
+v2-stop / nind / update ... 892.0 s
+v2-stop / nind-8s / build ... 328.4 s
+v2-stop / nind-8s / search ... 1271.5 s
+v2-stop / nind-8s / update ... 450.2 s
+v2-stop / nind-32s / build ... 303.5 s
+v2-stop / nind-32s / search ... 1942.9 s
+v2-stop / nind-32s / update ... 453.3 s
+v2-stop / nind-4t / search ... 404.0 s
+v2-stop / nind-8t / search ... 248.7 s
+v2-stop / nind-8s-8t / search ... 235.0 s
+v2-stop / nind-32s-8t / search ... 249.5 s
+Fri Nov 20 08:26:24 AM CET 2026
+v2-16M / nind / build ... 95.0 s
+v2-16M / nind / search ... 227.0 s
+v2-16M / nind-8s / build ... 41.2 s
+v2-16M / nind-8s / search ... 267.5 s
+v2-16M / nind-8t / search ... 53.9 s
+v2-16M / nind-8s-8t / search ... 52.3 s
+Fri Nov 20 08:50:21 AM CET 2026
+v2 / nind / build ... 893.7 s
+v2 / nind / search ... 1027.7 s
+v2 / nind-8s / build ... 367.0 s
+v2 / nind-8s / search ... 1234.4 s
+v2 / nind-8t / search ... 205.2 s
+v2 / nind-8s-8t / search ... 187.9 s
+Fri Nov 20 10:06:11 AM CET 2026
+verify v2-stop nind
+{"segment": "work/v2/v2-stop/nind/index/corpus.gen-000001-6d13ba0e/corpus", "seconds": 434.0, "peak_gb": 5.01, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 4018384122, "problems": "[]", "problems_nb": 0, "terms_nb": 10497935, "with_local_index": false, "words_nb": 10497935}
+verify v2-stop nind-8s
+{"segment": "work/v2/v2-stop/nind-8s/index/corpus.gen-000001-90c280a4/seg-000007-014d2d79/corpus", "seconds": 75.4, "peak_gb": 0.72, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 505362916, "problems": "[]", "problems_nb": 0, "terms_nb": 2221338, "with_local_index": false, "words_
+verify v2 nind
+{"segment": "work/v2/v2/nind/index/corpus.gen-000001-26beb4f1/corpus", "seconds": 477.0, "peak_gb": 5.01, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 5204407551, "problems": "[]", "problems_nb": 0, "terms_nb": 10497968, "with_local_index": false, "words_nb": 10497968}
+verify v2 nind-8s
+{"segment": "work/v2/v2/nind-8s/index/corpus.gen-000001-8428f5ca/seg-000007-b67aca23/corpus", "seconds": 79.7, "peak_gb": 0.72, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 653782283, "problems": "[]", "problems_nb": 0, "terms_nb": 2228180, "with_local_index": false, "words_nb": 
+Fri Nov 20 10:48:03 AM CET 2026
+STAGE10 V2 DONE
+v21doc-stop-1M / nind / build ... 81.0 s
+v21doc-stop-1M / nind / search ... 152.9 s
+v21doc-stop-1M / nind-8s / build ... 41.2 s
+v21doc-stop-1M / nind-8s / search ... 138.1 s
+v21doc-stop-1M / nind-32s / build ... 40.1 s
+v21doc-stop-1M / nind-32s / search ... 187.0 s
+v21doc-stop-1M / nind-4t / search ... 121.9 s
+v21doc-stop-1M / nind-8t / search ... 122.1 s
+v21doc-stop-1M / nind-8s-8t / search ... 57.7 s
+v21doc-stop-1M / nind-32s-8t / search ... 43.7 s
+Fri Nov 20 11:13:57 AM CET 2026
+v21doc-stop-4M / nind / build ... 388.6 s
+v21doc-stop-4M / nind / search ... 131.8 s
+v21doc-stop-4M / nind-8s / build ... 196.8 s
+v21doc-stop-4M / nind-8s / search ... 168.4 s
+v21doc-stop-4M / nind-32s / build ... 174.3 s
+v21doc-stop-4M / nind-32s / search ... 223.3 s
+v21doc-stop-4M / nind-4t / search ... 56.7 s
+v21doc-stop-4M / nind-8t / search ... 70.9 s
+v21doc-stop-4M / nind-8s-8t / search ... 49.7 s
+v21doc-stop-4M / nind-32s-8t / search ... 50.6 s
+Fri Nov 20 11:49:05 AM CET 2026
+v21doc-stop / nind / build ... 993.1 s
+v21doc-stop / nind / search ... 373.2 s
+v21doc-stop / nind / update ... 1035.7 s
+v21doc-stop / nind-8s / build ... 487.1 s
+v21doc-stop / nind-8s / search ... 489.2 s
+v21doc-stop / nind-8s / update ... 529.3 s
+v21doc-stop / nind-32s / build ... 473.9 s
+v21doc-stop / nind-32s / search ... 771.3 s
+v21doc-stop / nind-32s / update ... 468.3 s
+v21doc-stop / nind-4t / search ... 176.3 s
+v21doc-stop / nind-8t / search ... 129.2 s
+v21doc-stop / nind-8s-8t / search ... 127.6 s
+v21doc-stop / nind-32s-8t / search ... 138.8 s
+Fri Nov 20 01:42:15 PM CET 2026
+v21doc / nind / build ... 1018.6 s
+v21doc / nind / search ... 298.3 s
+v21doc / nind-8s / build ... 683.7 s
+v21doc / nind-8s / search ... 401.5 s
+v21doc / nind-8t / search ... 95.0 s
+v21doc / nind-8s-8t / search ... 84.0 s
+v21doc-stop-trec / nind / search ... 52.9 s
+v21doc-stop-trec / nind-8s / search ... 63.7 s
+v21doc-stop-trec / nind-32s / search ... 83.4 s
+v21doc-stop-trec / nind / search ... 41.0 s
+v21doc-stop-trec / nind-8s / search ... 48.3 s
+v21doc-stop-trec / nind-32s / search ... 66.0 s
+v21doc-trec / nind / search ... 48.1 s
+v21doc-trec / nind-8s / search ... 62.0 s
+v21doc-trec / nind / search ... 46.4 s
+v21doc-trec / nind-8s / search ... 57.9 s
+verify v21doc-stop nind
+{"segment": "work/v21doc/v21doc-stop/nind/index/corpus.gen-000001-01ece79e/corpus", "seconds": 772.2, "peak_gb": 3.23, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 4822777083, "problems": "[]", "problems_nb": 0, "terms_nb": 39309286, "with_local_index": false, "words_nb": 3930928
+verify v21doc-stop nind-8s
+{"segment": "work/v21doc/v21doc-stop/nind-8s/index/corpus.gen-000001-94547a32/seg-000007-cfd9a886/corpus", "seconds": 132.4, "peak_gb": 1.01, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 604922314, "problems": "[]", "problems_nb": 0, "terms_nb": 7519669, "with_local_index": false
+verify v21doc nind
+{"segment": "work/v21doc/v21doc/nind/index/corpus.gen-000001-b125c15c/corpus", "seconds": 769.3, "peak_gb": 3.23, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 5094127885, "problems": "[]", "problems_nb": 0, "terms_nb": 39309319, "with_local_index": false, "words_nb": 39309319}
+verify v21doc nind-8s
+{"segment": "work/v21doc/v21doc/nind-8s/index/corpus.gen-000001-2b3dd3c5/seg-000007-3a481ba4/corpus", "seconds": 142.3, "peak_gb": 1.02, "documents_nb": 0, "format_v2": true, "ok": true, "postings_nb": 644640196, "problems": "[]", "problems_nb": 0, "terms_nb": 7609734, "with_local_index": false, "wo
+Fri Nov 20 04:03:30 PM CET 2026
+STAGE10 V21DOC DONE
+v2-stop / nind / search ... 372.1 s
+nind cap infinity {"cap": "max", "peak": 15950491648, "anon_peak": 1591701504, "status": 0, "events": "low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 "}
+v2-stop / nind-8s-8t / search ... 80.5 s
+nind-8s-8t cap infinity {"cap": "max", "peak": 16090742784, "anon_peak": 1379721216, "status": 0, "events": "low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 "}
+v2-stop / nind / search ... 328.8 s
+nind cap 10340806246 {"cap": "10340802560", "peak": 10340802560, "anon_peak": 1591549952, "status": 0, "events": "low 0 high 0 max 5082 oom 0 oom_kill 0 oom_group_kill 0 "}
+v2-stop / nind-8s-8t / search ... 142.9 s
+nind-8s-8t cap 10107627929 {"cap": "10107625472", "peak": 10107625472, "anon_peak": 1378422784, "status": 0, "events": "low 0 high 0 max 6810 oom 0 oom_kill 0 oom_group_kill 0 "}
+Fri Nov 20 04:19:53 PM CET 2026
+v2-stop / nind / search ... 491.2 s
+nind cap 6045838950 {"cap": "6045835264", "peak": 6045835264, "anon_peak": 1591529472, "status": 0, "events": "low 0 high 0 max 37955 oom 0 oom_kill 0 oom_group_kill 0 "}
+v2-stop / nind-8s-8t / search ... 366.2 s
+nind-8s-8t cap 5812660633 {"cap": "5812658176", "peak": 5812658176, "anon_peak": 1378426880, "status": 0, "events": "low 0 high 0 max 55656 oom 0 oom_kill 0 oom_group_kill 0 "}
+Fri Nov 20 04:34:39 PM CET 2026
+v2-stop / nind / search ... 1099.3 s
+nind cap 3898355302 {"cap": "3898351616", "peak": 3898351616, "anon_peak": 1591681024, "status": 0, "events": "low 0 high 0 max 251411 oom 0 oom_kill 0 oom_group_kill 0 "}
+v2-stop / nind-8s-8t / search ... 877.0 s
+nind-8s-8t cap 3665176985 {"cap": "3665174528", "peak": 3665174528, "anon_peak": 1378701312, "status": 0, "events": "low 0 high 0 max 295116 oom 0 oom_kill 0 oom_group_kill 0 "}
+Fri Nov 20 05:08:02 PM CET 2026
+v2-stop / nind / search ... 1558.5 s
+nind cap 2824613478 {"cap": "2824609792", "peak": 2824609792, "anon_peak": 1591549952, "status": 0, "events": "low 0 high 0 max 655657 oom 0 oom_kill 0 oom_group_kill 0 "}
+v2-stop / nind-8s-8t / search ... 1335.2 s
+nind-8s-8t cap 2591435161 {"cap": "2591432704", "peak": 2591432704, "anon_peak": 1379344384, "status": 0, "events": "low 0 high 0 max 725537 oom 0 oom_kill 0 oom_group_kill 0 "}
+Fri Nov 20 05:56:43 PM CET 2026
+Fri Nov 20 05:56:43 PM CET 2026
+STAGE10 DONE

@@ -575,8 +575,8 @@ On one thread, nind's top 10 takes {docs_nind} ms at 10.96M documents, Lucene's 
 {docs_nind_1000} ms against {docs_lucene_1000} ms; an index of 8 segments searched with 8 threads, {docs_8s8t} ms. On the
 judged TREC topics below, Lucene's top 10 is the faster one ({docs_trec_lucene} ms against {docs_trec_nind}). nind's
 builds are faster and take more memory than Lucene's ({docs_nind_mem} GB for one index without local index, Lucene
-{docs_lucene_mem} GB), its index a third more space (its block directories and its rare terms' definitions: see
-`docs/TODO.md`, "Long documents"). The first update of its 32-segment index writes one segment ({docs_32s_update} s;
+{docs_lucene_mem} GB), its index more space ({docs_nind_size} GB against {docs_lucene_size}: its term index, in
+format v3 since `a3f44c6`, and its lexicon; see `docs/proposals/format-v3.md`). The first update of its 32-segment index writes one segment ({docs_32s_update} s;
 it merged 9.8M documents, in 1,689 s, before merges were limited by their term index's bytes). `verify_index` read back every definition of the one-index and 8-segment builds (39.3M terms,
 4.8G postings; 5.1G with stopwords).
 
@@ -838,6 +838,8 @@ def main():
         docs_trec_nind=get("v21doc-stop-trec", "nind", "k10_p50"), docs_trec_lucene=get("v21doc-stop-trec", "lucene", "k10_p50"),
         docs_nind_mem=get("v21doc-stop", "nind", "build_mem", 0, 1024),
         docs_lucene_mem=get("v21doc-stop", "lucene", "build_mem", 0, 1024),
+        docs_nind_size=get("v21doc-stop", "nind", "index_mb", 1, 1000),
+        docs_lucene_size=get("v21doc-stop", "lucene", "index_mb", 1, 1000),
         docs_overlap_lucene=overlap("lucene", "v21doc-stop"),
         docs_image=image("msmarco-v21doc", "MS MARCO v2.1 documents, 10.96M web pages: search latency, build time, "
                                            "index size and update time per system; the same data is in the table below."),

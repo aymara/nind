@@ -724,7 +724,8 @@ Prefixes of 1M and 4M documents. nind 4.2.2 (4.2.0's code), the same Lucene and 
 - **Builds: faster, three to four times the memory.** One index 1,802 s and 77.5 GB (6 bytes a
   token), against 1,360 s and 20.9 GB for Lucene, tantivy 528 s and 4.7 GB; 8 segments 626 s and
   69 GB (8 builds at once), 32 segments 538 s and 20.5 GB. With stopwords: 2,024 s and 94.8 GB.
-- **Indexes a third larger**: 11.2 GB against 8.45 (tantivy 9.06).
+- **Indexes a third larger**: 11.2 GB against 8.45 (tantivy 9.06); 9.9 GB with format v3 (stage 10,
+  `results/2026-11-20-server`: term index 10,235 -> 8,855 MB, searches and results unchanged).
 - **Updates of 1%**: 13.8 s for one index (Lucene 13.1, tantivy 6.7), 11.9 s for 8 segments; the
   32-segment index's first update merged a tier of 9.76M documents: 1,689 s.
 - **The same BM25.** dev nDCG@10 0.2248 (nind, every layout), 0.2240 (Lucene), 0.2237 (tantivy);
