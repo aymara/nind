@@ -1146,8 +1146,10 @@ def test_search_with_sparse_document_ids(tmp_path):
     assert [doc_id for doc_id, _ in expected["rareb"]] == [4_000_000_000]
     for _ in range(3):
         for query in queries:
-            assert engine.search(query, top_k=None) == expected[query], query
-            assert engine.search(query, top_k=5) == expected[query][:5], query
+            # (scores equal to rounding: the native scorer and the Python formula differ in the
+            # last bit on some compilers and C libraries, e.g. GitHub's ubuntu-latest)
+            assert same_results(engine.search(query, top_k=None), expected[query]), query
+            assert same_results(engine.search(query, top_k=5), expected[query][:5]), query
 
 
 def test_search_scales_with_the_postings_not_the_corpus(tmp_path):
